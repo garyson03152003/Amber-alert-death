@@ -96,7 +96,7 @@ def run_heterogeneity(df: pd.DataFrame) -> pd.DataFrame:
     for lbl, hrs in [
         ("Alert 10pm–midnight", list(range(22, 24))),
         ("Alert midnight–3am",  list(range(0,  3))),
-        ("Alert 3am–5am",       list(range(3,  5))),
+        ("Alert 3am–6am",       list(range(3,  6))),
     ]:
         sub = df.copy()
         sub["night_alert"] = (

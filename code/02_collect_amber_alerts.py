@@ -422,17 +422,6 @@ def add_time_fields(df: pd.DataFrame) -> pd.DataFrame:
         for band, (lo, hi) in NIGHT_BANDS.items():
             if lo <= h < hi:
                 return band
-            if lo > hi:  # wraps midnight — handled by separate range logic
-                pass
-        # early_night 22-24
-        if 22 <= h < 24:
-            return "early_night"
-        # deep_night 0-3
-        if 0 <= h < 3:
-            return "deep_night"
-        # late_night 3-5
-        if 3 <= h < 5:
-            return "late_night"
         return None
 
     df["night_band"] = df["hour_local"].apply(classify_band)

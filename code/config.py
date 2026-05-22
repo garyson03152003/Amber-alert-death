@@ -32,13 +32,13 @@ STUDY_YEARS = list(range(2013, 2023))   # inclusive on both ends
 # ---------------------------------------------------------------------------
 # AMBER Alerts issued between these hours (local time) count as "nighttime"
 NIGHT_START_HOUR = 22   # 10 pm
-NIGHT_END_HOUR = 5      # 5 am  (wraps past midnight)
+NIGHT_END_HOUR = 6      # 6 am  (wraps past midnight)
 
 # Sub-bands for heterogeneity analysis
 NIGHT_BANDS = {
     "early_night":  (22, 24),   # 10 pm – midnight
     "deep_night":   (0,  3),    # midnight – 3 am  (deepest sleep)
-    "late_night":   (3,  5),    # 3 am – 5 am
+    "late_night":   (3,  6),    # 3 am – 6 am
 }
 
 # ---------------------------------------------------------------------------
