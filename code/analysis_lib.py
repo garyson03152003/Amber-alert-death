@@ -98,9 +98,10 @@ def fe_ols_from_panel(
     extra_fes : additional FE column names to absorb (e.g. ["year_code"])
     label : string label for results dict
     """
-    cols = ["fips", "county_code", "dow_month_code"] + extra_fes + \
+    cols = ["fips", "county_code", "state_code", "dow_month_code"] + extra_fes + \
            [outcome, treatment] + controls + \
-           ([weights_col] if weights_col else [])
+           ([weights_col] if weights_col else []) + \
+           ([cluster_col] if cluster_col not in ("county_code", "state_code") else [])
     sub  = df[[c for c in dict.fromkeys(cols) if c in df.columns]].dropna()
     n    = len(sub)
 
