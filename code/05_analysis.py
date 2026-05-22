@@ -494,36 +494,66 @@ def run_daytime_placebo(df: pd.DataFrame) -> pd.DataFrame:
 
 def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Dynamic effects using timing-aligned outcome (fatals_next_commute).
+    Dynamic effects, two specs:
+      (1) Raw fatality count (fatals_next_commute)
+      (2) Combined (fatalities + serious injuries) rate per 100k, log-pop WLS
 
-    For each k ∈ {-3,...,+3} we shift fatals_next_commute by k days within
-    each county, so k=0 is the aligned disrupted-commute morning, k=-1 is
-    the morning before, k=+1 is the morning after, etc.
+    For each k ∈ {-3,...,+3} we shift the outcome by k days within each
+    county: k=0 = aligned disrupted-commute morning, k<0 = pre-trends,
+    k>0 = post-event dynamics.
 
-    Pre-trends (k < 0) should be flat; effect should peak at k=0.
-
-    Memory note: we work on a lean DataFrame (only FE-identifier columns +
-    treatment + shifted outcome) to avoid OOM when copying within the loop.
+    Memory note: lean DataFrame (only needed columns) to avoid OOM.
     """
-    # Build aligned outcome, then slim down to only what fe_ols needs
     df_al = add_aligned_outcome(df)
-    FE_COLS = ["fips", "date", "county_code", "state_code",
-               "dow_month_code", "night_alert", "fatals_next_commute"]
-    lean = df_al[FE_COLS].sort_values(["fips", "date"]).copy()
-    del df_al  # free ~3 GB
+
+    has_combined = "combined_next_commute" in df_al.columns
+    has_pop      = "population" in df_al.columns and "log_pop" in df_al.columns
+
+    BASE_COLS = ["fips", "date", "county_code", "state_code",
+                 "dow_month_code", "night_alert", "fatals_next_commute"]
+    extra = ([c for c in ["combined_next_commute", "population", "log_pop"]
+              if c in df_al.columns])
+    lean = df_al[BASE_COLS + extra].sort_values(["fips", "date"]).copy()
+    del df_al
+
+    # Pre-compute county mean population for rate denominator (time-invariant)
+    if has_pop:
+        county_mean_pop = lean.groupby("fips")["population"].transform("mean")
+        lean["pop_100k"] = lean["population"].fillna(county_mean_pop) / 100_000
+        # Combined rate at k=0 base (we shift the count and re-divide)
+        if has_combined:
+            lean["combined_rate_nc"] = lean["combined_next_commute"] / lean["pop_100k"]
 
     results = []
     for k in range(-3, 4):
-        col = f"aligned_k{k:+d}"
-        # shift(-k): positive k → look forward (future commute), negative → pre-trend
-        lean[col] = lean.groupby("fips")["fatals_next_commute"].shift(-k)
-        sub = lean.dropna(subset=[col])
-        r = fe_ols_from_panel(sub, col, county=True, dm=True,
+        # --- spec 1: raw count ---
+        col_c = f"_yk_count"
+        lean[col_c] = lean.groupby("fips")["fatals_next_commute"].shift(-k)
+        sub = lean.dropna(subset=[col_c])
+        r = fe_ols_from_panel(sub, col_c, county=True, dm=True,
                               cluster_col="state_code",
-                              label=f"k={k:+d}")
+                              label=f"k={k:+d} [count]")
         r["k"] = k
+        r["spec"] = "count"
         results.append(r)
-        lean.drop(columns=[col], inplace=True)   # keep lean footprint
+        lean.drop(columns=[col_c], inplace=True)
+
+        # --- spec 2: combined rate, log-pop WLS ---
+        if has_combined and has_pop:
+            col_r = f"_yk_rate"
+            # Shift the count, then normalise — avoids double-applying pop
+            shifted_count = lean.groupby("fips")["combined_next_commute"].shift(-k)
+            lean[col_r] = shifted_count / lean["pop_100k"]
+            sub_r = lean.dropna(subset=[col_r, "log_pop"])
+            r2 = fe_ols_from_panel(sub_r, col_r, county=True, dm=True,
+                                   weights_col="log_pop",
+                                   cluster_col="state_code",
+                                   label=f"k={k:+d} [comb/100k logWLS]")
+            r2["k"] = k
+            r2["spec"] = "comb_rate_logWLS"
+            results.append(r2)
+            lean.drop(columns=[col_r], inplace=True)
+
     return pd.DataFrame(results)
 
 

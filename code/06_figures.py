@@ -63,7 +63,7 @@ def event_study(panel: pd.DataFrame) -> None:
     es_path = OUTPUT_TABS / "reg_event_study.csv"
     if not es_path.exists():
         log.warning("reg_event_study.csv not found — re-computing (slow).")
-        # Fallback: re-compute using timing-aligned outcome
+        # Fallback: re-compute using timing-aligned outcome (raw count only)
         from analysis_lib import prep_panel
         from analysis_lib import fe_ols_from_panel as _ols
         df = prep_panel(panel.copy())
@@ -79,36 +79,75 @@ def event_study(panel: pd.DataFrame) -> None:
             r = _ols(sub, col, county=True, dm=True,
                      cluster_col="state_code", label=f"k={k:+d}")
             r["k"] = k
+            r["spec"] = "count"
             rows.append(r)
         est = pd.DataFrame(rows)
     else:
         est = pd.read_csv(es_path)
 
     est = est.dropna(subset=["coef"])
-    est = est.sort_values("k")
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.axhline(0, color="black", lw=0.8, ls="--")
-    # highlight k=0 (the alert-morning disrupted commute)
-    ax.axvspan(-0.5, 0.5, alpha=0.07, color=BLUE)
+    # Detect whether multi-spec output is available
+    has_multi_spec = "spec" in est.columns and est["spec"].nunique() > 1
+    specs = [("count", "Raw fatality count"),
+             ("comb_rate_logWLS", "Combined (fatal + serious inj.) per 100k, log-pop WLS")]
 
-    ax.errorbar(
-        est["k"], est["coef"],
-        yerr=[est["coef"] - est["ci_lo"], est["ci_hi"] - est["coef"]],
-        fmt="o", color=BLUE, capsize=4, lw=1.5, ms=6,
-        label="Point estimate (95% CI, state-clustered)",
-    )
-    ax.set_xlabel("Days relative to nighttime AMBER Alert (aligned to disrupted commute)")
-    ax.set_ylabel("Additional traffic fatalities (county-day, FE-adjusted)")
-    ax.set_title("Fig. 1  Event Study Around Nighttime AMBER Alerts\n"
-                 r"(Timing-aligned outcome: $fatals\_next\_commute$)")
-    ks = sorted(est["k"].tolist())
-    ax.set_xticks(ks)
-    ax.set_xticklabels(
-        ["k−3", "k−2", "k−1", "k=0\n(alert)", "k+1", "k+2", "k+3"],
-        fontsize=9,
-    )
-    ax.legend(frameon=False)
+    if has_multi_spec:
+        # Two-panel figure: left = count spec, right = combined rate WLS
+        fig, axes = plt.subplots(1, 2, figsize=(13, 4.5), sharey=False)
+        for ax, (spec_key, spec_title) in zip(axes, specs):
+            sub = est[est["spec"] == spec_key].sort_values("k")
+            if sub.empty:
+                continue
+            ax.axhline(0, color="black", lw=0.8, ls="--")
+            ax.axvspan(-0.5, 0.5, alpha=0.07, color=BLUE)
+            ax.errorbar(
+                sub["k"], sub["coef"],
+                yerr=[sub["coef"] - sub["ci_lo"], sub["ci_hi"] - sub["coef"]],
+                fmt="o", color=BLUE, capsize=4, lw=1.5, ms=6,
+                label="Point est. (95% CI, state-cl.)",
+            )
+            ks = sorted(sub["k"].tolist())
+            ax.set_xticks(ks)
+            ax.set_xticklabels(
+                ["k−3", "k−2", "k−1", "k=0\n(alert)", "k+1", "k+2", "k+3"],
+                fontsize=8,
+            )
+            ax.set_xlabel("Days relative to nighttime AMBER Alert\n"
+                          "(aligned to disrupted commute)", fontsize=9)
+            if spec_key == "count":
+                ax.set_ylabel("Additional fatalities (county-day, FE-adjusted)")
+            else:
+                ax.set_ylabel("Combined injuries per 100k (FE-adjusted, log-pop WLS)")
+            ax.set_title(spec_title, fontsize=9)
+            ax.legend(frameon=False, fontsize=8)
+        fig.suptitle("Fig. 1  Event Study Around Nighttime AMBER Alerts "
+                     "(Timing-Aligned Outcome)", fontsize=11, y=1.01)
+        fig.tight_layout()
+    else:
+        # Single-spec fallback (original layout)
+        sub = (est[est["spec"] == "count"].sort_values("k")
+               if "spec" in est.columns else est.sort_values("k"))
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.axhline(0, color="black", lw=0.8, ls="--")
+        ax.axvspan(-0.5, 0.5, alpha=0.07, color=BLUE)
+        ax.errorbar(
+            sub["k"], sub["coef"],
+            yerr=[sub["coef"] - sub["ci_lo"], sub["ci_hi"] - sub["coef"]],
+            fmt="o", color=BLUE, capsize=4, lw=1.5, ms=6,
+            label="Point estimate (95% CI, state-clustered)",
+        )
+        ax.set_xlabel("Days relative to nighttime AMBER Alert (aligned to disrupted commute)")
+        ax.set_ylabel("Additional traffic fatalities (county-day, FE-adjusted)")
+        ax.set_title("Fig. 1  Event Study Around Nighttime AMBER Alerts\n"
+                     r"(Timing-aligned outcome: $fatals\_next\_commute$)")
+        ks = sorted(sub["k"].tolist())
+        ax.set_xticks(ks)
+        ax.set_xticklabels(
+            ["k−3", "k−2", "k−1", "k=0\n(alert)", "k+1", "k+2", "k+3"],
+            fontsize=9,
+        )
+        ax.legend(frameon=False)
     save(fig, "fig1_event_study")
 
 
