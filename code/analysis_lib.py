@@ -19,6 +19,13 @@ def prep_panel(df: pd.DataFrame) -> pd.DataFrame:
     df["dow_month_code"] = pd.Categorical(
         df["dow"].astype(str) + "_" + df["month"].astype(str)
     ).codes.astype(np.int32)
+    df["year_code"] = pd.Categorical(df["year"]).codes.astype(np.int32)
+    df["dow_year_code"] = pd.Categorical(
+        df["dow"].astype(str) + "_" + df["year"].astype(str)
+    ).codes.astype(np.int32)
+    df["year_month_code"] = pd.Categorical(
+        df["year"].astype(str) + "_" + df["month"].astype(str)
+    ).codes.astype(np.int32)
     return df
 
 
@@ -29,10 +36,11 @@ def fe_ols_from_panel(
     controls: list = [],
     county: bool = True,
     dm: bool = True,
+    extra_fes: list = [],
     label: str = "",
 ) -> dict:
     """
-    Two-way FE OLS (county + dow×month) via pyhdfe absorption.
+    Multi-way FE OLS via pyhdfe absorption.
     Clustered SEs at the county level via vectorised bincount sandwich.
 
     Parameters
@@ -43,10 +51,15 @@ def fe_ols_from_panel(
     controls : additional regressor columns
     county : absorb county FE
     dm : absorb dow×month FE
+    extra_fes : additional FE column names to absorb (e.g. ["year_code"])
     label : string label for results dict
     """
-    cols = ["fips", "county_code", "dow_month_code", outcome, treatment] + controls
-    sub  = df[[c for c in cols if c in df.columns]].dropna()
+    fe_col_names = (["county_code"] if county else []) + \
+                   (["dow_month_code"] if dm else []) + \
+                   [c for c in extra_fes if c not in ("county_code", "dow_month_code")]
+    cols = ["fips", "county_code", "dow_month_code"] + extra_fes + \
+           [outcome, treatment] + controls
+    sub  = df[[c for c in dict.fromkeys(cols) if c in df.columns]].dropna()
     n    = len(sub)
 
     if n < 500:
@@ -61,6 +74,9 @@ def fe_ols_from_panel(
         fe_parts.append(sub["county_code"].to_numpy())
     if dm:
         fe_parts.append(sub["dow_month_code"].to_numpy())
+    for col in extra_fes:
+        if col in sub.columns and col not in ("county_code", "dow_month_code"):
+            fe_parts.append(sub[col].to_numpy())
 
     if fe_parts:
         ids_arr = (np.column_stack(fe_parts) if len(fe_parts) > 1
@@ -81,9 +97,11 @@ def fe_ols_from_panel(
     e = y_r - X_r @ coef
     k = X_r.shape[1]
 
-    # Degrees of freedom
+    # Degrees of freedom (approximate: sum of unique FE cells)
     n_fe = (sub["county_code"].nunique() if county else 0) + \
-           (sub["dow_month_code"].nunique() if dm else 0)
+           (sub["dow_month_code"].nunique() if dm else 0) + \
+           sum(sub[c].nunique() for c in extra_fes
+               if c in sub.columns and c not in ("county_code", "dow_month_code"))
     dof_resid = max(n - k - n_fe, 1)
 
     # Vectorised cluster-robust sandwich

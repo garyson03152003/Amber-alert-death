@@ -62,6 +62,19 @@ def run_baseline(df: pd.DataFrame) -> pd.DataFrame:
     else:
         log.warning("Weather controls sparse — skipping model (4).")
 
+    log.info("(5) Baseline + Year FE")
+    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=True,
+                                     extra_fes=["year_code"],
+                                     label="(5) + Year FE"))
+    log.info("(6) County FE + DoW×Year FE")
+    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=False,
+                                     extra_fes=["dow_year_code"],
+                                     label="(6) DoW×Year FE"))
+    log.info("(7) County FE + Year×Month FE")
+    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=False,
+                                     extra_fes=["year_month_code"],
+                                     label="(7) Year×Month FE"))
+
     return pd.DataFrame(results)
 
 
