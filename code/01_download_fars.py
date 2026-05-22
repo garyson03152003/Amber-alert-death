@@ -58,8 +58,8 @@ def extract_accident_csv(zip_path: Path) -> pd.DataFrame:
 
 
 def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Upper-case all column names for consistent access."""
-    df.columns = [c.strip().upper() for c in df.columns]
+    """Upper-case all column names for consistent access, stripping any BOM."""
+    df.columns = [c.strip().lstrip("﻿\xef\xbb\xbf").strip().upper() for c in df.columns]
     return df
 
 

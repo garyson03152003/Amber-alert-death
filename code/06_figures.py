@@ -1,14 +1,14 @@
 """
-06_figures.py — Generate all figures for the paper.
+06_figures.py — Generate all paper figures.
 
-Figures produced:
-    Fig 1: Event-study plot  — fatalities in days t-3 through t+3 around alert days
-    Fig 2: Alert timing distribution — histogram of alert issuance hour (local time)
-    Fig 3: Heterogeneity forest plot — β by night band
-    Fig 4: Geographic distribution — state-level alert counts (choropleth)
-    Fig 5: Coefficient plot — placebo + main + second-day estimates
+Imports the regression function from 05_analysis to ensure consistent FE handling.
 
-Output directory: output/figures/
+Figures:
+  Fig 1: Event study  (β at t−3…t+3 around night alert)
+  Fig 2: Alert timing histogram
+  Fig 3: Heterogeneity forest plot
+  Fig 4: Geographic bar chart (top states by night alert count)
+  Fig 5: Placebo coefficient plot
 
 Run: python code/06_figures.py
 """
@@ -17,35 +17,41 @@ import sys
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")   # non-interactive backend for headless servers
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 import pandas as pd
-import seaborn as sns
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC, OUTPUT_FIGS, OUTPUT_TABS, EVENT_WINDOW
 from utils import get_logger
 
+# Reuse the efficient two-way FE estimator from 05_analysis
+from analysis_lib import fe_ols_from_panel
+
 log = get_logger("06_figures")
 
-# ---------------------------------------------------------------------------
-# Style
-# ---------------------------------------------------------------------------
 plt.rcParams.update({
     "font.family":    "serif",
-    "font.serif":     ["Computer Modern Roman", "DejaVu Serif", "Times New Roman"],
     "font.size":      11,
-    "axes.spines.top":    False,
-    "axes.spines.right":  False,
-    "figure.dpi":     150,
-    "savefig.dpi":    300,
-    "savefig.bbox":   "tight",
+    "axes.spines.top":   False,
+    "axes.spines.right": False,
+    "figure.dpi":  150,
+    "savefig.dpi": 300,
+    "savefig.bbox": "tight",
 })
 BLUE = "#2166ac"
 RED  = "#d6604d"
 GRAY = "#888888"
+
+
+def save(fig, stem: str) -> None:
+    out = OUTPUT_FIGS / stem
+    fig.savefig(out.with_suffix(".pdf"))
+    fig.savefig(out.with_suffix(".png"))
+    log.info("Saved %s", out.with_suffix(".png"))
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -53,101 +59,50 @@ GRAY = "#888888"
 # ---------------------------------------------------------------------------
 
 def event_study(panel: pd.DataFrame) -> None:
-    """
-    For each alert county-day, compute mean fatalities at lags t-3 to t+3
-    relative to the alert, controlling for county and dow×month means.
-
-    We use a regression-based event study: estimate
-        fatals_{c,t+k} = β_k · NightAlert_{c,t} + γ_c + δ_{dow×month}
-    for k ∈ {-3, …, +3} and plot β_k with 95% CIs.
-    """
-    log.info("Building event study...")
-
-    # Columns we need
-    need = ["fips", "date", "night_alert", "dow_x_month",
-            "fatals_t0", "fatals_t1", "fatals_t2", "fatals_tm1"]
-    sub = panel[[c for c in need if c in panel.columns]].dropna()
-
-    # Build dataset with fatalities at each event-window lag/lead
-    # We compute this by shifting within county
-    sub = sub.sort_values(["fips", "date"])
-
+    log.info("Fig 1: Event study")
     window = range(EVENT_WINDOW[0], EVENT_WINDOW[1] + 1)
     estimates = []
 
     for k in window:
-        # Shift fatals_t0 by k periods within county (negative k = look back)
-        sub[f"y_k{k}"] = sub.groupby("fips")["fatals_t0"].shift(-k)
+        # Build outcome for this lag: shift fatals_t0 by k within county
+        # negative k → look back (placebo), positive → look forward
+        panel["_yk"] = panel.groupby("fips")["fatals_t0"].shift(-k)
+        sub = panel.dropna(subset=["_yk"]).copy()
+        r = fe_ols_from_panel(sub, "_yk", county=True, dm=True,
+                              label=f"k={k}")
+        estimates.append({
+            "k": k,
+            "coef":  r.get("coef", np.nan),
+            "ci_lo": r.get("ci_lo", np.nan),
+            "ci_hi": r.get("ci_hi", np.nan),
+        })
+        log.info("  k=%+d  β=%.4f  (%.4f, %.4f)",
+                 k, r.get("coef",np.nan), r.get("ci_lo",np.nan), r.get("ci_hi",np.nan))
 
-    # For each k, regress y_k ~ night_alert + county_dummies + dow_x_month_dummies
-    # We do a quick within-estimator: demean by county, then regress
-    sub_wide = sub[["fips", "date", "night_alert", "dow_x_month"]
-                   + [f"y_k{k}" for k in window]].dropna()
-
-    # County demeaning
-    county_means = sub_wide.groupby("fips")[
-        ["night_alert"] + [f"y_k{k}" for k in window]
-    ].transform("mean")
-    demeaned = sub_wide[["night_alert"] + [f"y_k{k}" for k in window]] - county_means
-
-    # dow×month dummies
-    dm_dummies = pd.get_dummies(sub_wide["dow_x_month"], drop_first=True).astype(float)
-
-    import statsmodels.api as sm
-
-    for k in window:
-        y = demeaned[f"y_k{k}"].dropna()
-        X_raw = demeaned.loc[y.index, "night_alert"]
-        dm = dm_dummies.loc[y.index]
-        X = sm.add_constant(pd.concat([X_raw, dm], axis=1).astype(float))
-        try:
-            res = sm.OLS(y, X).fit(
-                cov_type="cluster", cov_kwds={"groups": sub_wide.loc[y.index, "fips"]}
-            )
-            coef = res.params["night_alert"]
-            ci   = res.conf_int().loc["night_alert"]
-            estimates.append({"k": k, "coef": coef, "ci_lo": ci[0], "ci_hi": ci[1]})
-        except Exception as exc:
-            log.warning("Event study k=%d failed: %s", k, exc)
-            estimates.append({"k": k, "coef": np.nan, "ci_lo": np.nan, "ci_hi": np.nan})
+    panel.drop(columns=["_yk"], inplace=True, errors="ignore")
 
     est = pd.DataFrame(estimates)
-
-    # Plot
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
-    ax.axvline(-0.5, color=GRAY, linewidth=0.6, linestyle=":")   # alert day separator
-    ax.fill_between([0.5, 1.5], -10, 10, alpha=0.06, color=BLUE, label="_")
-
     mask = est["coef"].notna()
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.axhline(0, color="black", lw=0.8, ls="--")
+    ax.axvspan(0.5, 1.5, alpha=0.07, color=BLUE)   # highlight t+1 estimate
+
     ax.errorbar(
-        est.loc[mask, "k"],
-        est.loc[mask, "coef"],
-        yerr=[
-            est.loc[mask, "coef"] - est.loc[mask, "ci_lo"],
-            est.loc[mask, "ci_hi"] - est.loc[mask, "coef"],
-        ],
-        fmt="o",
-        color=BLUE,
-        capsize=4,
-        linewidth=1.5,
-        markersize=6,
+        est.loc[mask, "k"], est.loc[mask, "coef"],
+        yerr=[est.loc[mask,"coef"]-est.loc[mask,"ci_lo"],
+              est.loc[mask,"ci_hi"]-est.loc[mask,"coef"]],
+        fmt="o", color=BLUE, capsize=4, lw=1.5, ms=6,
         label="Point estimate (95% CI)",
     )
-
-    ax.set_xlabel("Days relative to nighttime AMBER Alert (day 0 = alert night)")
-    ax.set_ylabel("Additional fatalities (county-day, demeaned)")
-    ax.set_title("Fig. 1  Event Study: Traffic Fatalities Around Nighttime AMBER Alerts")
+    ax.set_xlabel("Days relative to nighttime AMBER Alert")
+    ax.set_ylabel("Additional traffic fatalities (county-day, FE-adjusted)")
+    ax.set_title("Fig. 1  Event Study Around Nighttime AMBER Alerts")
     ax.set_xticks(list(window))
-    ax.set_xticklabels([f"t{k:+d}" if k != 0 else "t" for k in window])
+    ax.set_xticklabels([f"t{k:+d}" if k != 0 else "t (alert night)" for k in window],
+                       fontsize=9)
     ax.legend(frameon=False)
-    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
-
-    out = OUTPUT_FIGS / "fig1_event_study.pdf"
-    fig.savefig(out)
-    fig.savefig(out.with_suffix(".png"))
-    log.info("Saved %s", out)
-    plt.close(fig)
+    save(fig, "fig1_event_study")
 
 
 # ---------------------------------------------------------------------------
@@ -155,165 +110,114 @@ def event_study(panel: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 
 def alert_timing(amber: pd.DataFrame) -> None:
-    """Histogram of AMBER Alert issuance hours (local time)."""
+    log.info("Fig 2: Alert timing")
     fig, ax = plt.subplots(figsize=(7, 3.5))
-
     hours = amber["hour_local"].dropna()
-    ax.hist(hours, bins=24, range=(0, 24), color=BLUE, edgecolor="white", linewidth=0.4)
-
-    # Shade nighttime window
-    ax.axvspan(22, 24, alpha=0.15, color=RED, label="Nighttime window")
+    ax.hist(hours, bins=24, range=(0, 24), color=BLUE, edgecolor="white", lw=0.4)
+    ax.axvspan(22, 24, alpha=0.15, color=RED, label="Nighttime window (10pm–5am)")
     ax.axvspan(0,   5, alpha=0.15, color=RED)
-
-    ax.set_xlabel("Hour of day (local time, 24-hour)")
+    ax.set_xlabel("Hour of day (local time)")
     ax.set_ylabel("Number of alerts")
-    ax.set_title("Fig. 2  Distribution of AMBER Alert Issuance Times")
+    ax.set_title("Fig. 2  AMBER Alert Issuance Times")
     ax.set_xticks(range(0, 25, 2))
     ax.legend(frameon=False)
-
-    out = OUTPUT_FIGS / "fig2_alert_timing.pdf"
-    fig.savefig(out)
-    fig.savefig(out.with_suffix(".png"))
-    log.info("Saved %s", out)
-    plt.close(fig)
+    save(fig, "fig2_alert_timing")
 
 
 # ---------------------------------------------------------------------------
 # Fig 3: Heterogeneity forest plot
 # ---------------------------------------------------------------------------
 
-def heterogeneity_forest(hetero_csv: Path) -> None:
-    """Forest plot of β by sub-group from reg_hetero.csv."""
-    if not hetero_csv.exists():
+def heterogeneity_forest() -> None:
+    log.info("Fig 3: Heterogeneity forest plot")
+    h_path = OUTPUT_TABS / "reg_hetero.csv"
+    if not h_path.exists():
         log.warning("Heterogeneity CSV not found — skipping Fig 3.")
         return
+    h = pd.read_csv(h_path).dropna(subset=["coef"])
 
-    h = pd.read_csv(hetero_csv)
-    h = h.dropna(subset=["coef"])
-
-    fig, ax = plt.subplots(figsize=(6, 0.6 * len(h) + 1.5))
-
+    fig, ax = plt.subplots(figsize=(6, 0.55 * len(h) + 1.5))
     y_pos = range(len(h))
     ax.errorbar(
-        h["coef"], y_pos,
-        xerr=[h["coef"] - h["ci_lo"], h["ci_hi"] - h["coef"]],
-        fmt="o", color=BLUE, capsize=4, linewidth=1.4, markersize=7,
+        h["coef"], list(y_pos),
+        xerr=[h["coef"]-h["ci_lo"], h["ci_hi"]-h["coef"]],
+        fmt="o", color=BLUE, capsize=4, lw=1.4, ms=7,
     )
-    ax.axvline(0, color="black", linewidth=0.8, linestyle="--")
+    ax.axvline(0, color="black", lw=0.8, ls="--")
     ax.set_yticks(list(y_pos))
-    ax.set_yticklabels(h["model"].tolist())
-    ax.set_xlabel("Effect on next-day fatalities (county-day)")
+    ax.set_yticklabels(h["model"].tolist(), fontsize=9)
+    ax.set_xlabel("Effect on next-day traffic fatalities (county-day)")
     ax.set_title("Fig. 3  Heterogeneity Analysis")
     ax.invert_yaxis()
-
-    out = OUTPUT_FIGS / "fig3_heterogeneity.pdf"
-    fig.savefig(out)
-    fig.savefig(out.with_suffix(".png"))
-    log.info("Saved %s", out)
-    plt.close(fig)
+    save(fig, "fig3_heterogeneity")
 
 
 # ---------------------------------------------------------------------------
-# Fig 4: Geographic distribution of alerts
+# Fig 4: Geographic bar chart
 # ---------------------------------------------------------------------------
 
-def geographic_distribution(amber: pd.DataFrame) -> None:
-    """
-    Choropleth of night-alert counts by state.
-    Uses only matplotlib (no geopandas) — plots a simple bar chart as fallback
-    when shapefiles are unavailable.
-    """
-    state_counts = (
-        amber[amber["is_night"]]
-        .groupby("state_fips")["alert_id"]
-        .nunique()
-        .reset_index()
-        .rename(columns={"alert_id": "n_night_alerts"})
-        .sort_values("n_night_alerts", ascending=False)
-        .head(20)
-    )
-
-    # Try to get state abbreviations
+def geographic_bar(amber: pd.DataFrame) -> None:
+    log.info("Fig 4: Geographic distribution")
+    night = amber[amber["is_night"]].copy()
+    sc = (night.groupby("state_fips")["alert_id"].nunique()
+              .reset_index().rename(columns={"alert_id": "n"})
+              .sort_values("n", ascending=False).head(20))
     try:
         import us
-        state_counts["state_abbr"] = state_counts["state_fips"].map(
-            {s.fips: s.abbr for s in us.states.STATES}
-        ).fillna(state_counts["state_fips"])
+        sc["abbr"] = sc["state_fips"].map({s.fips: s.abbr for s in us.states.STATES}
+                                          ).fillna(sc["state_fips"])
     except ImportError:
-        state_counts["state_abbr"] = state_counts["state_fips"]
+        sc["abbr"] = sc["state_fips"]
 
     fig, ax = plt.subplots(figsize=(9, 4))
-    ax.barh(
-        state_counts["state_abbr"],
-        state_counts["n_night_alerts"],
-        color=BLUE, edgecolor="white",
-    )
-    ax.set_xlabel("Number of unique nighttime AMBER Alerts")
+    ax.barh(sc["abbr"], sc["n"], color=BLUE, edgecolor="white")
+    ax.set_xlabel("Unique nighttime AMBER Alerts")
     ax.set_title("Fig. 4  Top 20 States by Nighttime AMBER Alert Count")
     ax.invert_yaxis()
-
-    out = OUTPUT_FIGS / "fig4_geographic.pdf"
-    fig.savefig(out)
-    fig.savefig(out.with_suffix(".png"))
-    log.info("Saved %s", out)
-    plt.close(fig)
+    save(fig, "fig4_geographic")
 
 
 # ---------------------------------------------------------------------------
 # Fig 5: Placebo coefficient plot
 # ---------------------------------------------------------------------------
 
-def placebo_plot(placebo_csv: Path) -> None:
-    """Coefficient plot showing t-1, t, t+1, t+2 estimates side by side."""
-    if not placebo_csv.exists():
+def placebo_plot() -> None:
+    log.info("Fig 5: Placebo coefficient plot")
+    p_path = OUTPUT_TABS / "reg_placebo.csv"
+    if not p_path.exists():
         log.warning("Placebo CSV not found — skipping Fig 5.")
         return
+    p = pd.read_csv(p_path).dropna(subset=["coef"])
 
-    p = pd.read_csv(placebo_csv)
-    p = p.dropna(subset=["coef"])
-
-    # Assign x-axis position by model label
-    label_to_k = {
-        "Placebo: t-1": -1,
-        "Same-day: t":   0,
-        "Main: t+1":     1,
-        "Placebo: t+2":  2,
-    }
+    label_to_k = {"Placebo: t−1": -1, "Same-day: t": 0,
+                  "Main: t+1": 1, "Placebo: t+2": 2}
     p["k"] = p["model"].map(label_to_k)
-    p = p.dropna(subset=["k"])
-
-    colors = [RED if "Placebo" in m else BLUE for m in p["model"]]
+    p = p.dropna(subset=["k"]).sort_values("k")
 
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.axhline(0, color="black", linewidth=0.8, linestyle="--")
-    ax.axvspan(0.5, 1.5, alpha=0.06, color=BLUE)   # highlight main estimate
+    ax.axhline(0, color="black", lw=0.8, ls="--")
+    ax.axvspan(0.5, 1.5, alpha=0.06, color=BLUE)
 
-    ax.errorbar(
-        p["k"], p["coef"],
-        yerr=[p["coef"] - p["ci_lo"], p["ci_hi"] - p["coef"]],
-        fmt="none", ecolor=GRAY, capsize=4, linewidth=1.2,
-    )
+    ax.errorbar(p["k"], p["coef"],
+                yerr=[p["coef"]-p["ci_lo"], p["ci_hi"]-p["coef"]],
+                fmt="none", ecolor=GRAY, capsize=4, lw=1.2)
+
     for _, row in p.iterrows():
         color = RED if "Placebo" in row["model"] else BLUE
         ax.scatter(row["k"], row["coef"], color=color, s=60, zorder=5)
 
     ax.set_xticks([-1, 0, 1, 2])
-    ax.set_xticklabels(["t−1\n(placebo)", "t\n(same day)", "t+1\n(main)", "t+2\n(placebo)"])
-    ax.set_ylabel("Effect on fatalities")
-    ax.set_title("Fig. 5  Main and Placebo Estimates")
+    ax.set_xticklabels(["t−1\n(placebo)", "t\n(same day)",
+                         "t+1\n(main)", "t+2\n(placebo)"])
+    ax.set_ylabel("Effect on fatalities (county-day, FE-adjusted)")
+    ax.set_title("Fig. 5  Main Estimate and Placebo Tests")
 
     from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], marker="o", color="w", markerfacecolor=BLUE, markersize=8, label="Main/same-day"),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor=RED,  markersize=8, label="Placebo"),
-    ]
-    ax.legend(handles=legend_elements, frameon=False)
-
-    out = OUTPUT_FIGS / "fig5_placebo.pdf"
-    fig.savefig(out)
-    fig.savefig(out.with_suffix(".png"))
-    log.info("Saved %s", out)
-    plt.close(fig)
+    ax.legend(handles=[
+        Line2D([0],[0],marker="o",color="w",markerfacecolor=BLUE,ms=8,label="Main / same-day"),
+        Line2D([0],[0],marker="o",color="w",markerfacecolor=RED, ms=8,label="Placebo"),
+    ], frameon=False)
+    save(fig, "fig5_placebo")
 
 
 # ---------------------------------------------------------------------------
@@ -327,32 +231,27 @@ def main() -> None:
     amber_path = DATA_PROC / "amber_alerts_clean.parquet"
 
     if not panel_path.exists():
-        log.error("Panel not found — run 04_build_panel.py first.")
+        log.error("Panel missing — run 04_build_panel.py first.")
         return
 
+    # Import the prep helper to get FE codes
+    from analysis_lib import prep_panel
     panel = pd.read_parquet(panel_path)
+    panel = prep_panel(panel)
+
     amber = pd.read_parquet(amber_path) if amber_path.exists() else pd.DataFrame()
 
-    # Figure 1: Event study
     event_study(panel)
 
-    # Figure 2: Alert timing histogram
     if not amber.empty and "hour_local" in amber.columns:
         alert_timing(amber)
-    else:
-        log.warning("Amber data missing or lacks hour_local — skipping Fig 2.")
 
-    # Figure 3: Heterogeneity forest plot
-    heterogeneity_forest(OUTPUT_TABS / "reg_hetero.csv")
+    heterogeneity_forest()
 
-    # Figure 4: Geographic distribution
     if not amber.empty:
-        geographic_distribution(amber)
-    else:
-        log.warning("Amber data not available — skipping Fig 4.")
+        geographic_bar(amber)
 
-    # Figure 5: Placebo coefficient plot
-    placebo_plot(OUTPUT_TABS / "reg_placebo.csv")
+    placebo_plot()
 
     log.info("All figures saved to output/figures/")
 
