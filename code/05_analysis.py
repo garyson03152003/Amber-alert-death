@@ -78,7 +78,74 @@ def run_baseline(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(results)
 
 
-def run_heterogeneity(df: pd.DataFrame) -> pd.DataFrame:
+def add_aligned_outcome(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construct fatals_next_commute: fatalities on the morning after the disrupted
+    sleep period, aligned correctly by alert timing.
+
+    The key insight is that midnight–6am alerts fire during Wednesday morning
+    (calendar day Wednesday), so they disrupt the Wednesday commute → outcome
+    is fatals_t0 (same-day).  Early-night alerts fire Tuesday 10pm–midnight and
+    disrupt the Wednesday commute → outcome is fatals_t1 (next-day from Tuesday).
+
+    Control rows and early_night rows both use fatals_t1 as the default outcome.
+    Midnight-6am rows (deep_night, late_night) use fatals_t0.
+    """
+    df = df.copy()
+    df["fatals_next_commute"] = df["fatals_t1"]
+    midnight_mask = df["night_band"].isin(["deep_night", "late_night"])
+    df.loc[midnight_mask, "fatals_next_commute"] = df.loc[midnight_mask, "fatals_t0"]
+    return df
+
+
+def run_aligned(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Three aligned specifications that use the correct fatality window per band.
+
+    (A) Early-night only (10pm–midnight) → fatals_t1
+    (B) Midnight–6am only               → fatals_t0
+    (C) Pooled aligned (fatals_next_commute): fatals_t0 for midnight–6am treated
+        rows, fatals_t1 for all others.  This is the preferred combined estimate.
+    """
+    results = []
+
+    # (A) Early-night alerts: next-day outcome is correct
+    log.info("(A) Aligned: early_night → fatals_t1")
+    sub_a = df.copy()
+    sub_a["night_alert"] = (sub_a["night_band"] == "early_night").astype(int)
+    results.append(fe_ols_from_panel(sub_a, "fatals_t1", county=True, dm=True,
+                                     label="(A) Early-night → t+1"))
+
+    # (B) Midnight–6am alerts: same-day outcome is correct
+    log.info("(B) Aligned: midnight-6am → fatals_t0")
+    sub_b = df.copy()
+    sub_b["night_alert"] = (sub_b["night_band"].isin(
+        ["deep_night", "late_night"])).astype(int)
+    results.append(fe_ols_from_panel(sub_b, "fatals_t0", county=True, dm=True,
+                                     label="(B) Midnight-6am → t+0"))
+
+    # (C) Pooled aligned: fatals_next_commute
+    log.info("(C) Aligned: pooled (fatals_next_commute)")
+    df_al = add_aligned_outcome(df)
+    results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     county=True, dm=True,
+                                     label="(C) Pooled aligned"))
+
+    # (D) Same as (C) but with year FE added for robustness
+    log.info("(D) Aligned pooled + Year FE")
+    results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     county=True, dm=True,
+                                     extra_fes=["year_code"],
+                                     label="(D) Pooled aligned + Year FE"))
+
+    # Memo: misaligned baseline for direct comparison
+    log.info("(M) Memo: misaligned baseline (fatals_t1, all night)")
+    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=True,
+                                     label="(M) Misaligned baseline [memo]"))
+
+    return pd.DataFrame(results)
+
+
     results = []
 
     for band in ["early_night", "deep_night", "late_night"]:
@@ -179,6 +246,16 @@ def main() -> None:
     base.to_csv(OUTPUT_TABS / "reg_baseline.csv", index=False)
     (OUTPUT_TABS / "reg_baseline.tex").write_text(
         to_latex(base, "Effect of Nighttime AMBER Alert on Next-Day Traffic Fatalities", note))
+
+    log.info("=== ALIGNED (timing-corrected) ===")
+    aligned = run_aligned(df)
+    log.info("\n%s", aligned[["model","coef","se","pval","n_obs"]].to_string(index=False))
+    aligned.to_csv(OUTPUT_TABS / "reg_aligned.csv", index=False)
+    (OUTPUT_TABS / "reg_aligned.tex").write_text(
+        to_latex(aligned,
+                 "Timing-Corrected Estimates: Outcome Aligned to Disrupted Commute",
+                 note + " Specification (C)/(D) uses \\textit{fatals\\_next\\_commute}: "
+                        "fatals$_{t+0}$ for midnight--6am alerts, fatals$_{t+1}$ otherwise."))
 
     log.info("=== HETEROGENEITY ===")
     het = run_heterogeneity(df)
