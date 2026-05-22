@@ -34,6 +34,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -41,12 +42,12 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import (
-    AMBER_RAW, DATA_PROC,
+    AMBER_RAW, DATA_PROC, CROSSWALK_RAW,
     IPAWS_BASE, GDELT_DOC_API,
     NIGHT_START_HOUR, NIGHT_END_HOUR, NIGHT_BANDS,
     STUDY_YEARS,
 )
-from utils import get_logger, download_file
+from utils import get_logger, download_file, build_county_timezone_map
 
 log = get_logger("02_amber")
 
@@ -395,29 +396,65 @@ def _infer_state_from_url(url: str) -> Optional[str]:
 # Common post-processing
 # ===========================================================================
 
-def add_time_fields(df: pd.DataFrame) -> pd.DataFrame:
+def add_time_fields(df: pd.DataFrame,
+                    county_tz: dict[str, str] | None = None) -> pd.DataFrame:
     """
-    Compute local-time fields and night classification.
+    Compute local-time fields and night classification with DST-aware conversion.
 
-    Uses standard-time UTC offsets by state as a first-order approximation.
-    For precision: load the full IANA tz → county crosswalk and adjust for DST.
+    Converts each alert's UTC timestamp to the true local time of the issuing
+    county using IANA timezone rules (via zoneinfo), so DST transitions are
+    handled correctly.  Falls back to standard-time state offsets for any
+    county not found in the timezone map.
+
+    Parameters
+    ----------
+    county_tz : dict mapping 5-digit FIPS → IANA tz name (e.g. 'America/Chicago').
+                If None, falls back to fixed standard-time offsets (old behaviour).
     """
     df = df.copy()
 
-    # Normalize to UTC-naive datetimes so arithmetic works uniformly regardless
-    # of whether the source provided tz-aware (OpenFEMA) or naive timestamps.
+    # Ensure issued_utc is tz-naive UTC (normalised in _normalise_foia_df,
+    # but guard here in case of direct calls)
     issued = pd.to_datetime(df["issued_utc"], errors="coerce", utc=True)
     df["issued_utc"] = issued.dt.tz_convert(None)
 
-    utc_offset = df["state_fips"].map(STATE_UTC_OFFSET).fillna(-6)  # default Central
-    df["issued_local"] = df["issued_utc"] + pd.to_timedelta(utc_offset * 60, unit="m")
+    night_hours = set(range(NIGHT_START_HOUR, 24)) | set(range(0, NIGHT_END_HOUR))
+
+    # Initialize issued_local with NaT; fill in by method below
+    df["issued_local"] = pd.NaT
+
+    if county_tz is not None:
+        # DST-aware: convert UTC → local per county, grouped by IANA tz name.
+        df["_tz"] = df["county_fips"].map(county_tz)
+        known = df["_tz"].notna()
+
+        for tz_name, grp in df[known].groupby("_tz"):
+            local = (grp["issued_utc"]
+                     .dt.tz_localize("UTC")
+                     .dt.tz_convert(tz_name)
+                     .dt.tz_localize(None))
+            df.loc[grp.index, "issued_local"] = local
+
+        # Fallback for any county not in the map: fixed standard-time offset
+        if (~known).any():
+            fallback_offset = df.loc[~known, "state_fips"] \
+                                .map(STATE_UTC_OFFSET).fillna(-6)
+            df.loc[~known, "issued_local"] = (
+                df.loc[~known, "issued_utc"]
+                + pd.to_timedelta(fallback_offset * 60, unit="m")
+            )
+
+        df.drop(columns=["_tz"], inplace=True)
+    else:
+        # Legacy: fixed standard-time offsets (no DST)
+        utc_offset = df["state_fips"].map(STATE_UTC_OFFSET).fillna(-6)
+        df["issued_local"] = (df["issued_utc"]
+                              + pd.to_timedelta(utc_offset * 60, unit="m"))
+
     df["hour_local"] = df["issued_local"].dt.hour
 
-    # Night classification
-    night_hours = set(range(NIGHT_START_HOUR, 24)) | set(range(0, NIGHT_END_HOUR))
     df["is_night"] = df["hour_local"].isin(night_hours)
 
-    # Sub-band
     def classify_band(h):
         for band, (lo, hi) in NIGHT_BANDS.items():
             if lo <= h < hi:
@@ -501,8 +538,14 @@ def main() -> None:
     # Study-period filter
     combined = combined[combined["issued_utc"].dt.year.isin(STUDY_YEARS)]
 
+    # Build DST-aware county → timezone map from Census gazetteer
+    gaz_zip = CROSSWALK_RAW / "2023_Gaz_counties_national.zip"
+    county_tz = build_county_timezone_map(gaz_zip) if gaz_zip.exists() else None
+    if county_tz is None:
+        log.warning("Gazetteer not found — falling back to standard-time offsets.")
+
     # Add time fields and night classification
-    combined = add_time_fields(combined)
+    combined = add_time_fields(combined, county_tz=county_tz)
 
     # Explode multi-county alerts (comma-joined county_fips) into one row per county
     combined = explode_counties(combined)

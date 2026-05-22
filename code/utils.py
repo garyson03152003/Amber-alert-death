@@ -2,9 +2,11 @@
 
 import logging
 import time
+import zipfile
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
 import requests
 
 
@@ -61,3 +63,44 @@ def download_file(
 def fips5(state: int | str, county: int | str) -> str:
     """Return zero-padded 5-digit FIPS code from state + county components."""
     return f"{int(state):02d}{int(county):03d}"
+
+
+def build_county_timezone_map(gaz_zip: Path) -> dict[str, str]:
+    """
+    Return a dict mapping 5-digit county FIPS → IANA timezone name.
+
+    Uses county population-weighted centroids from the Census gazetteer and
+    timezonefinder to assign the correct IANA tz to each county.  Counties
+    that span a tz boundary get the timezone of their centroid.
+
+    Parameters
+    ----------
+    gaz_zip : path to 2023_Gaz_counties_national.zip (already downloaded)
+    """
+    from timezonefinder import TimezoneFinder
+
+    log = get_logger("utils.tz")
+
+    # Load county centroids from Census gazetteer
+    with zipfile.ZipFile(gaz_zip) as zf:
+        fname = [n for n in zf.namelist() if n.endswith(".txt")][0]
+        with zf.open(fname) as f:
+            counties = pd.read_csv(f, sep="\t", dtype=str)
+    counties.columns = [c.strip() for c in counties.columns]
+    counties["fips"] = counties["GEOID"].str.zfill(5)
+    counties["lat"]  = pd.to_numeric(counties["INTPTLAT"],  errors="coerce")
+    counties["lon"]  = pd.to_numeric(counties["INTPTLONG"], errors="coerce")
+    counties = counties[["fips", "lat", "lon"]].dropna()
+
+    tf = TimezoneFinder()
+    log.info("Looking up IANA timezone for %d county centroids...", len(counties))
+
+    tz_map = {}
+    for _, row in counties.iterrows():
+        tz = tf.timezone_at(lat=row["lat"], lng=row["lon"])
+        if tz:
+            tz_map[row["fips"]] = tz
+
+    log.info("Timezone map built: %d counties, %d unique zones",
+             len(tz_map), len(set(tz_map.values())))
+    return tz_map
