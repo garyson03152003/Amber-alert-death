@@ -162,10 +162,12 @@ FOIA_DIR = AMBER_RAW / "foia"
 
 FOIA_COLUMN_MAP = {
     # normalised name → possible raw names
-    "issued_date": ["date", "alert_date", "issued_date", "activation_date"],
+    "issued_date": ["date", "alert_date", "issued_date", "activation_date",
+                    "sent_utc", "sent"],          # OpenFEMA format
     "issued_time": ["time", "alert_time", "issued_time", "activation_time"],
     "state_fips":  ["state_fips", "state", "st_fips", "statefp"],
     "county_fips": ["county_fips", "county", "fips", "countyfp"],
+    "alert_id":    ["alert_id"],                  # preserve existing IDs
 }
 
 
@@ -209,6 +211,9 @@ def _normalise_foia_df(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
 
     df = df.rename(columns=rename)
 
+    # Preserve existing alert_id if provided (e.g. OpenFEMA records)
+    has_existing_id = "alert_id" in df.columns
+
     # Parse issued timestamp
     if "issued_date" in df.columns and "issued_time" in df.columns:
         df["issued_utc"] = pd.to_datetime(
@@ -231,7 +236,8 @@ def _normalise_foia_df(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
         df["state_fips"] = df.get("county_fips", pd.Series("", index=df.index)).str[:2]
 
     df["cancelled_utc"] = pd.NaT
-    df["alert_id"] = f"foia_{source_name}_" + df.index.astype(str)
+    if not has_existing_id:
+        df["alert_id"] = f"foia_{source_name}_" + df.index.astype(str)
     df["source"] = "foia"
 
     return df[["alert_id", "state_fips", "county_fips", "issued_utc", "cancelled_utc", "source"]]
@@ -383,6 +389,11 @@ def add_time_fields(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
+    # Normalize to UTC-naive datetimes so arithmetic works uniformly regardless
+    # of whether the source provided tz-aware (OpenFEMA) or naive timestamps.
+    issued = pd.to_datetime(df["issued_utc"], errors="coerce", utc=True)
+    df["issued_utc"] = issued.dt.tz_convert(None)
+
     utc_offset = df["state_fips"].map(STATE_UTC_OFFSET).fillna(-6)  # default Central
     df["issued_local"] = df["issued_utc"] + pd.to_timedelta(utc_offset * 60, unit="m")
     df["hour_local"] = df["issued_local"].dt.hour
@@ -476,10 +487,9 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Combine sources, dedup on (alert_id)
+    # Combine sources
     combined = pd.concat(frames, ignore_index=True)
-    combined = combined.drop_duplicates(subset=["alert_id"])
-    log.info("Combined: %d unique alerts before filtering", len(combined))
+    log.info("Combined: %d rows before filtering", len(combined))
 
     # Drop records without a usable timestamp
     combined = combined.dropna(subset=["issued_utc"])
@@ -490,8 +500,15 @@ def main() -> None:
     # Add time fields and night classification
     combined = add_time_fields(combined)
 
-    # Explode multi-county alerts into one row per county
+    # Explode multi-county alerts (comma-joined county_fips) into one row per county
     combined = explode_counties(combined)
+
+    # Dedup on (alert_id, county_fips) to handle both pre-exploded (OpenFEMA)
+    # and comma-joined (FOIA/synthetic) sources without losing counties.
+    before = len(combined)
+    combined = combined.drop_duplicates(subset=["alert_id", "county_fips"])
+    log.info("Dedup %d → %d alert-county rows (%d unique alerts)",
+             before, len(combined), combined["alert_id"].nunique())
 
     log.info("Final: %d alert-county rows (%d unique alert IDs)",
              len(combined), combined["alert_id"].nunique())
