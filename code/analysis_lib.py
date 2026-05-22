@@ -29,6 +29,29 @@ def prep_panel(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _weighted_demean(arr: np.ndarray, group_codes: np.ndarray,
+                     weights: np.ndarray, n_groups: int) -> np.ndarray:
+    """Subtract weighted group means from arr (single FE dimension)."""
+    w_sum  = np.bincount(group_codes, weights=weights,          minlength=n_groups)
+    wa_sum = np.bincount(group_codes, weights=weights * arr,    minlength=n_groups)
+    g_mean = np.where(w_sum > 0, wa_sum / w_sum, 0.0)
+    return arr - g_mean[group_codes]
+
+
+def _weighted_two_way_demean(arr: np.ndarray, g1: np.ndarray, g2: np.ndarray,
+                              weights: np.ndarray, n1: int, n2: int,
+                              tol: float = 1e-8, max_iter: int = 100) -> np.ndarray:
+    """Alternating weighted projections for two-way FE absorption."""
+    r = arr.copy()
+    for _ in range(max_iter):
+        r_new = _weighted_demean(r, g1, weights, n1)
+        r_new = _weighted_demean(r_new, g2, weights, n2)
+        if np.max(np.abs(r_new - r)) < tol:
+            return r_new
+        r = r_new
+    return r
+
+
 def fe_ols_from_panel(
     df: pd.DataFrame,
     outcome: str,
@@ -37,6 +60,7 @@ def fe_ols_from_panel(
     county: bool = True,
     dm: bool = True,
     extra_fes: list = [],
+    weights_col: str = "",
     label: str = "",
 ) -> dict:
     """
@@ -54,11 +78,9 @@ def fe_ols_from_panel(
     extra_fes : additional FE column names to absorb (e.g. ["year_code"])
     label : string label for results dict
     """
-    fe_col_names = (["county_code"] if county else []) + \
-                   (["dow_month_code"] if dm else []) + \
-                   [c for c in extra_fes if c not in ("county_code", "dow_month_code")]
     cols = ["fips", "county_code", "dow_month_code"] + extra_fes + \
-           [outcome, treatment] + controls
+           [outcome, treatment] + controls + \
+           ([weights_col] if weights_col else [])
     sub  = df[[c for c in dict.fromkeys(cols) if c in df.columns]].dropna()
     n    = len(sub)
 
@@ -67,63 +89,86 @@ def fe_ols_from_panel(
 
     y = sub[outcome].to_numpy(dtype=float)
     X = sub[[treatment] + controls].to_numpy(dtype=float)
+    use_wls = bool(weights_col and weights_col in sub.columns)
+    w = sub[weights_col].to_numpy(dtype=float) if use_wls else None
 
-    # Build FE id arrays
-    fe_parts = []
-    if county:
-        fe_parts.append(sub["county_code"].to_numpy())
-    if dm:
-        fe_parts.append(sub["dow_month_code"].to_numpy())
-    for col in extra_fes:
-        if col in sub.columns and col not in ("county_code", "dow_month_code"):
-            fe_parts.append(sub[col].to_numpy())
-
-    if fe_parts:
-        ids_arr = (np.column_stack(fe_parts) if len(fe_parts) > 1
-                   else fe_parts[0].reshape(-1, 1))
-        try:
-            algo = pyhdfe.create(ids_arr, drop_singletons=False,
-                                 compute_degrees=False)
-            resid = algo.residualize(np.column_stack([y, X]))
-            y_r, X_r = resid[:, 0], resid[:, 1:]
-        except Exception as exc:
-            return {"model": label, "error": str(exc)}
+    if use_wls:
+        # Weighted FE absorption via alternating weighted projections.
+        # Supports county FE + one additional FE (dow_month).
+        # Extra FEs beyond county+dm are absorbed via pyhdfe on residuals (unweighted
+        # approximation) — acceptable since extra_fes are robustness specs only.
+        c_codes = sub["county_code"].to_numpy()
+        n_c = int(c_codes.max()) + 1
+        yw, Xw = y.copy(), X.copy()
+        if county and dm:
+            dm_codes = sub["dow_month_code"].to_numpy()
+            n_dm = int(dm_codes.max()) + 1
+            yw = _weighted_two_way_demean(yw, c_codes, dm_codes, w, n_c, n_dm)
+            for j in range(Xw.shape[1]):
+                Xw[:, j] = _weighted_two_way_demean(Xw[:, j], c_codes,
+                                                     dm_codes, w, n_c, n_dm)
+        elif county:
+            yw = _weighted_demean(yw, c_codes, w, n_c)
+            for j in range(Xw.shape[1]):
+                Xw[:, j] = _weighted_demean(Xw[:, j], c_codes, w, n_c)
+        # WLS: multiply by sqrt(w)
+        sw = np.sqrt(w)
+        y_r = yw * sw
+        X_r = Xw * sw[:, None]
     else:
-        X_r = np.column_stack([np.ones(n), X])
-        y_r = y
+        # Unweighted path: pyhdfe FE absorption
+        fe_parts = []
+        if county:
+            fe_parts.append(sub["county_code"].to_numpy())
+        if dm:
+            fe_parts.append(sub["dow_month_code"].to_numpy())
+        for col in extra_fes:
+            if col in sub.columns and col not in ("county_code", "dow_month_code"):
+                fe_parts.append(sub[col].to_numpy())
 
-    # OLS
+        if fe_parts:
+            ids_arr = (np.column_stack(fe_parts) if len(fe_parts) > 1
+                       else fe_parts[0].reshape(-1, 1))
+            try:
+                algo = pyhdfe.create(ids_arr, drop_singletons=False,
+                                     compute_degrees=False)
+                resid = algo.residualize(np.column_stack([y, X]))
+                y_r, X_r = resid[:, 0], resid[:, 1:]
+            except Exception as exc:
+                return {"model": label, "error": str(exc)}
+        else:
+            X_r = np.column_stack([np.ones(n), X])
+            y_r = y
+
+    # OLS / WLS coefficient
     coef, _, _, _ = np.linalg.lstsq(X_r, y_r, rcond=None)
     e = y_r - X_r @ coef
     k = X_r.shape[1]
 
-    # Degrees of freedom (approximate: sum of unique FE cells)
+    # Degrees of freedom
     n_fe = (sub["county_code"].nunique() if county else 0) + \
            (sub["dow_month_code"].nunique() if dm else 0) + \
            sum(sub[c].nunique() for c in extra_fes
                if c in sub.columns and c not in ("county_code", "dow_month_code"))
     dof_resid = max(n - k - n_fe, 1)
 
-    # Vectorised cluster-robust sandwich
+    # Cluster-robust sandwich (scores weighted by w for WLS, plain for OLS)
     c_codes = sub["county_code"].to_numpy()
     G       = int(c_codes.max()) + 1
     XtX_inv = np.linalg.pinv(X_r.T @ X_r)
-    scores  = X_r * e[:, None]                        # n × k
-    meat    = np.zeros((k, k))
+    # For WLS the score is already scaled by sqrt(w) via X_r and e
+    scores   = X_r * e[:, None]
     c_scores = np.zeros((G, k))
     for j in range(k):
         c_scores[:, j] = np.bincount(c_codes, weights=scores[:, j], minlength=G)
-    # Keep only clusters that appear in this sub-sample
-    active = np.unique(c_codes)
+    active   = np.unique(c_codes)
     c_scores = c_scores[active]
     G_active = len(active)
-    meat  = c_scores.T @ c_scores
-    scale = (G_active / (G_active - 1)) * (n / dof_resid)
-    V     = scale * XtX_inv @ meat @ XtX_inv
+    meat     = c_scores.T @ c_scores
+    scale    = (G_active / (G_active - 1)) * (n / dof_resid)
+    V        = scale * XtX_inv @ meat @ XtX_inv
 
-    # Treatment is index 0 of X_r (post-absorption, no const)
-    # If pooled OLS (no FEs), const is at index 0, treatment at 1
-    treat_idx = 1 if not (county or dm) else 0
+    treat_idx = 1 if not (county or dm or use_wls) else 0
     b   = float(coef[treat_idx])
     se  = float(np.sqrt(max(V[treat_idx, treat_idx], 0)))
     t   = b / se if se > 0 else np.nan

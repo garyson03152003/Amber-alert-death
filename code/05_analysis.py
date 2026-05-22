@@ -27,6 +27,7 @@ log = get_logger("05_analysis")
 warnings.filterwarnings("ignore")
 
 WEATHER = ["prcp_mm", "tmax_c"]
+SERIOUS_INJ_PATH = DATA_PROC / "fars_serious_injuries.parquet"
 
 
 def load_panel() -> pd.DataFrame:
@@ -35,6 +36,18 @@ def load_panel() -> pd.DataFrame:
         raise FileNotFoundError(f"Panel not found: {path}")
     df = pd.read_parquet(path)
     log.info("Panel: {:,} rows, {:,} counties".format(len(df), df["fips"].nunique()))
+
+    # Merge serious injuries if available (from 01b_extract_serious_injuries.py)
+    if SERIOUS_INJ_PATH.exists():
+        inj = pd.read_parquet(SERIOUS_INJ_PATH)
+        df = df.merge(inj, on=["fips", "date"], how="left")
+        df["serious_injuries"] = df["serious_injuries"].fillna(0).astype(int)
+        log.info("Serious injuries merged (mean %.3f/county-day)",
+                 df["serious_injuries"].mean())
+    else:
+        log.warning("Serious injury file not found — run 01b_extract_serious_injuries.py")
+        df["serious_injuries"] = 0
+
     return df
 
 
@@ -111,6 +124,22 @@ def add_aligned_outcome(df: pd.DataFrame) -> pd.DataFrame:
     midnight_mask = df["night_band"].isin(["deep_night", "late_night"])
     df.loc[midnight_mask, "fatals_next_commute"] = df.loc[midnight_mask, "fatals_t0"]
 
+    # --- combined: fatalities + serious injuries (in fatal crashes) ---
+    # serious_injuries column is same-day (t0); build t1 via within-county shift
+    if "serious_injuries" in df.columns:
+        df = df.sort_values(["fips", "date"])
+        df["serious_inj_t1"] = (
+            df.groupby("fips")["serious_injuries"].shift(-1).fillna(0)
+        )
+        # Align serious injuries using same timing rule as fatalities
+        df["serious_inj_next_commute"] = df["serious_inj_t1"]
+        df.loc[midnight_mask, "serious_inj_next_commute"] = \
+            df.loc[midnight_mask, "serious_injuries"]
+
+        df["combined_next_commute"] = (
+            df["fatals_next_commute"] + df["serious_inj_next_commute"]
+        )
+
     # --- population: fill missing with county cross-year mean ---
     if "population" in df.columns:
         county_mean_pop = df.groupby("fips")["population"].transform("mean")
@@ -164,6 +193,75 @@ def run_rate_baseline(df: pd.DataFrame) -> pd.DataFrame:
         results.append(fe_ols_from_panel(df_al, "fatals_rate_next_commute",
                                          controls=avail_w, county=True, dm=True,
                                          label="(4) + Weather"))
+
+    return pd.DataFrame(results)
+
+
+def _rate_specs(df_al: pd.DataFrame, outcome: str, tag: str,
+                weights_col: str = "") -> list:
+    """Run the three core FE specs on a rate outcome; return list of result dicts."""
+    results = []
+    for label, kwargs in [
+        (f"(2) County FE [{tag}]",   dict(county=True, dm=False)),
+        (f"(3) Baseline [{tag}]",    dict(county=True, dm=True)),
+        (f"(5) + Year FE [{tag}]",   dict(county=True, dm=True,
+                                          extra_fes=["year_code"])),
+    ]:
+        results.append(fe_ols_from_panel(df_al, outcome, label=label,
+                                         weights_col=weights_col, **kwargs))
+    return results
+
+
+def run_se_reduction(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Two SE-reduction strategies, both using fatals_rate_next_commute:
+
+    (A) Restrict to counties with ≥5 mean annual fatalities — removes zero-heavy
+        small counties that contribute noise but no signal.
+    (B) WLS weighted by county population — downweights small counties while
+        keeping them in sample. County + DoW×Month FE absorbed via weighted
+        alternating projections.
+    (C) A + B combined: restricted sample with population weights.
+    """
+    df_al = add_aligned_outcome(df)
+    if "fatals_rate_next_commute" not in df_al.columns:
+        log.warning("Population data missing — skipping SE reduction specs.")
+        return pd.DataFrame()
+
+    df_al = df_al.dropna(subset=["fatals_rate_next_commute", "population"])
+    results = []
+
+    # --- Baseline rate (unrestricted, unweighted) for reference ---
+    log.info("SE reduction: baseline rate (unrestricted)")
+    for r in _rate_specs(df_al, "fatals_rate_next_commute", "rate"):
+        results.append(r)
+
+    # --- (A) Restrict: counties with ≥5 mean annual fatalities ---
+    log.info("SE reduction: (A) county restriction ≥5 fatals/year")
+    min_fatals = 5
+    mean_annual = (
+        df_al.groupby(["fips", "year"])["fatals_t0"].sum()
+        .groupby("fips").mean()
+    )
+    keep_fips = mean_annual[mean_annual >= min_fatals].index
+    df_A = df_al[df_al["fips"].isin(keep_fips)].copy()
+    log.info("  Kept %d / %d counties (%.0f%% of rows)",
+             len(keep_fips), df_al["fips"].nunique(),
+             100 * len(df_A) / len(df_al))
+    for r in _rate_specs(df_A, "fatals_rate_next_commute", "A:≥5/yr"):
+        results.append(r)
+
+    # --- (B) WLS weighted by population ---
+    log.info("SE reduction: (B) WLS population weights")
+    for r in _rate_specs(df_al, "fatals_rate_next_commute", "B:WLS",
+                         weights_col="population"):
+        results.append(r)
+
+    # --- (C) A + B ---
+    log.info("SE reduction: (C) restricted + WLS")
+    for r in _rate_specs(df_A, "fatals_rate_next_commute", "C:A+B",
+                         weights_col="population"):
+        results.append(r)
 
     return pd.DataFrame(results)
 
@@ -280,6 +378,46 @@ def run_placebo(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(results)
 
 
+def run_combined(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Combined outcome: fatalities + serious injuries (in fatal crashes), per 100k.
+    Uses timing-aligned combined_next_commute / (population / 100k).
+    Runs the three core FE specs with and without sample restriction.
+    """
+    df_al = add_aligned_outcome(df)
+    if "combined_next_commute" not in df_al.columns:
+        log.warning("Serious injury data missing — skipping combined outcome.")
+        return pd.DataFrame()
+
+    if "population" not in df_al.columns:
+        log.warning("Population missing — cannot compute combined rate.")
+        return pd.DataFrame()
+
+    county_mean_pop = df_al.groupby("fips")["population"].transform("mean")
+    pop = df_al["population"].fillna(county_mean_pop)
+    df_al["combined_rate"] = df_al["combined_next_commute"] / (pop / 100_000)
+
+    df_al = df_al.dropna(subset=["combined_rate", "population"])
+    log.info("Combined rate mean: %.4f per 100k", df_al["combined_rate"].mean())
+
+    results = []
+    for r in _rate_specs(df_al, "combined_rate", "comb"):
+        results.append(r)
+
+    # Also run with sample restriction ≥5 fatals/year
+    mean_annual = (
+        df_al.groupby(["fips", "year"])["fatals_t0"].sum()
+        .groupby("fips").mean()
+    )
+    keep = mean_annual[mean_annual >= 5].index
+    df_R = df_al[df_al["fips"].isin(keep)].copy()
+    log.info("Combined restricted: %d counties", len(keep))
+    for r in _rate_specs(df_R, "combined_rate", "comb:≥5/yr"):
+        results.append(r)
+
+    return pd.DataFrame(results)
+
+
 # ---------------------------------------------------------------------------
 # LaTeX output
 # ---------------------------------------------------------------------------
@@ -354,7 +492,32 @@ def main() -> None:
                      note + " Outcome is \\textit{fatals\\_rate\\_next\\_commute}: "
                             "fatalities per 100,000 county population, timing-aligned."))
 
+    log.info("=== SE REDUCTION (A: restrict, B: WLS, C: A+B) ===")
+    se_red = run_se_reduction(df)
+    if not se_red.empty:
+        log.info("\n%s", se_red[["model","coef","se","pval","n_obs"]].to_string(index=False))
+        se_red.to_csv(OUTPUT_TABS / "reg_se_reduction.csv", index=False)
+        (OUTPUT_TABS / "reg_se_reduction.tex").write_text(
+            to_latex(se_red,
+                     "SE Reduction: Sample Restriction and WLS "
+                     "(Rate Outcome, per 100k)",
+                     note + " (A) counties with $\\geq$5 mean annual fatalities; "
+                            "(B) WLS weighted by county population; "
+                            "(C) both combined."))
+
+    log.info("=== COMBINED OUTCOME (fatalities + serious injuries) ===")
+    comb = run_combined(df)
+    if not comb.empty:
+        log.info("\n%s", comb[["model","coef","se","pval","n_obs"]].to_string(index=False))
+        comb.to_csv(OUTPUT_TABS / "reg_combined.csv", index=False)
+        (OUTPUT_TABS / "reg_combined.tex").write_text(
+            to_latex(comb,
+                     "Combined Outcome: Fatalities + Serious Injuries per 100k",
+                     note + " Serious injuries defined as INJ\\_SEV=3 in FARS person "
+                            "file (incapacitating injuries in fatal crashes)."))
+
     log.info("=== ALIGNED (timing-corrected) ===")
+
     aligned = run_aligned(df)
     log.info("\n%s", aligned[["model","coef","se","pval","n_obs"]].to_string(index=False))
     aligned.to_csv(OUTPUT_TABS / "reg_aligned.csv", index=False)
