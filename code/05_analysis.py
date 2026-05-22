@@ -43,35 +43,50 @@ def load_panel() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def run_baseline(df: pd.DataFrame) -> pd.DataFrame:
-    results = []
-    avail_w = [c for c in WEATHER if df[c].notna().mean() > 0.01]
+    """
+    Timing-aligned baseline models using fatals_next_commute as the outcome.
 
-    log.info("(1) Pooled OLS")
-    results.append(fe_ols_from_panel(df, "fatals_t1", county=False, dm=False,
+    fatals_next_commute = fatals_t0 for midnight-6am alerts (commute disrupted
+    same morning) and fatals_t1 for early-night alerts and all control rows
+    (commute disrupted the following morning).
+    """
+    df_al = add_aligned_outcome(df)
+    avail_w = [c for c in WEATHER if df_al[c].notna().mean() > 0.01]
+    results = []
+
+    log.info("(1) Pooled OLS [aligned]")
+    results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     county=False, dm=False,
                                      label="(1) Pooled OLS"))
-    log.info("(2) County FE")
-    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=False,
+    log.info("(2) County FE [aligned]")
+    results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     county=True, dm=False,
                                      label="(2) County FE"))
-    log.info("(3) County FE + DoW×Month FE  [baseline]")
-    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=True,
+    log.info("(3) County FE + DoW×Month FE  [baseline, aligned]")
+    results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     county=True, dm=True,
                                      label="(3) Baseline"))
     if avail_w:
-        log.info("(4) Baseline + weather")
-        results.append(fe_ols_from_panel(df, "fatals_t1", controls=avail_w,
-                                         county=True, dm=True, label="(4) + Weather"))
+        log.info("(4) Baseline + weather [aligned]")
+        results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                         controls=avail_w, county=True, dm=True,
+                                         label="(4) + Weather"))
     else:
         log.warning("Weather controls sparse — skipping model (4).")
 
-    log.info("(5) Baseline + Year FE")
-    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=True,
+    log.info("(5) Baseline + Year FE [aligned]")
+    results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     county=True, dm=True,
                                      extra_fes=["year_code"],
                                      label="(5) + Year FE"))
-    log.info("(6) County FE + DoW×Year FE")
-    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=False,
+    log.info("(6) County FE + DoW×Year FE [aligned]")
+    results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     county=True, dm=False,
                                      extra_fes=["dow_year_code"],
                                      label="(6) DoW×Year FE"))
-    log.info("(7) County FE + Year×Month FE")
-    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=False,
+    log.info("(7) County FE + Year×Month FE [aligned]")
+    results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     county=True, dm=False,
                                      extra_fes=["year_month_code"],
                                      label="(7) Year×Month FE"))
 
@@ -146,46 +161,67 @@ def run_aligned(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(results)
 
 
+def run_heterogeneity(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Heterogeneity analysis using timing-aligned outcomes per band.
+
+    Night bands: early_night → fatals_t1 (next-day commute)
+                 deep_night / late_night → fatals_t0 (same-day commute)
+    Weekday/weekend and alert-hour splits use fatals_next_commute.
+    """
+    df_al = add_aligned_outcome(df)
     results = []
 
-    for band in ["early_night", "deep_night", "late_night"]:
-        sub = df.copy()
+    for band, outcome in [
+        ("early_night", "fatals_t1"),
+        ("deep_night",  "fatals_t0"),
+        ("late_night",  "fatals_t0"),
+    ]:
+        sub = df_al.copy()
         sub["night_alert"] = (sub["night_band"] == band).astype(int)
-        results.append(fe_ols_from_panel(sub, "fatals_t1",
+        results.append(fe_ols_from_panel(sub, outcome,
+                                         county=True, dm=True,
                                          label=f"Band: {band}"))
 
     for lbl, mask in [
-        ("Next-day: weekday", df["dow"].isin([0, 1, 2, 3])),
-        ("Next-day: weekend", df["dow"].isin([4, 5, 6])),
+        ("Weekday", df_al["dow"].isin([0, 1, 2, 3])),
+        ("Weekend", df_al["dow"].isin([4, 5, 6])),
     ]:
-        results.append(fe_ols_from_panel(df[mask], "fatals_t1", label=lbl))
+        results.append(fe_ols_from_panel(df_al[mask], "fatals_next_commute",
+                                         county=True, dm=True, label=lbl))
 
-    for lbl, hrs in [
-        ("Alert 10pm–midnight", list(range(22, 24))),
-        ("Alert midnight–3am",  list(range(0,  3))),
-        ("Alert 3am–6am",       list(range(3,  6))),
+    for lbl, hrs, outcome in [
+        ("Alert 10pm-midnight", list(range(22, 24)), "fatals_t1"),
+        ("Alert midnight-3am",  list(range(0,  3)),  "fatals_t0"),
+        ("Alert 3am-6am",       list(range(3,  6)),  "fatals_t0"),
     ]:
-        sub = df.copy()
+        sub = df_al.copy()
         sub["night_alert"] = (
-            df["night_alert"].astype(bool) & df["alert_hour"].isin(hrs)
+            df_al["night_alert"].astype(bool) & df_al["alert_hour"].isin(hrs)
         ).astype(int)
-        results.append(fe_ols_from_panel(sub, "fatals_t1", label=lbl))
+        results.append(fe_ols_from_panel(sub, outcome,
+                                         county=True, dm=True, label=lbl))
 
     return pd.DataFrame(results)
 
 
 def run_placebo(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Placebo tests using aligned outcomes.
+    t-1 and t+2 should show no effect; aligned main spec is included for reference.
+    """
+    df_al = add_aligned_outcome(df)
     results = []
     for outcome, lbl in [
-        ("fatals_tm1", "Placebo: t−1"),
-        ("fatals_t0",  "Same-day: t"),
-        ("fatals_t1",  "Main: t+1"),
-        ("fatals_t2",  "Placebo: t+2"),
+        ("fatals_tm1",          "Placebo: t-1"),
+        ("fatals_next_commute", "Main: aligned"),
+        ("fatals_t2",           "Placebo: t+2"),
     ]:
-        if outcome not in df.columns:
+        if outcome not in df_al.columns:
             continue
-        sub = df.dropna(subset=[outcome]).copy()
-        results.append(fe_ols_from_panel(sub, outcome, label=lbl))
+        sub = df_al.dropna(subset=[outcome]).copy()
+        results.append(fe_ols_from_panel(sub, outcome,
+                                         county=True, dm=True, label=lbl))
     return pd.DataFrame(results)
 
 
@@ -245,7 +281,11 @@ def main() -> None:
     log.info("\n%s", base[["model","coef","se","pval","n_obs"]].to_string(index=False))
     base.to_csv(OUTPUT_TABS / "reg_baseline.csv", index=False)
     (OUTPUT_TABS / "reg_baseline.tex").write_text(
-        to_latex(base, "Effect of Nighttime AMBER Alert on Next-Day Traffic Fatalities", note))
+        to_latex(base,
+                 "Effect of Nighttime AMBER Alert on Traffic Fatalities "
+                 "(Timing-Aligned Outcome)",
+                 note + " Outcome is \\textit{fatals\\_next\\_commute}: "
+                        "fatals$_{t+0}$ for midnight--6am alerts, fatals$_{t+1}$ otherwise."))
 
     log.info("=== ALIGNED (timing-corrected) ===")
     aligned = run_aligned(df)
