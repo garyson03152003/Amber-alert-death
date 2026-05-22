@@ -226,6 +226,26 @@ def main() -> None:
     panel["is_weekend"]  = (panel["dow"] >= 5).astype(int)
 
     # -----------------------------------------------------------------------
+    # 7b. Merge holiday indicators
+    # -----------------------------------------------------------------------
+    hol_path = DATA_PROC / "holidays_county_day.parquet"
+    if hol_path.exists():
+        hol = pd.read_parquet(hol_path,
+                              columns=["fips", "date", "is_holiday",
+                                       "is_federal", "holiday_name"])
+        hol["date"] = pd.to_datetime(hol["date"])
+        panel = panel.merge(hol, on=["fips", "date"], how="left")
+        panel["is_holiday"]  = panel["is_holiday"].fillna(0).astype(int)
+        panel["is_federal"]  = panel["is_federal"].fillna(False).astype(bool).astype(int)
+        log.info("Holiday coverage: %d county-days flagged (%.2f%%)",
+                 panel["is_holiday"].sum(),
+                 panel["is_holiday"].mean() * 100)
+    else:
+        log.warning("Holiday file missing — run 03d_build_holidays.py")
+        panel["is_holiday"] = 0
+        panel["is_federal"] = 0
+
+    # -----------------------------------------------------------------------
     # 8. Population density (proxy for shock intensity)
     # -----------------------------------------------------------------------
     # We load the ACS 5-year county population estimates from a cached Census file.

@@ -27,7 +27,8 @@ import numpy as np
 log = get_logger("05_analysis")
 warnings.filterwarnings("ignore")
 
-WEATHER = ["prcp_mm", "tmax_c"]
+WEATHER  = ["prcp_mm", "tmax_c"]
+HOLIDAY  = ["is_holiday"]        # federal + state public holiday indicator
 SERIOUS_INJ_PATH  = DATA_PROC / "fars_serious_injuries.parquet"
 AMBER_CLEAN_PATH  = DATA_PROC / "amber_alerts_clean.parquet"
 
@@ -89,41 +90,50 @@ def run_baseline(df: pd.DataFrame) -> pd.DataFrame:
     (commute disrupted the following morning).
     """
     df_al = add_aligned_outcome(df)
-    avail_w = [c for c in WEATHER if df_al[c].notna().mean() > 0.01]
+    avail_w   = [c for c in WEATHER  if df_al[c].notna().mean() > 0.01]
+    avail_hol = [c for c in HOLIDAY  if c in df_al.columns]
+    base_ctrl = avail_hol   # holiday indicator included in all specs where available
     results = []
 
     log.info("(1) Pooled OLS [aligned]")
     results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     controls=base_ctrl,
                                      county=False, dm=False,
                                      label="(1) Pooled OLS"))
     log.info("(2) County FE [aligned]")
     results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     controls=base_ctrl,
                                      county=True, dm=False,
                                      label="(2) County FE"))
     log.info("(3) County FE + DoW×Month FE  [baseline, aligned]")
     results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     controls=base_ctrl,
                                      county=True, dm=True,
                                      label="(3) Baseline"))
     if avail_w:
         log.info("(4) Baseline + weather [aligned]")
         results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
-                                         controls=avail_w, county=True, dm=True,
+                                         controls=base_ctrl + avail_w,
+                                         county=True, dm=True,
                                          label="(4) + Weather"))
     else:
         log.warning("Weather controls sparse — skipping model (4).")
 
     log.info("(5) Baseline + Year FE [aligned]")
     results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     controls=base_ctrl,
                                      county=True, dm=True,
                                      extra_fes=["year_code"],
                                      label="(5) + Year FE"))
     log.info("(6) County FE + DoW×Year FE [aligned]")
     results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     controls=base_ctrl,
                                      county=True, dm=False,
                                      extra_fes=["dow_year_code"],
                                      label="(6) DoW×Year FE"))
     log.info("(7) County FE + Year×Month FE [aligned]")
     results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                     controls=base_ctrl,
                                      county=True, dm=False,
                                      extra_fes=["year_month_code"],
                                      label="(7) Year×Month FE"))
@@ -202,7 +212,9 @@ def run_rate_baseline(df: pd.DataFrame) -> pd.DataFrame:
     pop_coverage = df_al["fatals_rate_next_commute"].notna().mean()
     log.info("Rate outcome coverage: %.1f%%", pop_coverage * 100)
 
-    avail_w = [c for c in WEATHER if df_al[c].notna().mean() > 0.01]
+    avail_w   = [c for c in WEATHER if df_al[c].notna().mean() > 0.01]
+    avail_hol = [c for c in HOLIDAY if c in df_al.columns]
+    base_ctrl = avail_hol
     results = []
 
     for label, kwargs in [
@@ -215,19 +227,22 @@ def run_rate_baseline(df: pd.DataFrame) -> pd.DataFrame:
     ]:
         log.info("%s [rate]", label)
         results.append(fe_ols_from_panel(df_al, "fatals_rate_next_commute",
-                                         label=label, **kwargs))
+                                         controls=base_ctrl, label=label, **kwargs))
     if avail_w:
         log.info("(4) Baseline + weather [rate]")
         results.append(fe_ols_from_panel(df_al, "fatals_rate_next_commute",
-                                         controls=avail_w, county=True, dm=True,
+                                         controls=base_ctrl + avail_w,
+                                         county=True, dm=True,
                                          label="(4) + Weather"))
 
     return pd.DataFrame(results)
 
 
 def _rate_specs(df_al: pd.DataFrame, outcome: str, tag: str,
-                weights_col: str = "") -> list:
+                weights_col: str = "",
+                extra_ctrl: list = None) -> list:
     """Run the three core FE specs on a rate outcome; return list of result dicts."""
+    ctrl = (extra_ctrl or []) + [c for c in HOLIDAY if c in df_al.columns]
     results = []
     for label, kwargs in [
         (f"(2) County FE [{tag}]",   dict(county=True, dm=False)),
@@ -236,6 +251,7 @@ def _rate_specs(df_al: pd.DataFrame, outcome: str, tag: str,
                                           extra_fes=["year_code"])),
     ]:
         results.append(fe_ols_from_panel(df_al, outcome, label=label,
+                                         controls=ctrl,
                                          weights_col=weights_col, **kwargs))
     return results
 
@@ -518,6 +534,7 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
     BASE_COLS = ["fips", "date", "county_code", "state_code",
                  "dow_month_code", "night_alert", "fatals_next_commute"]
     extra = ([c for c in ["combined_next_commute", "population", "log_pop"]
+              + HOLIDAY
               if c in df_al.columns])
     lean = df_al[BASE_COLS + extra].sort_values(["fips", "date"]).copy()
     del df_al
@@ -526,6 +543,8 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
     if has_pop:
         county_mean_pop = lean.groupby("fips")["population"].transform("mean")
         lean["pop_100k"] = lean["population"].fillna(county_mean_pop) / 100_000
+
+    hol_ctrl = [c for c in HOLIDAY if c in lean.columns]
 
     results = []
     for k in range(-EVENT_STUDY_WINDOW, EVENT_STUDY_WINDOW + 1):
@@ -543,6 +562,7 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
         sub = lean.dropna(subset=[col_c])
 
         r = fe_ols_from_panel(sub, col_c, county=True, dm=True,
+                              controls=hol_ctrl,
                               cluster_col="state_code",
                               label=f"k={k:+d} [count]")
         r["k"] = k; r["spec"] = "count"
@@ -550,6 +570,7 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
 
         # --- spec 2: raw count + outcome-date DoW×Month ---
         r_odm = fe_ols_from_panel(sub, col_c, county=True, dm=True,
+                                  controls=hol_ctrl,
                                   extra_fes=["_out_dm_code"],
                                   cluster_col="state_code",
                                   label=f"k={k:+d} [count+outDM]")
@@ -566,6 +587,7 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
             sub_r = lean.dropna(subset=[col_r, "log_pop"])
 
             r2 = fe_ols_from_panel(sub_r, col_r, county=True, dm=True,
+                                   controls=hol_ctrl,
                                    weights_col="log_pop",
                                    cluster_col="state_code",
                                    label=f"k={k:+d} [comb/100k logWLS]")
@@ -574,6 +596,7 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
 
             # --- spec 4: combined rate + outcome-date DoW×Month ---
             r2_odm = fe_ols_from_panel(sub_r, col_r, county=True, dm=True,
+                                       controls=hol_ctrl,
                                        extra_fes=["_out_dm_code"],
                                        weights_col="log_pop",
                                        cluster_col="state_code",
