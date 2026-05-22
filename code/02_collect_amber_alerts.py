@@ -180,6 +180,15 @@ def load_foia_files() -> pd.DataFrame:
         log.info("No FOIA files found in %s — skipping.", FOIA_DIR)
         return pd.DataFrame()
 
+    # Skip synthetic placeholder files when real data files are present.
+    real_files = [f for f in files if not f.stem.startswith("synthetic_")]
+    if real_files:
+        skipped = [f.name for f in files if f.stem.startswith("synthetic_")]
+        if skipped:
+            log.info("Real data present — skipping synthetic placeholder(s): %s",
+                     ", ".join(skipped))
+        files = real_files
+
     frames = []
     for f in files:
         log.info("Loading FOIA file: %s", f.name)
@@ -216,15 +225,21 @@ def _normalise_foia_df(df: pd.DataFrame, source_name: str) -> pd.DataFrame:
 
     # Parse issued timestamp
     if "issued_date" in df.columns and "issued_time" in df.columns:
-        df["issued_utc"] = pd.to_datetime(
+        raw_dt = pd.to_datetime(
             df["issued_date"].astype(str) + " " + df["issued_time"].astype(str),
             errors="coerce",
         )
     elif "issued_date" in df.columns:
-        df["issued_utc"] = pd.to_datetime(df["issued_date"], errors="coerce")
+        raw_dt = pd.to_datetime(df["issued_date"], errors="coerce")
     else:
         log.warning("No date column found in FOIA source %s", source_name)
-        df["issued_utc"] = pd.NaT
+        raw_dt = pd.Series(pd.NaT, index=df.index)
+
+    # Normalize to tz-naive UTC so pd.concat across sources preserves dtype.
+    # utc=True makes tz-aware inputs convert to UTC and tz-naive inputs get
+    # localized as UTC; tz_convert(None) then strips the tzinfo.
+    df["issued_utc"] = pd.to_datetime(raw_dt, errors="coerce",
+                                      utc=True).dt.tz_convert(None)
 
     # Normalise county FIPS to 5-digit string
     if "county_fips" in df.columns:
