@@ -492,15 +492,21 @@ def run_daytime_placebo(df: pd.DataFrame) -> pd.DataFrame:
 # Event study (dynamic effects t-3 … t+3)
 # ---------------------------------------------------------------------------
 
+EVENT_STUDY_WINDOW = 5   # k = -EVENT_STUDY_WINDOW ... +EVENT_STUDY_WINDOW
+
+
 def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Dynamic effects, two specs:
-      (1) Raw fatality count (fatals_next_commute)
-      (2) Combined (fatalities + serious injuries) rate per 100k, log-pop WLS
+    Dynamic effects k ∈ {-W,...,+W} where W = EVENT_STUDY_WINDOW (default 5).
 
-    For each k ∈ {-3,...,+3} we shift the outcome by k days within each
-    county: k=0 = aligned disrupted-commute morning, k<0 = pre-trends,
-    k>0 = post-event dynamics.
+    Four specs per k:
+      (1) count          — raw fatality count, county+DoW×Month FE, log_pop control
+      (2) count_outDM    — (1) + outcome-date DoW×Month FE (robustness for Friday clustering)
+      (3) comb_rate_logWLS      — combined (fatal+serious) per 100k, log-pop WLS
+      (4) comb_rate_logWLS_outDM — (3) + outcome-date DoW×Month FE
+
+    log_pop is included as a covariate in all specs to control for within-county
+    population trends (county FEs absorb the cross-sectional average level).
 
     Memory note: lean DataFrame (only needed columns) to avoid OOM.
     """
@@ -520,39 +526,64 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
     if has_pop:
         county_mean_pop = lean.groupby("fips")["population"].transform("mean")
         lean["pop_100k"] = lean["population"].fillna(county_mean_pop) / 100_000
-        # Combined rate at k=0 base (we shift the count and re-divide)
-        if has_combined:
-            lean["combined_rate_nc"] = lean["combined_next_commute"] / lean["pop_100k"]
 
     results = []
-    for k in range(-3, 4):
+    for k in range(-EVENT_STUDY_WINDOW, EVENT_STUDY_WINDOW + 1):
+        # Outcome-date DoW×Month code (robustness check for Friday-alert clustering).
+        # shift(-k) puts the outcome at date+k, so outcome DoW = DoW of date+k.
+        # At k=0 this equals dow_month_code (redundant but harmless).
+        outcome_dates = lean["date"] + pd.Timedelta(days=k)
+        out_dm_str = (outcome_dates.dt.dayofweek.astype(str) + "_"
+                      + outcome_dates.dt.month.astype(str))
+        lean["_out_dm_code"] = pd.Categorical(out_dm_str).codes.astype(np.int32)
+
         # --- spec 1: raw count ---
-        col_c = f"_yk_count"
+        col_c = "_yk_count"
         lean[col_c] = lean.groupby("fips")["fatals_next_commute"].shift(-k)
         sub = lean.dropna(subset=[col_c])
+
         r = fe_ols_from_panel(sub, col_c, county=True, dm=True,
                               cluster_col="state_code",
                               label=f"k={k:+d} [count]")
-        r["k"] = k
-        r["spec"] = "count"
+        r["k"] = k; r["spec"] = "count"
         results.append(r)
+
+        # --- spec 2: raw count + outcome-date DoW×Month ---
+        r_odm = fe_ols_from_panel(sub, col_c, county=True, dm=True,
+                                  extra_fes=["_out_dm_code"],
+                                  cluster_col="state_code",
+                                  label=f"k={k:+d} [count+outDM]")
+        r_odm["k"] = k; r_odm["spec"] = "count_outDM"
+        results.append(r_odm)
+
         lean.drop(columns=[col_c], inplace=True)
 
-        # --- spec 2: combined rate, log-pop WLS ---
+        # --- spec 3: combined rate, log-pop WLS ---
         if has_combined and has_pop:
-            col_r = f"_yk_rate"
-            # Shift the count, then normalise — avoids double-applying pop
+            col_r = "_yk_rate"
             shifted_count = lean.groupby("fips")["combined_next_commute"].shift(-k)
             lean[col_r] = shifted_count / lean["pop_100k"]
             sub_r = lean.dropna(subset=[col_r, "log_pop"])
+
             r2 = fe_ols_from_panel(sub_r, col_r, county=True, dm=True,
                                    weights_col="log_pop",
                                    cluster_col="state_code",
                                    label=f"k={k:+d} [comb/100k logWLS]")
-            r2["k"] = k
-            r2["spec"] = "comb_rate_logWLS"
+            r2["k"] = k; r2["spec"] = "comb_rate_logWLS"
             results.append(r2)
+
+            # --- spec 4: combined rate + outcome-date DoW×Month ---
+            r2_odm = fe_ols_from_panel(sub_r, col_r, county=True, dm=True,
+                                       extra_fes=["_out_dm_code"],
+                                       weights_col="log_pop",
+                                       cluster_col="state_code",
+                                       label=f"k={k:+d} [comb/100k logWLS+outDM]")
+            r2_odm["k"] = k; r2_odm["spec"] = "comb_rate_logWLS_outDM"
+            results.append(r2_odm)
+
             lean.drop(columns=[col_r], inplace=True)
+
+        lean.drop(columns=["_out_dm_code"], inplace=True)
 
     return pd.DataFrame(results)
 

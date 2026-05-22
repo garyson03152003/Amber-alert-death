@@ -115,9 +115,9 @@ def fe_ols_from_panel(
 
     if use_wls:
         # Weighted FE absorption via alternating weighted projections.
-        # Supports county FE + one additional FE (dow_month).
-        # Extra FEs beyond county+dm are absorbed via pyhdfe on residuals (unweighted
-        # approximation) — acceptable since extra_fes are robustness specs only.
+        # county + dow_month are absorbed with full weights.
+        # Extra FEs (e.g. outcome-date DoW×Month) are absorbed via unweighted
+        # demean on the residuals — acceptable approximation for robustness specs.
         c_codes = sub["county_code"].to_numpy()
         n_c = int(c_codes.max()) + 1
         yw, Xw = y.copy(), X.copy()
@@ -132,6 +132,15 @@ def fe_ols_from_panel(
             yw = _weighted_demean(yw, c_codes, w, n_c)
             for j in range(Xw.shape[1]):
                 Xw[:, j] = _weighted_demean(Xw[:, j], c_codes, w, n_c)
+        # Absorb any extra FEs via unweighted demean (approximation)
+        ones = np.ones(len(yw))
+        for col in extra_fes:
+            if col in sub.columns and col not in ("county_code", "dow_month_code"):
+                fe_codes = sub[col].to_numpy(dtype=np.int32)
+                n_fe = int(fe_codes.max()) + 1
+                yw = _weighted_demean(yw, fe_codes, ones, n_fe)
+                for j in range(Xw.shape[1]):
+                    Xw[:, j] = _weighted_demean(Xw[:, j], fe_codes, ones, n_fe)
         # WLS: multiply by sqrt(w)
         sw = np.sqrt(w)
         y_r = yw * sw

@@ -87,67 +87,91 @@ def event_study(panel: pd.DataFrame) -> None:
 
     est = est.dropna(subset=["coef"])
 
-    # Detect whether multi-spec output is available
-    has_multi_spec = "spec" in est.columns and est["spec"].nunique() > 1
-    specs = [("count", "Raw fatality count"),
-             ("comb_rate_logWLS", "Combined (fatal + serious inj.) per 100k, log-pop WLS")]
+    # Detect window from data (e.g. -5..+5 or -3..+3)
+    ks_all   = sorted(est["k"].unique()) if "k" in est.columns else list(range(-3, 4))
+    k_min, k_max = int(min(ks_all)), int(max(ks_all))
 
-    if has_multi_spec:
-        # Two-panel figure: left = count spec, right = combined rate WLS
-        fig, axes = plt.subplots(1, 2, figsize=(13, 4.5), sharey=False)
-        for ax, (spec_key, spec_title) in zip(axes, specs):
-            sub = est[est["spec"] == spec_key].sort_values("k")
-            if sub.empty:
-                continue
-            ax.axhline(0, color="black", lw=0.8, ls="--")
-            ax.axvspan(-0.5, 0.5, alpha=0.07, color=BLUE)
-            ax.errorbar(
-                sub["k"], sub["coef"],
-                yerr=[sub["coef"] - sub["ci_lo"], sub["ci_hi"] - sub["coef"]],
-                fmt="o", color=BLUE, capsize=4, lw=1.5, ms=6,
-                label="Point est. (95% CI, state-cl.)",
-            )
-            ks = sorted(sub["k"].tolist())
-            ax.set_xticks(ks)
-            ax.set_xticklabels(
-                ["k−3", "k−2", "k−1", "k=0\n(alert)", "k+1", "k+2", "k+3"],
-                fontsize=8,
-            )
-            ax.set_xlabel("Days relative to nighttime AMBER Alert\n"
-                          "(aligned to disrupted commute)", fontsize=9)
-            if spec_key == "count":
-                ax.set_ylabel("Additional fatalities (county-day, FE-adjusted)")
-            else:
-                ax.set_ylabel("Combined injuries per 100k (FE-adjusted, log-pop WLS)")
-            ax.set_title(spec_title, fontsize=9)
-            ax.legend(frameon=False, fontsize=8)
-        fig.suptitle("Fig. 1  Event Study Around Nighttime AMBER Alerts "
-                     "(Timing-Aligned Outcome)", fontsize=11, y=1.01)
-        fig.tight_layout()
-    else:
-        # Single-spec fallback (original layout)
-        sub = (est[est["spec"] == "count"].sort_values("k")
-               if "spec" in est.columns else est.sort_values("k"))
-        fig, ax = plt.subplots(figsize=(7, 4))
-        ax.axhline(0, color="black", lw=0.8, ls="--")
-        ax.axvspan(-0.5, 0.5, alpha=0.07, color=BLUE)
+    def _xtick_labels(ks):
+        return [f"k={k}" if k != 0 else "k=0\n(alert)" for k in ks]
+
+    # Spec groups: (base_key, odm_key, y-axis label, panel title)
+    spec_groups = [
+        ("count", "count_outDM",
+         "Additional fatalities (county-day, FE-adjusted)",
+         "Raw fatality count"),
+        ("comb_rate_logWLS", "comb_rate_logWLS_outDM",
+         "Combined injuries per 100k (log-pop WLS)",
+         "Combined (fatal + serious inj.) per 100k, log-pop WLS"),
+    ]
+    has_spec_col = "spec" in est.columns
+    available_specs = set(est["spec"].unique()) if has_spec_col else set()
+
+    has_base = any(s in available_specs for s, *_ in spec_groups)
+    has_odm  = any(s in available_specs for _, s, *_ in spec_groups)
+
+    ORANGE = "#e08214"
+
+    def _draw_es(ax, sub, color, label):
+        sub = sub.sort_values("k")
         ax.errorbar(
             sub["k"], sub["coef"],
             yerr=[sub["coef"] - sub["ci_lo"], sub["ci_hi"] - sub["coef"]],
-            fmt="o", color=BLUE, capsize=4, lw=1.5, ms=6,
-            label="Point estimate (95% CI, state-clustered)",
+            fmt="o", color=color, capsize=3, lw=1.4, ms=5, label=label,
         )
-        ax.set_xlabel("Days relative to nighttime AMBER Alert (aligned to disrupted commute)")
-        ax.set_ylabel("Additional traffic fatalities (county-day, FE-adjusted)")
-        ax.set_title("Fig. 1  Event Study Around Nighttime AMBER Alerts\n"
-                     r"(Timing-aligned outcome: $fatals\_next\_commute$)")
-        ks = sorted(sub["k"].tolist())
+
+    def _decorate_ax(ax, ks, ylabel, title):
+        ax.axhline(0, color="black", lw=0.8, ls="--")
+        ax.axvspan(-0.5, 0.5, alpha=0.07, color=BLUE)
         ax.set_xticks(ks)
-        ax.set_xticklabels(
-            ["k−3", "k−2", "k−1", "k=0\n(alert)", "k+1", "k+2", "k+3"],
-            fontsize=9,
-        )
-        ax.legend(frameon=False)
+        ax.set_xticklabels(_xtick_labels(ks), fontsize=7, rotation=45, ha="right")
+        ax.set_xlabel("Days relative to nighttime AMBER Alert", fontsize=8)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.set_title(title, fontsize=8, pad=4)
+        ax.legend(frameon=False, fontsize=7)
+
+    if has_base and has_odm:
+        # 2×2: row = outcome spec, col = baseline vs +outDM
+        fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharey="row")
+        col_titles = ["Baseline (treatment-date DoW×Month FE)",
+                      "+ Outcome-date DoW×Month FE (robustness)"]
+        for row, (base_key, odm_key, ylabel, row_lbl) in enumerate(spec_groups):
+            for col, (spec_key, col_title) in enumerate(
+                    [(base_key, col_titles[0]), (odm_key, col_titles[1])]):
+                ax = axes[row][col]
+                sub = est[est["spec"] == spec_key] if has_spec_col else est
+                if not sub.empty:
+                    _draw_es(ax, sub, BLUE if col == 0 else ORANGE,
+                             "Point est. (95% CI, state-cl.)")
+                _decorate_ax(ax, ks_all, ylabel if col == 0 else "",
+                             col_title if row == 0 else "")
+                if col == 0:
+                    ax.text(-0.18, 0.5, row_lbl, transform=ax.transAxes,
+                            fontsize=7, rotation=90, va="center", ha="center")
+        fig.suptitle("Fig. 1  Event Study Around Nighttime AMBER Alerts "
+                     "(Timing-Aligned Outcome)", fontsize=10)
+        fig.tight_layout()
+
+    elif has_spec_col and has_base:
+        # 1×2: two base specs side-by-side
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        for ax, (base_key, _, ylabel, title) in zip(axes, spec_groups):
+            sub = est[est["spec"] == base_key] if has_spec_col else est
+            if not sub.empty:
+                _draw_es(ax, sub, BLUE, "Point est. (95% CI, state-cl.)")
+            _decorate_ax(ax, ks_all, ylabel, title)
+        fig.suptitle("Fig. 1  Event Study Around Nighttime AMBER Alerts",
+                     fontsize=11, y=1.01)
+        fig.tight_layout()
+
+    else:
+        # Single-spec fallback
+        sub = est.sort_values("k")
+        fig, ax = plt.subplots(figsize=(8, 4))
+        _draw_es(ax, sub, BLUE, "Point estimate (95% CI, state-clustered)")
+        _decorate_ax(ax, ks_all,
+                     "Additional traffic fatalities (county-day, FE-adjusted)",
+                     "Fig. 1  Event Study Around Nighttime AMBER Alerts")
+
     save(fig, "fig1_event_study")
 
 
