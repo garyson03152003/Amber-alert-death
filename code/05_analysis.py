@@ -156,6 +156,9 @@ def add_aligned_outcome(df: pd.DataFrame) -> pd.DataFrame:
             if raw in df.columns:
                 df[rate] = df[raw] / pop_100k
 
+        import numpy as np
+        df["log_pop"] = np.log(pop.clip(lower=1))
+
     return df
 
 
@@ -257,10 +260,16 @@ def run_se_reduction(df: pd.DataFrame) -> pd.DataFrame:
                          weights_col="population"):
         results.append(r)
 
-    # --- (C) A + B ---
-    log.info("SE reduction: (C) restricted + WLS")
-    for r in _rate_specs(df_A, "fatals_rate_next_commute", "C:A+B",
-                         weights_col="population"):
+    # --- (B2) WLS weighted by log(population) ---
+    log.info("SE reduction: (B2) WLS log-population weights")
+    for r in _rate_specs(df_al, "fatals_rate_next_commute", "B2:logWLS",
+                         weights_col="log_pop"):
+        results.append(r)
+
+    # --- (C) A + B2 (restricted + log-pop WLS) ---
+    log.info("SE reduction: (C) restricted + log-pop WLS")
+    for r in _rate_specs(df_A, "fatals_rate_next_commute", "C:A+logWLS",
+                         weights_col="log_pop"):
         results.append(r)
 
     return pd.DataFrame(results)
@@ -413,6 +422,12 @@ def run_combined(df: pd.DataFrame) -> pd.DataFrame:
     df_R = df_al[df_al["fips"].isin(keep)].copy()
     log.info("Combined restricted: %d counties", len(keep))
     for r in _rate_specs(df_R, "combined_rate", "comb:≥5/yr"):
+        results.append(r)
+
+    # Log-pop WLS on restricted sample
+    log.info("Combined restricted + log-pop WLS")
+    for r in _rate_specs(df_R, "combined_rate", "comb:A+logWLS",
+                         weights_col="log_pop"):
         results.append(r)
 
     return pd.DataFrame(results)
