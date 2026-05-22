@@ -28,7 +28,8 @@ log = get_logger("05_analysis")
 warnings.filterwarnings("ignore")
 
 WEATHER = ["prcp_mm", "tmax_c"]
-SERIOUS_INJ_PATH = DATA_PROC / "fars_serious_injuries.parquet"
+SERIOUS_INJ_PATH  = DATA_PROC / "fars_serious_injuries.parquet"
+AMBER_CLEAN_PATH  = DATA_PROC / "amber_alerts_clean.parquet"
 
 
 def load_panel() -> pd.DataFrame:
@@ -48,6 +49,29 @@ def load_panel() -> pd.DataFrame:
     else:
         log.warning("Serious injury file not found — run 01b_extract_serious_injuries.py")
         df["serious_injuries"] = 0
+
+    # Merge alert breadth (counties per alert) so we can restrict to narrow alerts
+    if AMBER_CLEAN_PATH.exists():
+        am = pd.read_parquet(AMBER_CLEAN_PATH)
+        breadth = am.groupby("alert_id")["county_fips"].nunique().rename("n_counties")
+        am = am.merge(breadth, on="alert_id")
+        am["date"] = pd.to_datetime(am["issued_local"].dt.date)
+        # For each (county, night), minimum breadth among night alerts that fired
+        min_breadth = (
+            am[am["is_night"]]
+            .groupby(["county_fips", "date"])["n_counties"]
+            .min()
+            .reset_index()
+            .rename(columns={"county_fips": "fips", "n_counties": "alert_breadth"})
+        )
+        df = df.merge(min_breadth, on=["fips", "date"], how="left")
+        df["alert_breadth"] = df["alert_breadth"].fillna(0).astype(int)
+        log.info("Alert breadth merged. Night-alert rows: %d; mean breadth: %.1f counties",
+                 (df["alert_breadth"] > 0).sum(),
+                 df.loc[df["alert_breadth"] > 0, "alert_breadth"].mean())
+    else:
+        log.warning("Amber clean file not found — alert breadth unavailable")
+        df["alert_breadth"] = 0
 
     return df
 
@@ -427,6 +451,56 @@ def to_latex(results: pd.DataFrame, title: str, note: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Narrow-alert sensitivity  (drop broad / statewide alerts)
+# ---------------------------------------------------------------------------
+
+def run_narrow_alerts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Restrict treatment to alerts covering ≤K counties.
+
+    Broad (statewide) alerts are very diffuse treatments that add noise.
+    This sweeps K ∈ {5, 10, 20, unrestricted} and runs the baseline spec
+    on both raw count and combined rate outcomes.
+    """
+    df_al = add_aligned_outcome(df)
+
+    county_mean_pop = df_al.groupby("fips")["population"].transform("mean")
+    pop = df_al["population"].fillna(county_mean_pop)
+    df_al["combined_rate"] = (
+        df_al.get("combined_next_commute", df_al["fatals_next_commute"])
+        / (pop / 100_000)
+    )
+
+    results = []
+    thresholds = [5, 10, 20, 9999]   # 9999 = unrestricted
+
+    for k in thresholds:
+        label_k = f"≤{k}" if k < 9999 else "all"
+        df_k = df_al.copy()
+        # Re-define night_alert: only flag county-days where breadth ≤ k
+        if k < 9999:
+            df_k["night_alert"] = (
+                (df_k["night_alert"] == 1) & (df_k["alert_breadth"] <= k)
+            ).astype(int)
+        n_treated = int(df_k["night_alert"].sum())
+        log.info("Breadth ≤%s: %d treated county-days", label_k, n_treated)
+
+        for outcome, tag in [
+            ("fatals_next_commute", "count"),
+            ("combined_rate",       "comb/100k"),
+        ]:
+            sub = df_k.dropna(subset=[outcome])
+            r = fe_ols_from_panel(sub, outcome, county=True, dm=True,
+                                  cluster_col="state_code",
+                                  label=f"Breadth {label_k} [{tag}]")
+            r["breadth_threshold"] = k if k < 9999 else None
+            r["n_treated"] = n_treated
+            results.append(r)
+
+    return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
 # State-level clustering robustness
 # ---------------------------------------------------------------------------
 
@@ -593,6 +667,16 @@ def main() -> None:
     log.info("\n%s", plac[["model","coef","se","pval","n_obs"]].to_string(index=False))
     plac.to_csv(OUTPUT_TABS / "reg_placebo.csv", index=False)
     (OUTPUT_TABS / "reg_placebo.tex").write_text(to_latex(plac, "Placebo Tests", note))
+
+    log.info("=== NARROW ALERT SENSITIVITY ===")
+    narrow = run_narrow_alerts(df)
+    log.info("\n%s", narrow[["model","n_treated","coef","se","pval"]].to_string(index=False))
+    narrow.to_csv(OUTPUT_TABS / "reg_narrow_alerts.csv", index=False)
+    (OUTPUT_TABS / "reg_narrow_alerts.tex").write_text(
+        to_latex(narrow,
+                 "Robustness: Restricting to Narrowly-Targeted Alerts",
+                 note + " Treatment restricted to alerts covering $\\leq K$ counties. "
+                        "SEs clustered at state level."))
 
     log.info("=== STATE-LEVEL CLUSTERING ===")
     state_cl = run_state_clustered(df)
