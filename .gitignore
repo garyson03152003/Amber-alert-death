@@ -1,0 +1,28 @@
+# Environment
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.conda/
+
+# Data (large files; track only processed outputs small enough for git)
+# Raw data files (zip, csv, gz) are gitignored; keep .gitkeep for structure
+data/raw/**/*.zip
+data/raw/**/*.csv
+data/raw/**/*.csv.gz
+data/raw/**/*.txt
+data/raw/**/*.xlsx
+data/processed/*.parquet
+data/processed/*.csv
+
+# Output
+output/figures/*.pdf
+output/figures/*.png
+output/tables/*.tex
+output/tables/*.csv
+
+# OS
+.DS_Store
+Thumbs.db
