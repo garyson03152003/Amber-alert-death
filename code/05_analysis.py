@@ -217,14 +217,10 @@ def _rate_specs(df_al: pd.DataFrame, outcome: str, tag: str,
 
 def run_se_reduction(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Two SE-reduction strategies, both using fatals_rate_next_commute:
+    WLS robustness checks on the (already restricted) sample, using
+    fatals_rate_next_commute. County restriction is applied in prep_panel.
 
-    (A) Restrict to counties with ≥5 mean annual fatalities — removes zero-heavy
-        small counties that contribute noise but no signal.
-    (B) WLS weighted by county population — downweights small counties while
-        keeping them in sample. County + DoW×Month FE absorbed via weighted
-        alternating projections.
-    (C) A + B combined: restricted sample with population weights.
+    Unweighted (OLS) vs log-population weighted (WLS).
     """
     df_al = add_aligned_outcome(df)
     if "fatals_rate_next_commute" not in df_al.columns:
@@ -234,41 +230,12 @@ def run_se_reduction(df: pd.DataFrame) -> pd.DataFrame:
     df_al = df_al.dropna(subset=["fatals_rate_next_commute", "population"])
     results = []
 
-    # --- Baseline rate (unrestricted, unweighted) for reference ---
-    log.info("SE reduction: baseline rate (unrestricted)")
-    for r in _rate_specs(df_al, "fatals_rate_next_commute", "rate"):
+    log.info("SE reduction: OLS (rate)")
+    for r in _rate_specs(df_al, "fatals_rate_next_commute", "OLS"):
         results.append(r)
 
-    # --- (A) Restrict: counties with ≥5 mean annual fatalities ---
-    log.info("SE reduction: (A) county restriction ≥5 fatals/year")
-    min_fatals = 5
-    mean_annual = (
-        df_al.groupby(["fips", "year"])["fatals_t0"].sum()
-        .groupby("fips").mean()
-    )
-    keep_fips = mean_annual[mean_annual >= min_fatals].index
-    df_A = df_al[df_al["fips"].isin(keep_fips)].copy()
-    log.info("  Kept %d / %d counties (%.0f%% of rows)",
-             len(keep_fips), df_al["fips"].nunique(),
-             100 * len(df_A) / len(df_al))
-    for r in _rate_specs(df_A, "fatals_rate_next_commute", "A:≥5/yr"):
-        results.append(r)
-
-    # --- (B) WLS weighted by population ---
-    log.info("SE reduction: (B) WLS population weights")
-    for r in _rate_specs(df_al, "fatals_rate_next_commute", "B:WLS",
-                         weights_col="population"):
-        results.append(r)
-
-    # --- (B2) WLS weighted by log(population) ---
-    log.info("SE reduction: (B2) WLS log-population weights")
-    for r in _rate_specs(df_al, "fatals_rate_next_commute", "B2:logWLS",
-                         weights_col="log_pop"):
-        results.append(r)
-
-    # --- (C) A + B2 (restricted + log-pop WLS) ---
-    log.info("SE reduction: (C) restricted + log-pop WLS")
-    for r in _rate_specs(df_A, "fatals_rate_next_commute", "C:A+logWLS",
+    log.info("SE reduction: log-pop WLS (rate)")
+    for r in _rate_specs(df_al, "fatals_rate_next_commute", "logWLS",
                          weights_col="log_pop"):
         results.append(r)
 
@@ -390,8 +357,8 @@ def run_placebo(df: pd.DataFrame) -> pd.DataFrame:
 def run_combined(df: pd.DataFrame) -> pd.DataFrame:
     """
     Combined outcome: fatalities + serious injuries (in fatal crashes), per 100k.
-    Uses timing-aligned combined_next_commute / (population / 100k).
-    Runs the three core FE specs with and without sample restriction.
+    County restriction is already applied via prep_panel.
+    Runs OLS and log-pop WLS variants.
     """
     df_al = add_aligned_outcome(df)
     if "combined_next_commute" not in df_al.columns:
@@ -405,28 +372,15 @@ def run_combined(df: pd.DataFrame) -> pd.DataFrame:
     county_mean_pop = df_al.groupby("fips")["population"].transform("mean")
     pop = df_al["population"].fillna(county_mean_pop)
     df_al["combined_rate"] = df_al["combined_next_commute"] / (pop / 100_000)
-
     df_al = df_al.dropna(subset=["combined_rate", "population"])
     log.info("Combined rate mean: %.4f per 100k", df_al["combined_rate"].mean())
 
     results = []
-    for r in _rate_specs(df_al, "combined_rate", "comb"):
+    log.info("Combined OLS")
+    for r in _rate_specs(df_al, "combined_rate", "OLS"):
         results.append(r)
-
-    # Also run with sample restriction ≥5 fatals/year
-    mean_annual = (
-        df_al.groupby(["fips", "year"])["fatals_t0"].sum()
-        .groupby("fips").mean()
-    )
-    keep = mean_annual[mean_annual >= 5].index
-    df_R = df_al[df_al["fips"].isin(keep)].copy()
-    log.info("Combined restricted: %d counties", len(keep))
-    for r in _rate_specs(df_R, "combined_rate", "comb:≥5/yr"):
-        results.append(r)
-
-    # Log-pop WLS on restricted sample
-    log.info("Combined restricted + log-pop WLS")
-    for r in _rate_specs(df_R, "combined_rate", "comb:A+logWLS",
+    log.info("Combined log-pop WLS")
+    for r in _rate_specs(df_al, "combined_rate", "logWLS",
                          weights_col="log_pop"):
         results.append(r)
 

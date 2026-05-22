@@ -5,16 +5,34 @@ import pandas as pd
 import pyhdfe
 from scipy import stats
 
+from config import MIN_FATALS_PER_YEAR
 from utils import get_logger
 
 log = get_logger("analysis_lib")
 
 
 def prep_panel(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter to counties with ≥2 years and add integer FE codes."""
+    """Filter sample and add integer FE codes.
+
+    Keeps counties with ≥2 years of data AND ≥MIN_FATALS_PER_YEAR mean annual
+    fatalities.  Small zero-fatality counties contribute noise but no signal;
+    restricting to ≥5/yr halves the county count while retaining ~95% of
+    treated county-days.
+    """
     county_years = df.groupby("fips")["year"].nunique()
     keep = county_years[county_years >= 2].index
     df = df[df["fips"].isin(keep)].copy()
+
+    # Drop near-zero counties
+    mean_annual = (
+        df.groupby(["fips", "year"])["fatals_t0"].sum()
+        .groupby("fips").mean()
+    )
+    keep_fat = mean_annual[mean_annual >= MIN_FATALS_PER_YEAR].index
+    before = df["fips"].nunique()
+    df = df[df["fips"].isin(keep_fat)].copy()
+    log.info("County restriction (≥%d fatals/yr): %d → %d counties, %d rows",
+             MIN_FATALS_PER_YEAR, before, df["fips"].nunique(), len(df))
     df["county_code"]    = pd.Categorical(df["fips"]).codes.astype(np.int32)
     df["dow_month_code"] = pd.Categorical(
         df["dow"].astype(str) + "_" + df["month"].astype(str)

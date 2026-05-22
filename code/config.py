@@ -75,5 +75,8 @@ CLUSTER_VAR = "fips"
 # Days around alert to use in event study
 EVENT_WINDOW = (-3, 3)
 
-# Minimum fatalities per county-year to keep county in sample
-MIN_FATALS_PER_YEAR = 1
+# Minimum mean annual fatalities to keep county in sample.
+# Counties below this are essentially zero-fatality noise; ≥5 halves the
+# county count but retains ~95% of treated county-days (alerts cluster in
+# populated areas).
+MIN_FATALS_PER_YEAR = 5
