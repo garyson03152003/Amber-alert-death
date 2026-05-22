@@ -146,16 +146,16 @@ def main() -> None:
     panel = panel.sort_values(["fips", "date"]).reset_index(drop=True)
 
     for shift_days, colname in [
+        (-3, "fatals_tm3"),  # t-3  (event study pre-trend)
+        (-2, "fatals_tm2"),  # t-2  (event study pre-trend)
         (-1, "fatals_tm1"),  # t-1  (past-day placebo)
-        (-1, None),          # placeholder
         ( 1, "fatals_t1"),   # t+1  (main outcome)
         ( 2, "fatals_t2"),   # t+2  (second-day placebo)
+        ( 3, "fatals_t3"),   # t+3  (event study post)
     ]:
-        if colname is None:
-            continue
         panel[colname] = (
             panel.groupby("fips")["fatals_t0"]
-            .shift(-shift_days)   # shift(-1) → bring next day's value to today
+            .shift(-shift_days)
         )
 
     # -----------------------------------------------------------------------
@@ -189,11 +189,16 @@ def main() -> None:
     )
     alert_agg["alert_any"] = (alert_agg["_n_alerts"] > 0).astype(int)
     alert_agg["night_alert"] = alert_agg["night_alert"].fillna(False).astype(int)
+    alert_agg["day_alert"] = (
+        alert_agg["night_alert"] == 0
+    ) & (alert_agg["alert_any"] > 0)
+    alert_agg["day_alert"] = alert_agg["day_alert"].astype(int)
     alert_agg = alert_agg.drop(columns=["_n_alerts"])
 
     panel = panel.merge(alert_agg, on=["fips", "date"], how="left")
     panel["alert_any"]   = panel["alert_any"].fillna(0).astype(int)
     panel["night_alert"] = panel["night_alert"].fillna(0).astype(int)
+    panel["day_alert"]   = panel["day_alert"].fillna(0).astype(int)
 
     log.info(
         "Alert coverage: %d county-days with any alert, %d with night alert",

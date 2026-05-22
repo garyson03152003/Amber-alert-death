@@ -451,6 +451,159 @@ def to_latex(results: pd.DataFrame, title: str, note: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Daytime alert placebo
+# ---------------------------------------------------------------------------
+
+def run_daytime_placebo(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Falsification: AMBER alerts issued 9am–4pm (local time) should not
+    disrupt sleep and thus should have zero effect on same-day or next-day
+    fatalities. Uses day_alert as treatment; county + DoW×Month FE.
+    """
+    if "day_alert" not in df.columns:
+        log.warning("day_alert column missing — skipping daytime placebo")
+        return pd.DataFrame()
+
+    n_day = int(df["day_alert"].sum())
+    log.info("Daytime alert county-days: %d", n_day)
+
+    results = []
+    for outcome, lbl in [
+        ("fatals_t0", "Same-day (daytime alert)"),
+        ("fatals_t1", "Next-day (daytime alert)"),
+    ]:
+        sub = df.dropna(subset=[outcome]).copy()
+        r = fe_ols_from_panel(sub, outcome, treatment="day_alert",
+                              county=True, dm=True,
+                              cluster_col="state_code",
+                              label=lbl)
+        results.append(r)
+
+    # Compare side-by-side with nighttime for reference
+    df_al = add_aligned_outcome(df)
+    r = fe_ols_from_panel(df_al, "fatals_next_commute", treatment="night_alert",
+                          county=True, dm=True, cluster_col="state_code",
+                          label="Next-commute (night alert) [ref]")
+    results.append(r)
+    return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
+# Event study (dynamic effects t-3 … t+3)
+# ---------------------------------------------------------------------------
+
+def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Dynamic effects using timing-aligned outcome (fatals_next_commute).
+
+    For each k ∈ {-3,...,+3} we shift fatals_next_commute by k days within
+    each county, so k=0 is the aligned disrupted-commute morning, k=-1 is
+    the morning before, k=+1 is the morning after, etc.
+
+    Pre-trends (k < 0) should be flat; effect should peak at k=0.
+    """
+    df_al = add_aligned_outcome(df)
+    df_al = df_al.sort_values(["fips", "date"]).copy()
+
+    results = []
+    for k in range(-3, 4):
+        col = f"aligned_k{k:+d}"
+        # shift(-k): positive k shifts outcome forward (future), negative k backward (past)
+        df_al[col] = df_al.groupby("fips")["fatals_next_commute"].shift(-k)
+        sub = df_al.dropna(subset=[col]).copy()
+        r = fe_ols_from_panel(sub, col, county=True, dm=True,
+                              cluster_col="state_code",
+                              label=f"k={k:+d}")
+        r["k"] = k
+        results.append(r)
+    return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
+# Population-reached as continuous treatment dosage
+# ---------------------------------------------------------------------------
+
+def run_population_dosage(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Replace binary night_alert with log(total population reached by alert).
+    Each alert reaches the sum of populations of all counties it covers.
+    For county c on night t, dosage = log(pop_reached) if treated, 0 otherwise.
+
+    This leverages the finding that broad alerts drive the effect: the dose
+    scales with people woken up, consistent with a mass sleep-disruption channel.
+    """
+    if "alert_breadth" not in df.columns or not AMBER_CLEAN_PATH.exists():
+        log.warning("Alert breadth / amber data missing — skipping dosage spec")
+        return pd.DataFrame()
+
+    if "population" not in df.columns:
+        log.warning("Population missing — skipping dosage spec")
+        return pd.DataFrame()
+
+    # Build alert-level total population reached
+    am = pd.read_parquet(AMBER_CLEAN_PATH)
+    am["date"] = pd.to_datetime(am["issued_local"].dt.date)
+
+    # We need county populations — use the panel's population column
+    county_pop = (
+        df.groupby("fips")["population"]
+        .mean()
+        .reset_index()
+        .rename(columns={"population": "county_pop"})
+    )
+    am = am.merge(county_pop, left_on="county_fips", right_on="fips", how="left")
+
+    # Total population per alert
+    alert_pop = (
+        am[am["is_night"]]
+        .groupby("alert_id")["county_pop"]
+        .sum()
+        .rename("pop_reached")
+    )
+    am_night = am[am["is_night"]].merge(alert_pop, on="alert_id")
+
+    # For each (county, night), sum pop_reached across all alerts
+    dosage = (
+        am_night.groupby(["county_fips", "date"])["pop_reached"]
+        .sum()
+        .reset_index()
+        .rename(columns={"county_fips": "fips", "pop_reached": "pop_reached_total"})
+    )
+
+    df2 = df.merge(dosage, on=["fips", "date"], how="left")
+    df2["pop_reached_total"] = df2["pop_reached_total"].fillna(0)
+    df2["log_pop_reached"] = np.log(df2["pop_reached_total"].clip(lower=1))
+    # Zero out log for untreated rows
+    df2.loc[df2["night_alert"] == 0, "log_pop_reached"] = 0
+
+    n_nonzero = int((df2["log_pop_reached"] > 0).sum())
+    log.info("Population dosage: %d treated county-days, mean log_pop_reached=%.2f",
+             n_nonzero,
+             df2.loc[df2["log_pop_reached"] > 0, "log_pop_reached"].mean())
+
+    df_al = add_aligned_outcome(df2)
+    county_mean_pop = df_al.groupby("fips")["population"].transform("mean")
+    pop = df_al["population"].fillna(county_mean_pop)
+    df_al["combined_rate"] = (
+        df_al.get("combined_next_commute", df_al["fatals_next_commute"])
+        / (pop / 100_000)
+    )
+
+    results = []
+    for outcome, tag in [
+        ("fatals_next_commute", "count"),
+        ("combined_rate",       "comb/100k"),
+    ]:
+        sub = df_al.dropna(subset=[outcome])
+        r = fe_ols_from_panel(sub, outcome, treatment="log_pop_reached",
+                              county=True, dm=True,
+                              cluster_col="state_code",
+                              label=f"log(pop reached) [{tag}]")
+        results.append(r)
+    return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
 # Narrow-alert sensitivity  (drop broad / statewide alerts)
 # ---------------------------------------------------------------------------
 
@@ -667,6 +820,33 @@ def main() -> None:
     log.info("\n%s", plac[["model","coef","se","pval","n_obs"]].to_string(index=False))
     plac.to_csv(OUTPUT_TABS / "reg_placebo.csv", index=False)
     (OUTPUT_TABS / "reg_placebo.tex").write_text(to_latex(plac, "Placebo Tests", note))
+
+    log.info("=== DAYTIME ALERT PLACEBO ===")
+    day_plac = run_daytime_placebo(df)
+    if not day_plac.empty:
+        log.info("\n%s", day_plac[["model","coef","se","pval","n_obs"]].to_string(index=False))
+        day_plac.to_csv(OUTPUT_TABS / "reg_daytime_placebo.csv", index=False)
+        (OUTPUT_TABS / "reg_daytime_placebo.tex").write_text(
+            to_latex(day_plac, "Falsification: Daytime AMBER Alert Has No Effect",
+                     note + " Day alert = issued 9am--4pm local time. "
+                            "Night alert shown for comparison."))
+
+    log.info("=== EVENT STUDY (t-3 to t+3) ===")
+    evs = run_event_study(df)
+    if not evs.empty:
+        log.info("\n%s", evs[["k","model","coef","se","pval"]].to_string(index=False))
+        evs.to_csv(OUTPUT_TABS / "reg_event_study.csv", index=False)
+
+    log.info("=== POPULATION DOSAGE ===")
+    dosage = run_population_dosage(df)
+    if not dosage.empty:
+        log.info("\n%s", dosage[["model","coef","se","pval","n_obs"]].to_string(index=False))
+        dosage.to_csv(OUTPUT_TABS / "reg_dosage.csv", index=False)
+        (OUTPUT_TABS / "reg_dosage.tex").write_text(
+            to_latex(dosage,
+                     "Population Dosage: log(Total Population Reached by Alert)",
+                     note + " Treatment is log(sum of county populations covered by "
+                            "nighttime alerts). SEs clustered at state level."))
 
     log.info("=== NARROW ALERT SENSITIVITY ===")
     narrow = run_narrow_alerts(df)
