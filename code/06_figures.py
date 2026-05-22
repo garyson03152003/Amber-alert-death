@@ -55,52 +55,59 @@ def save(fig, stem: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fig 1: Event study
+# Fig 1: Event study  (reads pre-computed reg_event_study.csv)
 # ---------------------------------------------------------------------------
 
 def event_study(panel: pd.DataFrame) -> None:
     log.info("Fig 1: Event study")
-    window = range(EVENT_WINDOW[0], EVENT_WINDOW[1] + 1)
-    estimates = []
+    es_path = OUTPUT_TABS / "reg_event_study.csv"
+    if not es_path.exists():
+        log.warning("reg_event_study.csv not found — re-computing (slow).")
+        # Fallback: re-compute using timing-aligned outcome
+        from analysis_lib import prep_panel
+        from analysis_lib import fe_ols_from_panel as _ols
+        df = prep_panel(panel.copy())
+        df["fatals_next_commute"] = df["fatals_t1"]
+        mask_mid = df["night_band"].isin(["deep_night", "late_night"])
+        df.loc[mask_mid, "fatals_next_commute"] = df.loc[mask_mid, "fatals_t0"]
+        df = df.sort_values(["fips", "date"]).copy()
+        rows = []
+        for k in range(-3, 4):
+            col = f"aligned_k{k:+d}"
+            df[col] = df.groupby("fips")["fatals_next_commute"].shift(-k)
+            sub = df.dropna(subset=[col]).copy()
+            r = _ols(sub, col, county=True, dm=True,
+                     cluster_col="state_code", label=f"k={k:+d}")
+            r["k"] = k
+            rows.append(r)
+        est = pd.DataFrame(rows)
+    else:
+        est = pd.read_csv(es_path)
 
-    for k in window:
-        # Build outcome for this lag: shift fatals_t0 by k within county
-        # negative k → look back (placebo), positive → look forward
-        panel["_yk"] = panel.groupby("fips")["fatals_t0"].shift(-k)
-        sub = panel.dropna(subset=["_yk"]).copy()
-        r = fe_ols_from_panel(sub, "_yk", county=True, dm=True,
-                              label=f"k={k}")
-        estimates.append({
-            "k": k,
-            "coef":  r.get("coef", np.nan),
-            "ci_lo": r.get("ci_lo", np.nan),
-            "ci_hi": r.get("ci_hi", np.nan),
-        })
-        log.info("  k=%+d  β=%.4f  (%.4f, %.4f)",
-                 k, r.get("coef",np.nan), r.get("ci_lo",np.nan), r.get("ci_hi",np.nan))
-
-    panel.drop(columns=["_yk"], inplace=True, errors="ignore")
-
-    est = pd.DataFrame(estimates)
-    mask = est["coef"].notna()
+    est = est.dropna(subset=["coef"])
+    est = est.sort_values("k")
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.axhline(0, color="black", lw=0.8, ls="--")
-    ax.axvspan(0.5, 1.5, alpha=0.07, color=BLUE)   # highlight t+1 estimate
+    # highlight k=0 (the alert-morning disrupted commute)
+    ax.axvspan(-0.5, 0.5, alpha=0.07, color=BLUE)
 
     ax.errorbar(
-        est.loc[mask, "k"], est.loc[mask, "coef"],
-        yerr=[est.loc[mask,"coef"]-est.loc[mask,"ci_lo"],
-              est.loc[mask,"ci_hi"]-est.loc[mask,"coef"]],
+        est["k"], est["coef"],
+        yerr=[est["coef"] - est["ci_lo"], est["ci_hi"] - est["coef"]],
         fmt="o", color=BLUE, capsize=4, lw=1.5, ms=6,
-        label="Point estimate (95% CI)",
+        label="Point estimate (95% CI, state-clustered)",
     )
-    ax.set_xlabel("Days relative to nighttime AMBER Alert")
+    ax.set_xlabel("Days relative to nighttime AMBER Alert (aligned to disrupted commute)")
     ax.set_ylabel("Additional traffic fatalities (county-day, FE-adjusted)")
-    ax.set_title("Fig. 1  Event Study Around Nighttime AMBER Alerts")
-    ax.set_xticks(list(window))
-    ax.set_xticklabels([f"t{k:+d}" if k != 0 else "t (alert night)" for k in window],
-                       fontsize=9)
+    ax.set_title("Fig. 1  Event Study Around Nighttime AMBER Alerts\n"
+                 r"(Timing-aligned outcome: $fatals\_next\_commute$)")
+    ks = sorted(est["k"].tolist())
+    ax.set_xticks(ks)
+    ax.set_xticklabels(
+        ["k−3", "k−2", "k−1", "k=0\n(alert)", "k+1", "k+2", "k+3"],
+        fontsize=9,
+    )
     ax.legend(frameon=False)
     save(fig, "fig1_event_study")
 
@@ -221,6 +228,52 @@ def placebo_plot() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fig 6: Daytime vs Nighttime alert comparison
+# ---------------------------------------------------------------------------
+
+def daytime_placebo_plot() -> None:
+    log.info("Fig 6: Daytime alert placebo")
+    dp_path = OUTPUT_TABS / "reg_daytime_placebo.csv"
+    if not dp_path.exists():
+        log.warning("reg_daytime_placebo.csv not found — skipping Fig 6.")
+        return
+    dp = pd.read_csv(dp_path).dropna(subset=["coef"])
+
+    label_order = [
+        "Same-day (daytime alert)",
+        "Next-day (daytime alert)",
+        "Next-commute (night alert) [ref]",
+    ]
+    colors = [RED, RED, BLUE]
+    dp["_order"] = dp["model"].map({l: i for i, l in enumerate(label_order)})
+    dp = dp.dropna(subset=["_order"]).sort_values("_order")
+
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    ax.axvline(0, color="black", lw=0.8, ls="--")
+
+    for i, (_, row) in enumerate(dp.iterrows()):
+        col = BLUE if "night" in row["model"].lower() else RED
+        ax.errorbar(
+            row["coef"], i,
+            xerr=[[row["coef"] - row["ci_lo"]], [row["ci_hi"] - row["coef"]]],
+            fmt="o", color=col, capsize=4, lw=1.4, ms=7,
+        )
+
+    ax.set_yticks(range(len(dp)))
+    ax.set_yticklabels(dp["model"].tolist(), fontsize=9)
+    ax.set_xlabel("Coefficient (county + DoW×Month FE; state-clustered SE)")
+    ax.set_title("Fig. 6  Daytime Alert Placebo vs Nighttime Alert Effect")
+    ax.invert_yaxis()
+
+    from matplotlib.lines import Line2D
+    ax.legend(handles=[
+        Line2D([0],[0],marker="o",color="w",markerfacecolor=BLUE,ms=8,label="Nighttime (treatment)"),
+        Line2D([0],[0],marker="o",color="w",markerfacecolor=RED, ms=8,label="Daytime (placebo)"),
+    ], frameon=False, loc="lower right")
+    save(fig, "fig6_daytime_placebo")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -252,6 +305,7 @@ def main() -> None:
         geographic_bar(amber)
 
     placebo_plot()
+    daytime_placebo_plot()
 
     log.info("All figures saved to output/figures/")
 

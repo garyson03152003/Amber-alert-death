@@ -501,21 +501,29 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
     the morning before, k=+1 is the morning after, etc.
 
     Pre-trends (k < 0) should be flat; effect should peak at k=0.
+
+    Memory note: we work on a lean DataFrame (only FE-identifier columns +
+    treatment + shifted outcome) to avoid OOM when copying within the loop.
     """
+    # Build aligned outcome, then slim down to only what fe_ols needs
     df_al = add_aligned_outcome(df)
-    df_al = df_al.sort_values(["fips", "date"]).copy()
+    FE_COLS = ["fips", "date", "county_code", "state_code",
+               "dow_month_code", "night_alert", "fatals_next_commute"]
+    lean = df_al[FE_COLS].sort_values(["fips", "date"]).copy()
+    del df_al  # free ~3 GB
 
     results = []
     for k in range(-3, 4):
         col = f"aligned_k{k:+d}"
-        # shift(-k): positive k shifts outcome forward (future), negative k backward (past)
-        df_al[col] = df_al.groupby("fips")["fatals_next_commute"].shift(-k)
-        sub = df_al.dropna(subset=[col]).copy()
+        # shift(-k): positive k → look forward (future commute), negative → pre-trend
+        lean[col] = lean.groupby("fips")["fatals_next_commute"].shift(-k)
+        sub = lean.dropna(subset=[col])
         r = fe_ols_from_panel(sub, col, county=True, dm=True,
                               cluster_col="state_code",
                               label=f"k={k:+d}")
         r["k"] = k
         results.append(r)
+        lean.drop(columns=[col], inplace=True)   # keep lean footprint
     return pd.DataFrame(results)
 
 
