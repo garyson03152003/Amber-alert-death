@@ -751,10 +751,16 @@ def run_threshold_sensitivity(df_raw: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    import gc
     OUTPUT_TABS.mkdir(parents=True, exist_ok=True)
 
-    df_raw = load_panel()   # unfiltered — used for threshold sensitivity sweep
+    # Load full panel (unfiltered) and apply restriction.
+    # We immediately drop df_raw to free ~3 GB; it is reloaded only when
+    # run_threshold_sensitivity needs the unrestricted panel at the very end.
+    panel_path = DATA_PROC / "panel_county_day.parquet"
+    df_raw = load_panel()
     df = prep_panel(df_raw.copy())
+    del df_raw; gc.collect()   # free ~3 GB before the analysis loop
 
     note = ("SE clustered by county. County FE and DoW$\\times$Month FE absorbed "
             "via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10.")
@@ -781,6 +787,7 @@ def main() -> None:
                      "(per 100,000 Population)",
                      note + " Outcome is \\textit{fatals\\_rate\\_next\\_commute}: "
                             "fatalities per 100,000 county population, timing-aligned."))
+    del rate; gc.collect()
 
     log.info("=== SE REDUCTION (A: restrict, B: WLS, C: A+B) ===")
     se_red = run_se_reduction(df)
@@ -794,6 +801,7 @@ def main() -> None:
                      note + " (A) counties with $\\geq$5 mean annual fatalities; "
                             "(B) WLS weighted by county population; "
                             "(C) both combined."))
+    del se_red; gc.collect()
 
     log.info("=== COMBINED OUTCOME (fatalities + serious injuries) ===")
     comb = run_combined(df)
@@ -805,9 +813,9 @@ def main() -> None:
                      "Combined Outcome: Fatalities + Serious Injuries per 100k",
                      note + " Serious injuries defined as INJ\\_SEV=3 in FARS person "
                             "file (incapacitating injuries in fatal crashes)."))
+    del comb; gc.collect()
 
     log.info("=== ALIGNED (timing-corrected) ===")
-
     aligned = run_aligned(df)
     log.info("\n%s", aligned[["model","coef","se","pval","n_obs"]].to_string(index=False))
     aligned.to_csv(OUTPUT_TABS / "reg_aligned.csv", index=False)
@@ -822,12 +830,14 @@ def main() -> None:
     log.info("\n%s", het[["model","coef","se","pval","n_obs"]].to_string(index=False))
     het.to_csv(OUTPUT_TABS / "reg_hetero.csv", index=False)
     (OUTPUT_TABS / "reg_hetero.tex").write_text(to_latex(het, "Heterogeneity Analysis", note))
+    del het; gc.collect()
 
     log.info("=== PLACEBO ===")
     plac = run_placebo(df)
     log.info("\n%s", plac[["model","coef","se","pval","n_obs"]].to_string(index=False))
     plac.to_csv(OUTPUT_TABS / "reg_placebo.csv", index=False)
     (OUTPUT_TABS / "reg_placebo.tex").write_text(to_latex(plac, "Placebo Tests", note))
+    del plac; gc.collect()
 
     log.info("=== DAYTIME ALERT PLACEBO ===")
     day_plac = run_daytime_placebo(df)
@@ -877,7 +887,10 @@ def main() -> None:
                  "within states (statewide AMBER alerts)."))
 
     log.info("=== THRESHOLD SENSITIVITY ===")
+    # Reload the unfiltered panel (freed at startup to save memory)
+    df_raw = load_panel()
     thresh = run_threshold_sensitivity(df_raw)
+    del df_raw; gc.collect()
     log.info("\n%s",
              thresh[["model","threshold","n_counties","n_treated","coef","se","pval"]]
              .to_string(index=False))
