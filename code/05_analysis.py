@@ -95,22 +95,77 @@ def run_baseline(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_aligned_outcome(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Construct fatals_next_commute: fatalities on the morning after the disrupted
-    sleep period, aligned correctly by alert timing.
+    Construct fatals_next_commute and fatals_rate_next_commute.
 
-    The key insight is that midnight–6am alerts fire during Wednesday morning
-    (calendar day Wednesday), so they disrupt the Wednesday commute → outcome
-    is fatals_t0 (same-day).  Early-night alerts fire Tuesday 10pm–midnight and
-    disrupt the Wednesday commute → outcome is fatals_t1 (next-day from Tuesday).
+    Timing rule: midnight–6am alerts fire on calendar day t, disrupting the
+    same morning's commute → outcome is fatals_t0.  Early-night (10pm–midnight)
+    alerts fire on day t-1, disrupting the following morning → outcome is fatals_t1.
+    Control rows default to fatals_t1.
 
-    Control rows and early_night rows both use fatals_t1 as the default outcome.
-    Midnight-6am rows (deep_night, late_night) use fatals_t0.
+    Rate outcomes (per 100k population) are built from the same raw counts.
+    Missing county-year population is imputed with the county's cross-year mean.
     """
     df = df.copy()
+    # --- aligned raw count ---
     df["fatals_next_commute"] = df["fatals_t1"]
     midnight_mask = df["night_band"].isin(["deep_night", "late_night"])
     df.loc[midnight_mask, "fatals_next_commute"] = df.loc[midnight_mask, "fatals_t0"]
+
+    # --- population: fill missing with county cross-year mean ---
+    if "population" in df.columns:
+        county_mean_pop = df.groupby("fips")["population"].transform("mean")
+        pop = df["population"].fillna(county_mean_pop)
+        pop_100k = pop / 100_000
+
+        for raw, rate in [
+            ("fatals_t0",           "fatals_rate_t0"),
+            ("fatals_t1",           "fatals_rate_t1"),
+            ("fatals_tm1",          "fatals_rate_tm1"),
+            ("fatals_t2",           "fatals_rate_t2"),
+            ("fatals_next_commute", "fatals_rate_next_commute"),
+        ]:
+            if raw in df.columns:
+                df[rate] = df[raw] / pop_100k
+
     return df
+
+
+def run_rate_baseline(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Same seven specifications as run_baseline but using fatals_rate_next_commute
+    (traffic fatalities per 100,000 county population) as the outcome.
+    This normalises for county size and reduces heteroskedasticity.
+    """
+    df_al = add_aligned_outcome(df)
+    if "fatals_rate_next_commute" not in df_al.columns:
+        log.warning("Population data missing — cannot compute rate outcome.")
+        return pd.DataFrame()
+
+    df_al = df_al.dropna(subset=["fatals_rate_next_commute"])
+    pop_coverage = df_al["fatals_rate_next_commute"].notna().mean()
+    log.info("Rate outcome coverage: %.1f%%", pop_coverage * 100)
+
+    avail_w = [c for c in WEATHER if df_al[c].notna().mean() > 0.01]
+    results = []
+
+    for label, kwargs in [
+        ("(1) Pooled OLS",        dict(county=False, dm=False)),
+        ("(2) County FE",         dict(county=True,  dm=False)),
+        ("(3) Baseline",          dict(county=True,  dm=True)),
+        ("(5) + Year FE",         dict(county=True,  dm=True,  extra_fes=["year_code"])),
+        ("(6) DoW×Year FE",       dict(county=True,  dm=False, extra_fes=["dow_year_code"])),
+        ("(7) Year×Month FE",     dict(county=True,  dm=False, extra_fes=["year_month_code"])),
+    ]:
+        log.info("%s [rate]", label)
+        results.append(fe_ols_from_panel(df_al, "fatals_rate_next_commute",
+                                         label=label, **kwargs))
+    if avail_w:
+        log.info("(4) Baseline + weather [rate]")
+        results.append(fe_ols_from_panel(df_al, "fatals_rate_next_commute",
+                                         controls=avail_w, county=True, dm=True,
+                                         label="(4) + Weather"))
+
+    return pd.DataFrame(results)
 
 
 def run_aligned(df: pd.DataFrame) -> pd.DataFrame:
@@ -286,6 +341,18 @@ def main() -> None:
                  "(Timing-Aligned Outcome)",
                  note + " Outcome is \\textit{fatals\\_next\\_commute}: "
                         "fatals$_{t+0}$ for midnight--6am alerts, fatals$_{t+1}$ otherwise."))
+
+    log.info("=== RATE OUTCOME (per 100k population) ===")
+    rate = run_rate_baseline(df)
+    if not rate.empty:
+        log.info("\n%s", rate[["model","coef","se","pval","n_obs"]].to_string(index=False))
+        rate.to_csv(OUTPUT_TABS / "reg_rate.csv", index=False)
+        (OUTPUT_TABS / "reg_rate.tex").write_text(
+            to_latex(rate,
+                     "Effect of Nighttime AMBER Alert on Traffic Fatality Rate "
+                     "(per 100,000 Population)",
+                     note + " Outcome is \\textit{fatals\\_rate\\_next\\_commute}: "
+                            "fatalities per 100,000 county population, timing-aligned."))
 
     log.info("=== ALIGNED (timing-corrected) ===")
     aligned = run_aligned(df)
