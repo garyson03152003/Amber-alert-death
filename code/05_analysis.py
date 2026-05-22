@@ -286,28 +286,27 @@ def run_se_reduction(df: pd.DataFrame) -> pd.DataFrame:
 def run_aligned(df: pd.DataFrame) -> pd.DataFrame:
     """
     Three aligned specifications that use the correct fatality window per band.
-
-    (A) Early-night only (10pm–midnight) → fatals_t1
-    (B) Midnight–6am only               → fatals_t0
-    (C) Pooled aligned (fatals_next_commute): fatals_t0 for midnight–6am treated
-        rows, fatals_t1 for all others.  This is the preferred combined estimate.
+    Memory: modifies night_alert in-place, restores original value after each spec.
     """
+    import gc
+    orig_night_alert = df["night_alert"].copy()
     results = []
 
-    # (A) Early-night alerts: next-day outcome is correct
+    # (A) Early-night alerts → fatals_t1
     log.info("(A) Aligned: early_night → fatals_t1")
-    sub_a = df.copy()
-    sub_a["night_alert"] = (sub_a["night_band"] == "early_night").astype(int)
-    results.append(fe_ols_from_panel(sub_a, "fatals_t1", county=True, dm=True,
+    df["night_alert"] = (df["night_band"] == "early_night").astype(int)
+    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=True,
                                      label="(A) Early-night → t+1"))
 
-    # (B) Midnight–6am alerts: same-day outcome is correct
+    # (B) Midnight–6am alerts → fatals_t0
     log.info("(B) Aligned: midnight-6am → fatals_t0")
-    sub_b = df.copy()
-    sub_b["night_alert"] = (sub_b["night_band"].isin(
-        ["deep_night", "late_night"])).astype(int)
-    results.append(fe_ols_from_panel(sub_b, "fatals_t0", county=True, dm=True,
+    df["night_alert"] = df["night_band"].isin(["deep_night", "late_night"]).astype(int)
+    results.append(fe_ols_from_panel(df, "fatals_t0", county=True, dm=True,
                                      label="(B) Midnight-6am → t+0"))
+
+    # Restore original night_alert before building aligned outcome
+    df["night_alert"] = orig_night_alert
+    del orig_night_alert; gc.collect()
 
     # (C) Pooled aligned: fatals_next_commute
     log.info("(C) Aligned: pooled (fatals_next_commute)")
@@ -316,17 +315,18 @@ def run_aligned(df: pd.DataFrame) -> pd.DataFrame:
                                      county=True, dm=True,
                                      label="(C) Pooled aligned"))
 
-    # (D) Same as (C) but with year FE added for robustness
+    # (D) + Year FE
     log.info("(D) Aligned pooled + Year FE")
     results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
                                      county=True, dm=True,
                                      extra_fes=["year_code"],
                                      label="(D) Pooled aligned + Year FE"))
 
-    # Memo: misaligned baseline for direct comparison
+    # (M) Misaligned memo
     log.info("(M) Memo: misaligned baseline (fatals_t1, all night)")
-    results.append(fe_ols_from_panel(df, "fatals_t1", county=True, dm=True,
+    results.append(fe_ols_from_panel(df_al, "fatals_t1", county=True, dm=True,
                                      label="(M) Misaligned baseline [memo]"))
+    del df_al; gc.collect()
 
     return pd.DataFrame(results)
 
@@ -334,25 +334,26 @@ def run_aligned(df: pd.DataFrame) -> pd.DataFrame:
 def run_heterogeneity(df: pd.DataFrame) -> pd.DataFrame:
     """
     Heterogeneity analysis using timing-aligned outcomes per band.
-
-    Night bands: early_night → fatals_t1 (next-day commute)
-                 deep_night / late_night → fatals_t0 (same-day commute)
-    Weekday/weekend and alert-hour splits use fatals_next_commute.
+    Memory: modifies night_alert in-place to avoid copies; restores after each spec.
     """
+    import gc
     df_al = add_aligned_outcome(df)
+    orig_night = df_al["night_alert"].copy()
     results = []
 
+    # Band splits: modify night_alert in-place, restore after each
     for band, outcome in [
         ("early_night", "fatals_t1"),
         ("deep_night",  "fatals_t0"),
         ("late_night",  "fatals_t0"),
     ]:
-        sub = df_al.copy()
-        sub["night_alert"] = (sub["night_band"] == band).astype(int)
-        results.append(fe_ols_from_panel(sub, outcome,
+        df_al["night_alert"] = (df_al["night_band"] == band).astype(int)
+        results.append(fe_ols_from_panel(df_al, outcome,
                                          county=True, dm=True,
                                          label=f"Band: {band}"))
+    df_al["night_alert"] = orig_night
 
+    # Weekday / weekend — pass view (no copy needed)
     for lbl, mask in [
         ("Weekday", df_al["dow"].isin([0, 1, 2, 3])),
         ("Weekend", df_al["dow"].isin([4, 5, 6])),
@@ -360,18 +361,19 @@ def run_heterogeneity(df: pd.DataFrame) -> pd.DataFrame:
         results.append(fe_ols_from_panel(df_al[mask], "fatals_next_commute",
                                          county=True, dm=True, label=lbl))
 
+    # Alert hour splits: modify in-place, restore after each
     for lbl, hrs, outcome in [
         ("Alert 10pm-midnight", list(range(22, 24)), "fatals_t1"),
         ("Alert midnight-3am",  list(range(0,  3)),  "fatals_t0"),
         ("Alert 3am-6am",       list(range(3,  6)),  "fatals_t0"),
     ]:
-        sub = df_al.copy()
-        sub["night_alert"] = (
-            df_al["night_alert"].astype(bool) & df_al["alert_hour"].isin(hrs)
+        df_al["night_alert"] = (
+            orig_night.astype(bool) & df_al["alert_hour"].isin(hrs)
         ).astype(int)
-        results.append(fe_ols_from_panel(sub, outcome,
+        results.append(fe_ols_from_panel(df_al, outcome,
                                          county=True, dm=True, label=lbl))
 
+    del df_al, orig_night; gc.collect()
     return pd.DataFrame(results)
 
 
@@ -380,6 +382,7 @@ def run_placebo(df: pd.DataFrame) -> pd.DataFrame:
     Placebo tests using aligned outcomes.
     t-1 and t+2 should show no effect; aligned main spec is included for reference.
     """
+    import gc
     df_al = add_aligned_outcome(df)
     results = []
     for outcome, lbl in [
@@ -389,9 +392,9 @@ def run_placebo(df: pd.DataFrame) -> pd.DataFrame:
     ]:
         if outcome not in df_al.columns:
             continue
-        sub = df_al.dropna(subset=[outcome]).copy()
-        results.append(fe_ols_from_panel(sub, outcome,
-                                         county=True, dm=True, label=lbl))
+        results.append(fe_ols_from_panel(df_al.dropna(subset=[outcome]),
+                                         outcome, county=True, dm=True, label=lbl))
+    del df_al; gc.collect()
     return pd.DataFrame(results)
 
 
