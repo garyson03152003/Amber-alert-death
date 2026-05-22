@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC, OUTPUT_TABS
 from utils import get_logger
 from analysis_lib import prep_panel, fe_ols_from_panel
+import numpy as np
 
 log = get_logger("05_analysis")
 warnings.filterwarnings("ignore")
@@ -426,14 +427,99 @@ def to_latex(results: pd.DataFrame, title: str, note: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# State-level clustering robustness
+# ---------------------------------------------------------------------------
+
+def run_state_clustered(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Re-run the three core baseline specs clustering at state (not county) level.
+    Statewide AMBER alerts mean treated counties within a state are correlated,
+    so county-level clustering may understate SEs.  State clustering is more
+    conservative and accounts for this.
+    """
+    df_al = add_aligned_outcome(df)
+    results = []
+    for label, kwargs in [
+        ("(2) County FE [state-cl]",   dict(county=True, dm=False)),
+        ("(3) Baseline [state-cl]",    dict(county=True, dm=True)),
+        ("(5) + Year FE [state-cl]",   dict(county=True, dm=True,
+                                            extra_fes=["year_code"])),
+    ]:
+        log.info("%s", label)
+        results.append(fe_ols_from_panel(df_al, "fatals_next_commute",
+                                         cluster_col="state_code",
+                                         label=label, **kwargs))
+
+    # Also combined rate with state clustering
+    county_mean_pop = df_al.groupby("fips")["population"].transform("mean")
+    pop = df_al["population"].fillna(county_mean_pop)
+    df_al["combined_rate"] = (
+        df_al.get("combined_next_commute", df_al["fatals_next_commute"])
+        / (pop / 100_000)
+    )
+    df_al = df_al.dropna(subset=["combined_rate"])
+    for label, kwargs in [
+        ("(2) County FE comb [state-cl]",  dict(county=True, dm=False)),
+        ("(3) Baseline comb [state-cl]",   dict(county=True, dm=True)),
+    ]:
+        log.info("%s", label)
+        results.append(fe_ols_from_panel(df_al, "combined_rate",
+                                         cluster_col="state_code",
+                                         label=label, **kwargs))
+    return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
+# Threshold sensitivity
+# ---------------------------------------------------------------------------
+
+def run_threshold_sensitivity(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Re-run the baseline spec at different county fatality thresholds (0, 1, 3, 5, 10, 20).
+    Shows how coefficients and SEs vary with sample restriction.
+    Outcome: fatals_next_commute (raw count).
+    """
+    thresholds = [0, 1, 3, 5, 10, 20]
+    results = []
+    for thr in thresholds:
+        df_t = prep_panel(df_raw.copy(), min_fatals=thr)
+        df_al = add_aligned_outcome(df_t)
+
+        # Rate outcome
+        county_mean_pop = df_al.groupby("fips")["population"].transform("mean")
+        pop = df_al["population"].fillna(county_mean_pop)
+        df_al["fatals_rate_next_commute"] = df_al["fatals_next_commute"] / (pop / 100_000)
+        df_al["log_pop"] = np.log(pop.clip(lower=1))
+        df_al = df_al.dropna(subset=["fatals_rate_next_commute"])
+
+        n_counties = df_al["fips"].nunique()
+        n_treated  = int(df_al["night_alert"].sum())
+        log.info("Threshold ≥%d: %d counties, %d treated county-days",
+                 thr, n_counties, n_treated)
+
+        for outcome, tag in [
+            ("fatals_next_commute",      "count"),
+            ("fatals_rate_next_commute", "rate/100k"),
+        ]:
+            r = fe_ols_from_panel(df_al, outcome, county=True, dm=True,
+                                  label=f"≥{thr}/yr [{tag}]")
+            r["threshold"]  = thr
+            r["n_counties"] = n_counties
+            r["n_treated"]  = n_treated
+            results.append(r)
+
+    return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     OUTPUT_TABS.mkdir(parents=True, exist_ok=True)
 
-    df = load_panel()
-    df = prep_panel(df)
+    df_raw = load_panel()   # unfiltered — used for threshold sensitivity sweep
+    df = prep_panel(df_raw.copy())
 
     note = ("SE clustered by county. County FE and DoW$\\times$Month FE absorbed "
             "via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10.")
@@ -507,6 +593,23 @@ def main() -> None:
     log.info("\n%s", plac[["model","coef","se","pval","n_obs"]].to_string(index=False))
     plac.to_csv(OUTPUT_TABS / "reg_placebo.csv", index=False)
     (OUTPUT_TABS / "reg_placebo.tex").write_text(to_latex(plac, "Placebo Tests", note))
+
+    log.info("=== STATE-LEVEL CLUSTERING ===")
+    state_cl = run_state_clustered(df)
+    log.info("\n%s", state_cl[["model","coef","se","pval","n_obs"]].to_string(index=False))
+    state_cl.to_csv(OUTPUT_TABS / "reg_state_clustered.csv", index=False)
+    (OUTPUT_TABS / "reg_state_clustered.tex").write_text(
+        to_latex(state_cl, "Robustness: State-Level Clustering",
+                 note.replace("county", "state") +
+                 " SEs clustered at state level to account for correlated treatment "
+                 "within states (statewide AMBER alerts)."))
+
+    log.info("=== THRESHOLD SENSITIVITY ===")
+    thresh = run_threshold_sensitivity(df_raw)
+    log.info("\n%s",
+             thresh[["model","threshold","n_counties","n_treated","coef","se","pval"]]
+             .to_string(index=False))
+    thresh.to_csv(OUTPUT_TABS / "reg_thresholds.csv", index=False)
 
     log.info("Done. Results saved to output/tables/")
 

@@ -11,29 +11,30 @@ from utils import get_logger
 log = get_logger("analysis_lib")
 
 
-def prep_panel(df: pd.DataFrame) -> pd.DataFrame:
+def prep_panel(df: pd.DataFrame, min_fatals: int = MIN_FATALS_PER_YEAR) -> pd.DataFrame:
     """Filter sample and add integer FE codes.
 
-    Keeps counties with ≥2 years of data AND ≥MIN_FATALS_PER_YEAR mean annual
-    fatalities.  Small zero-fatality counties contribute noise but no signal;
-    restricting to ≥5/yr halves the county count while retaining ~95% of
-    treated county-days.
+    Keeps counties with ≥2 years of data AND ≥min_fatals mean annual fatalities.
+    Pass min_fatals=0 to skip the fatality threshold (e.g. for sensitivity checks).
     """
     county_years = df.groupby("fips")["year"].nunique()
     keep = county_years[county_years >= 2].index
     df = df[df["fips"].isin(keep)].copy()
 
     # Drop near-zero counties
-    mean_annual = (
-        df.groupby(["fips", "year"])["fatals_t0"].sum()
-        .groupby("fips").mean()
-    )
-    keep_fat = mean_annual[mean_annual >= MIN_FATALS_PER_YEAR].index
-    before = df["fips"].nunique()
-    df = df[df["fips"].isin(keep_fat)].copy()
-    log.info("County restriction (≥%d fatals/yr): %d → %d counties, %d rows",
-             MIN_FATALS_PER_YEAR, before, df["fips"].nunique(), len(df))
+    if min_fatals > 0:
+        mean_annual = (
+            df.groupby(["fips", "year"])["fatals_t0"].sum()
+            .groupby("fips").mean()
+        )
+        keep_fat = mean_annual[mean_annual >= min_fatals].index
+        before = df["fips"].nunique()
+        df = df[df["fips"].isin(keep_fat)].copy()
+        log.info("County restriction (≥%d fatals/yr): %d → %d counties, %d rows",
+                 min_fatals, before, df["fips"].nunique(), len(df))
+
     df["county_code"]    = pd.Categorical(df["fips"]).codes.astype(np.int32)
+    df["state_code"]     = pd.Categorical(df["fips"].str[:2]).codes.astype(np.int32)
     df["dow_month_code"] = pd.Categorical(
         df["dow"].astype(str) + "_" + df["month"].astype(str)
     ).codes.astype(np.int32)
@@ -79,6 +80,7 @@ def fe_ols_from_panel(
     dm: bool = True,
     extra_fes: list = [],
     weights_col: str = "",
+    cluster_col: str = "county_code",
     label: str = "",
 ) -> dict:
     """
@@ -170,8 +172,9 @@ def fe_ols_from_panel(
                if c in sub.columns and c not in ("county_code", "dow_month_code"))
     dof_resid = max(n - k - n_fe, 1)
 
-    # Cluster-robust sandwich (scores weighted by w for WLS, plain for OLS)
-    c_codes = sub["county_code"].to_numpy()
+    # Cluster-robust sandwich — cluster at county or state level
+    cl_col  = cluster_col if cluster_col in sub.columns else "county_code"
+    c_codes = pd.Categorical(sub[cl_col]).codes.astype(np.int32)
     G       = int(c_codes.max()) + 1
     XtX_inv = np.linalg.pinv(X_r.T @ X_r)
     # For WLS the score is already scaled by sqrt(w) via X_r and e
