@@ -25,7 +25,7 @@ CROSSWALK_RAW = DATA_RAW / "crosswalks"
 # ---------------------------------------------------------------------------
 # WEA (Wireless Emergency Alerts) became mandatory for carriers ~2012.
 # Use 2013–2022 to avoid pre-WEA noise.
-STUDY_YEARS = list(range(2013, 2023))   # inclusive on both ends
+STUDY_YEARS = list(range(2013, 2025))   # inclusive on both ends  (2013–2024)
 
 # ---------------------------------------------------------------------------
 # Treatment definition

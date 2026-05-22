@@ -183,7 +183,14 @@ def fetch_month(year: int, month: int, session: requests.Session) -> pd.DataFram
 def main() -> None:
     out_dir = AMBER_RAW / "foia"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "openfema_ipaws_alerts_2013_2022.csv"
+    yr0, yr1 = min(STUDY_YEARS), max(STUDY_YEARS)
+    out_path = out_dir / f"openfema_ipaws_alerts_{yr0}_{yr1}.csv"
+
+    # Backward-compat: migrate old fixed filename if present and new one absent
+    old_path = out_dir / "openfema_ipaws_alerts_2013_2022.csv"
+    if old_path.exists() and not out_path.exists():
+        old_path.rename(out_path)
+        log.info("Renamed %s → %s", old_path.name, out_path.name)
 
     # Allow resuming: load already-fetched months if file exists
     already: set[tuple] = set()
