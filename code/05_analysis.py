@@ -887,7 +887,8 @@ def main() -> None:
                  "within states (statewide AMBER alerts)."))
 
     log.info("=== THRESHOLD SENSITIVITY ===")
-    # Reload the unfiltered panel (freed at startup to save memory)
+    # Free the restricted panel before reloading the full panel (saves ~1.5 GB)
+    del df; gc.collect()
     df_raw = load_panel()
     thresh = run_threshold_sensitivity(df_raw)
     del df_raw; gc.collect()
