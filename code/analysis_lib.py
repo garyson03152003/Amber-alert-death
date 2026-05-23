@@ -132,6 +132,13 @@ def fe_ols_from_panel(
             yw = _weighted_demean(yw, c_codes, w, n_c)
             for j in range(Xw.shape[1]):
                 Xw[:, j] = _weighted_demean(Xw[:, j], c_codes, w, n_c)
+        elif dm:
+            # county=False but dm=True (e.g. TWFE2 where county_year replaces county)
+            dm_codes = sub["dow_month_code"].to_numpy()
+            n_dm = int(dm_codes.max()) + 1
+            yw = _weighted_demean(yw, dm_codes, w, n_dm)
+            for j in range(Xw.shape[1]):
+                Xw[:, j] = _weighted_demean(Xw[:, j], dm_codes, w, n_dm)
         # Absorb any extra FEs via unweighted demean (approximation)
         ones = np.ones(len(yw))
         for col in extra_fes:
