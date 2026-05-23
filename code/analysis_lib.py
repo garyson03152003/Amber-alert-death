@@ -146,15 +146,21 @@ def fe_ols_from_panel(
         y_r = yw * sw
         X_r = Xw * sw[:, None]
     else:
-        # Unweighted path: pyhdfe FE absorption
+        # Unweighted path: pyhdfe absorbs county + dow_month (2-FE bipartite, fast).
+        # Extra FEs (e.g. _out_dm_code) are absorbed AFTER pyhdfe via sequential
+        # unweighted demeaning.  Giving pyhdfe 3+ FEs triggers slow alternating
+        # projections that can take hours when the extra FE is correlated with
+        # dow_month_code (as outcome-date DoW×Month is with alert-date DoW×Month).
         fe_parts = []
         if county:
             fe_parts.append(sub["county_code"].to_numpy())
         if dm:
             fe_parts.append(sub["dow_month_code"].to_numpy())
+        # Collect extra FEs for post-pyhdfe sequential demeaning
+        extra_fe_arrs = []
         for col in extra_fes:
             if col in sub.columns and col not in ("county_code", "dow_month_code"):
-                fe_parts.append(sub[col].to_numpy())
+                extra_fe_arrs.append(sub[col].to_numpy(dtype=np.int32))
 
         if fe_parts:
             ids_arr = (np.column_stack(fe_parts) if len(fe_parts) > 1
@@ -166,6 +172,13 @@ def fe_ols_from_panel(
                 y_r, X_r = resid[:, 0], resid[:, 1:]
             except Exception as exc:
                 return {"model": label, "error": str(exc)}
+            # Absorb extra FEs via sequential unweighted demeaning (fast, single-pass)
+            ones = np.ones(len(y_r))
+            for fe_arr in extra_fe_arrs:
+                n_fe = int(fe_arr.max()) + 1
+                y_r = _weighted_demean(y_r, fe_arr, ones, n_fe)
+                for j in range(X_r.shape[1]):
+                    X_r[:, j] = _weighted_demean(X_r[:, j], fe_arr, ones, n_fe)
         else:
             X_r = np.column_stack([np.ones(n), X])
             y_r = y

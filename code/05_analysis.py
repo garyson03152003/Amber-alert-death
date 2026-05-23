@@ -579,33 +579,44 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
     log.info("Event study: %d k-values, 4 specs each, %d obs",
              2 * EVENT_STUDY_WINDOW + 1, len(lean))
 
+    import time as _time
     results = []
     for k in range(-EVENT_STUDY_WINDOW, EVENT_STUDY_WINDOW + 1):
+        _t_k = _time.time()
+
         # --- Integer _out_dm_code: dayofweek ∈ {0..6} × month ∈ {1..12} ---
         # Integer arithmetic saves ~1 GB vs string concatenation on 7.2M rows.
         # Codes: 0..83  (7 days × 12 months = 84 cells)
+        _t0 = _time.time()
         outcome_dates = lean["date"] + pd.Timedelta(days=k)
         lean["_out_dm_code"] = (
             (outcome_dates.dt.dayofweek * 12 + outcome_dates.dt.month - 1)
             .astype(np.int32)
         )
         del outcome_dates
+        log.debug("  k=%+d setup _out_dm_code: %.2fs", k, _time.time()-_t0)
 
         # --- spec 1 & 2: raw count ---
         col_c = "_yk_count"
+        _t0 = _time.time()
         lean[col_c] = lean.groupby("county_code")["fatals_next_commute"].shift(-k)
         sub = lean.dropna(subset=[col_c])
+        log.debug("  k=%+d shift+dropna: %.2fs (%d rows)", k, _time.time()-_t0, len(sub))
 
+        _t0 = _time.time()
         r = fe_ols_from_panel(sub, col_c, county=True, dm=True,
                               controls=hol_ctrl, cluster_col="state_code",
                               label=f"k={k:+d} [count]")
         r["k"] = k; r["spec"] = "count"; results.append(r)
+        log.debug("  k=%+d spec1 OLS: %.2fs", k, _time.time()-_t0)
 
+        _t0 = _time.time()
         r_odm = fe_ols_from_panel(sub, col_c, county=True, dm=True,
                                   controls=hol_ctrl, extra_fes=["_out_dm_code"],
                                   cluster_col="state_code",
                                   label=f"k={k:+d} [count+outDM]")
         r_odm["k"] = k; r_odm["spec"] = "count_outDM"; results.append(r_odm)
+        log.debug("  k=%+d spec2 OLS+outDM: %.2fs", k, _time.time()-_t0)
 
         del sub
         lean.drop(columns=[col_c], inplace=True)
@@ -613,29 +624,37 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
         # --- spec 3 & 4: combined rate, log-pop WLS ---
         if has_combined and has_pop:
             col_r = "_yk_rate"
+            _t0 = _time.time()
             lean[col_r] = (lean.groupby("county_code")["combined_next_commute"].shift(-k)
                            / lean["pop_100k"])
             sub_r = lean.dropna(subset=[col_r, "log_pop"])
+            log.debug("  k=%+d rate shift+dropna: %.2fs (%d rows)", k, _time.time()-_t0, len(sub_r))
 
+            _t0 = _time.time()
             r2 = fe_ols_from_panel(sub_r, col_r, county=True, dm=True,
                                    controls=hol_ctrl, weights_col="log_pop",
                                    cluster_col="state_code",
                                    label=f"k={k:+d} [comb/100k logWLS]")
             r2["k"] = k; r2["spec"] = "comb_rate_logWLS"; results.append(r2)
+            log.debug("  k=%+d spec3 WLS: %.2fs", k, _time.time()-_t0)
 
+            _t0 = _time.time()
             r2_odm = fe_ols_from_panel(sub_r, col_r, county=True, dm=True,
                                        controls=hol_ctrl, extra_fes=["_out_dm_code"],
                                        weights_col="log_pop", cluster_col="state_code",
                                        label=f"k={k:+d} [comb/100k logWLS+outDM]")
             r2_odm["k"] = k; r2_odm["spec"] = "comb_rate_logWLS_outDM"
             results.append(r2_odm)
+            log.debug("  k=%+d spec4 WLS+outDM: %.2fs", k, _time.time()-_t0)
 
             del sub_r
             lean.drop(columns=[col_r], inplace=True)
 
         lean.drop(columns=["_out_dm_code"], inplace=True)
         gc.collect()
-        log.info("  Event study k=%+d done (%d specs)", k, len([r for r in results if r.get("k") == k]))
+        log.info("  Event study k=%+d done in %.1fs (%d specs)",
+                 k, _time.time()-_t_k,
+                 len([r for r in results if r.get("k") == k]))
 
     del lean
     gc.collect()
