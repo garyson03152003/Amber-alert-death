@@ -31,6 +31,7 @@ WEATHER  = ["prcp_mm", "tmax_c"]
 HOLIDAY  = ["is_holiday"]        # federal + state public holiday indicator
 SERIOUS_INJ_PATH  = DATA_PROC / "fars_serious_injuries.parquet"
 AMBER_CLEAN_PATH  = DATA_PROC / "amber_alerts_clean.parquet"
+WEATHER_PATH      = DATA_PROC / "weather_county_day.parquet"
 
 
 def load_panel() -> pd.DataFrame:
@@ -73,6 +74,20 @@ def load_panel() -> pd.DataFrame:
     else:
         log.warning("Amber clean file not found — alert breadth unavailable")
         df["alert_breadth"] = 0
+
+    # Merge weather controls if available (from 01c_fetch_weather.py)
+    if WEATHER_PATH.exists():
+        wx = pd.read_parquet(WEATHER_PATH, columns=["fips", "date", "prcp_mm", "tmax_c"])
+        wx["date"] = pd.to_datetime(wx["date"])
+        df = df.merge(wx, on=["fips", "date"], how="left")
+        cov = df["prcp_mm"].notna().mean()
+        log.info("Weather merged: prcp_mm/tmax_c coverage=%.1f%%, "
+                 "mean prcp=%.1f mm, mean tmax=%.1f °C",
+                 cov * 100,
+                 df["prcp_mm"].mean(), df["tmax_c"].mean())
+    else:
+        log.info("Weather file not found — run 01c_fetch_weather.py + 01d_merge_weather.py. "
+                 "Proceeding without weather controls.")
 
     return df
 
