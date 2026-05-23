@@ -470,6 +470,156 @@ def to_latex(results: pd.DataFrame, title: str, note: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Weekday / weekend interaction
+# ---------------------------------------------------------------------------
+
+def _make_workday_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add night_alert_workday and night_alert_weekend to df (in-place copy).
+
+    Uses band-specific timing to determine which calendar night precedes a
+    workday commute (see run_event_study_workday for the full explanation):
+
+    • early_night (10pm–midnight on day D, disrupts D+1 commute):
+        workday if D ∈ {Sun(6), Mon(0), Tue(1), Wed(2), Thu(3)}
+    • deep_night / late_night (midnight–6am on day D, disrupts D commute):
+        workday if D ∈ {Mon(0), Tue(1), Wed(2), Thu(3), Fri(4)}
+
+    Returns a copy of df with new columns; does NOT modify the original.
+    """
+    df = df.copy()
+    early_night   = df["night_band"] == "early_night"
+    midnight_band = df["night_band"].isin(["deep_night", "late_night"])
+
+    early_workday    = early_night   & df["dow"].isin([0, 1, 2, 3, 6])
+    midnight_workday = midnight_band & df["dow"].isin([0, 1, 2, 3, 4])
+    workday_mask = early_workday | midnight_workday
+
+    df["night_alert_workday"] = (df["night_alert"].astype(bool) & workday_mask).astype(int)
+    df["night_alert_weekend"] = (df["night_alert"].astype(bool) & ~workday_mask).astype(int)
+
+    n_wd = int(df["night_alert_workday"].sum())
+    n_we = int(df["night_alert_weekend"].sum())
+    log.info("Workday nights: %d | Weekend nights: %d | Total: %d",
+             n_wd, n_we, n_wd + n_we)
+    return df
+
+
+def run_weekday_interaction(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Test whether the AMBER alert effect is driven by workday nights.
+
+    Instead of restricting the sample (as in run_event_study_workday),
+    this specification includes BOTH night_alert_workday and night_alert_weekend
+    as separate regressors in a single model:
+
+        Y = α + β_wd·WorkdayNight + β_we·WeekendNight + γ·X + FE + ε
+
+    β_wd: effect on commute fatalities of alerts that precede a workday
+    β_we: effect on commute fatalities of alerts that precede a weekend
+
+    Identification: both coefficients come from the same FE-cleaned residuals;
+    the difference β_wd − β_we directly tests the commute-channel hypothesis.
+
+    Implementation: fe_ols_from_panel is called twice with the two indicators
+    swapped between treatment and controls positions — this is equivalent to
+    a single multivariate OLS with both as regressors.
+
+    Three FE specs (state-clustered SEs throughout):
+      (I)   county + DoW×Month FE  [baseline, aligned count]
+      (II)  (I) + county×year FE + lag(fatals_tm1)  [TWFE2 robustness]
+      (III) (I), combined/100k WLS
+    """
+    import gc
+
+    df_al = add_aligned_outcome(df)
+    df_al = _make_workday_indicators(df_al)
+
+    avail_hol = [c for c in HOLIDAY if c in df_al.columns]
+    has_lag   = "fatals_tm1" in df_al.columns
+
+    # Build county×year FE for TWFE2
+    df_al["county_year_code"] = pd.Categorical(
+        df_al["county_code"].astype(str) + "_" + df_al["year"].astype(str)
+    ).codes.astype(np.int32)
+
+    # Rate outcome
+    if "population" in df_al.columns:
+        county_mean_pop = df_al.groupby("fips")["population"].transform("mean")
+        pop = df_al["population"].fillna(county_mean_pop)
+        df_al["_log_pop"] = np.log(pop.clip(lower=1))
+        combined_col = "combined_next_commute" if "combined_next_commute" in df_al.columns \
+                       else "fatals_next_commute"
+        df_al["combined_rate"] = df_al[combined_col] / (pop / 100_000)
+    else:
+        df_al["_log_pop"] = None
+        df_al["combined_rate"] = None
+
+    results = []
+
+    def _both_coefs(outcome, ctrl_base, weights_col="",
+                    county=True, dm=True, extra_fes=None, tag=""):
+        """Run model twice, collect β_workday and β_weekend."""
+        extra = extra_fes or []
+        sub = df_al.dropna(subset=[outcome]).copy()
+        if weights_col and weights_col not in sub.columns:
+            return
+
+        # β_workday: treatment=workday, control=weekend (+ base controls)
+        r_wd = fe_ols_from_panel(
+            sub, outcome,
+            treatment="night_alert_workday",
+            controls=["night_alert_weekend"] + ctrl_base,
+            county=county, dm=dm, extra_fes=extra,
+            weights_col=weights_col, cluster_col="state_code",
+            label=f"Workday night [{tag}]",
+        )
+        r_wd["split"] = "workday"
+        results.append(r_wd)
+
+        # β_weekend: treatment=weekend, control=workday (same model, different column order)
+        r_we = fe_ols_from_panel(
+            sub, outcome,
+            treatment="night_alert_weekend",
+            controls=["night_alert_workday"] + ctrl_base,
+            county=county, dm=dm, extra_fes=extra,
+            weights_col=weights_col, cluster_col="state_code",
+            label=f"Weekend night [{tag}]",
+        )
+        r_we["split"] = "weekend"
+        results.append(r_we)
+
+    # Spec I: baseline aligned count
+    log.info("Weekday interaction — (I) baseline count")
+    _both_coefs("fatals_next_commute", avail_hol, tag="count, baseline")
+
+    # Spec II: TWFE2 (county×year FE + lag fatals)
+    log.info("Weekday interaction — (II) TWFE2 count")
+    twfe_ctrl = avail_hol + (["fatals_tm1"] if has_lag else [])
+    _both_coefs("fatals_next_commute", twfe_ctrl,
+                county=False, dm=True, extra_fes=["county_year_code"],
+                tag="count, TWFE2")
+
+    # Spec III: combined/100k WLS
+    if "combined_rate" in df_al.columns and df_al["combined_rate"].notna().any():
+        log.info("Weekday interaction — (III) combined/100k WLS")
+        _both_coefs("combined_rate", avail_hol, weights_col="_log_pop",
+                    tag="comb/100k WLS")
+
+    del df_al; gc.collect()
+
+    out = pd.DataFrame(results)
+    # Print a clean comparison table
+    if not out.empty:
+        wd = out[out["split"] == "workday"][["model", "coef", "se", "pval"]].copy()
+        we = out[out["split"] == "weekend"][["model", "coef", "se", "pval"]].copy()
+        log.info("=== Weekday vs Weekend night alert effects ===")
+        log.info("Workday nights:\n%s", wd.to_string(index=False))
+        log.info("Weekend nights:\n%s", we.to_string(index=False))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Daytime alert placebo
 # ---------------------------------------------------------------------------
 
@@ -1140,6 +1290,21 @@ def main() -> None:
                      note + " Serious injuries defined as INJ\\_SEV=3 in FARS person "
                             "file (incapacitating injuries in fatal crashes)."))
     del comb; gc.collect()
+
+    log.info("=== WEEKDAY / WEEKEND INTERACTION ===")
+    wd_int = run_weekday_interaction(df)
+    if not wd_int.empty:
+        log.info("\n%s", wd_int[["model","split","coef","se","pval","n_obs"]].to_string(index=False))
+        wd_int.to_csv(OUTPUT_TABS / "reg_weekday_interaction.csv", index=False)
+        (OUTPUT_TABS / "reg_weekday_interaction.tex").write_text(
+            to_latex(wd_int,
+                     "Weekday vs Weekend Night Alert Effects "
+                     "(Interaction with Commute-Day)',",
+                     note + " \\textit{Workday night}: alert precedes Mon--Fri commute. "
+                            "\\textit{Weekend night}: alert precedes Sat--Sun. "
+                            "Both regressors included simultaneously. "
+                            "SEs clustered at state level."))
+    del wd_int; gc.collect()
 
     log.info("=== ALIGNED (timing-corrected) ===")
     aligned = run_aligned(df)
