@@ -16,6 +16,7 @@ data/raw/**/*.txt
 data/raw/**/*.xlsx
 data/processed/*.parquet
 data/processed/*.csv
+data/processed/weather_cache/
 
 # Output
 output/figures/*.pdf
