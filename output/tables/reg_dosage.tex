@@ -1,0 +1,12 @@
+\begin{table}[htbp]\centering
+\caption{Population Dosage: log(Total Population Reached by Alert)}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+log(pop reached) [count] & 0.0003 & (0.0002) & 0.200 & 7,234,005 & 0.0565 \\
+log(pop reached) [comb/100k] & 0.0013** & (0.0006) & 0.045 & 7,229,634 & 0.0687 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by county. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10. Treatment is log(sum of county populations covered by nighttime alerts). SEs clustered at state level.} \\
+\end{tabular}
+\end{table}

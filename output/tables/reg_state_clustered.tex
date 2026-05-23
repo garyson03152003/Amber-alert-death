@@ -1,0 +1,15 @@
+\begin{table}[htbp]\centering
+\caption{Robustness: State-Level Clustering}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+(2) County FE [state-cl] & 0.0049 & (0.0039) & 0.216 & 7,234,005 & 0.0565 \\
+(3) Baseline [state-cl] & 0.0044 & (0.0037) & 0.244 & 7,234,005 & 0.0565 \\
+(5) + Year FE [state-cl] & 0.0054 & (0.0044) & 0.234 & 7,234,005 & 0.0565 \\
+(2) County FE comb [state-cl] & 0.0206* & (0.0105) & 0.054 & 7,229,634 & 0.0687 \\
+(3) Baseline comb [state-cl] & 0.0193* & (0.0099) & 0.056 & 7,229,634 & 0.0687 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by state. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10. SEs clustered at state level to account for correlated treatment within states (statewide AMBER alerts).} \\
+\end{tabular}
+\end{table}

@@ -1,0 +1,16 @@
+\begin{table}[htbp]\centering
+\caption{SE Reduction: Sample Restriction and WLS (Rate Outcome, per 100k)}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+(2) County FE [OLS] & 0.0125 & (0.0081) & 0.122 & 6,018,044 & 0.0543 \\
+(3) Baseline [OLS] & 0.0117 & (0.0081) & 0.146 & 6,018,044 & 0.0543 \\
+(5) + Year FE [OLS] & 0.0126 & (0.0080) & 0.117 & 6,018,044 & 0.0543 \\
+(2) County FE [logWLS] & 0.0112 & (0.0069) & 0.104 & 6,018,044 & 0.0543 \\
+(3) Baseline [logWLS] & 0.0105 & (0.0069) & 0.128 & 6,018,044 & 0.0543 \\
+(5) + Year FE [logWLS] & 0.0113 & (0.0069) & 0.102 & 6,018,044 & 0.0543 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by county. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10. (A) counties with $\geq$5 mean annual fatalities; (B) WLS weighted by county population; (C) both combined.} \\
+\end{tabular}
+\end{table}

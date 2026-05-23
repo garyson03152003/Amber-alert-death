@@ -1,0 +1,15 @@
+\begin{table}[htbp]\centering
+\caption{Timing-Corrected Estimates: Outcome Aligned to Disrupted Commute}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+(A) Early-night → t+1 & 0.0038 & (0.0062) & 0.546 & 7,234,005 & 0.0565 \\
+(B) Midnight-6am → t+0 & 0.0050 & (0.0058) & 0.389 & 7,234,005 & 0.0566 \\
+(C) Pooled aligned & 0.0044 & (0.0047) & 0.349 & 7,234,005 & 0.0565 \\
+(D) Pooled aligned + Year FE & 0.0054 & (0.0047) & 0.252 & 7,234,005 & 0.0565 \\
+(M) Misaligned baseline [memo] & -0.0076** & (0.0039) & 0.050 & 7,234,005 & 0.0565 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by county. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10. Specification (C)/(D) uses \textit{fatals\_next\_commute}: fatals$_{t+0}$ for midnight--6am alerts, fatals$_{t+1}$ otherwise.} \\
+\end{tabular}
+\end{table}

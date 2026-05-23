@@ -1,0 +1,18 @@
+\begin{table}[htbp]\centering
+\caption{Heterogeneity Analysis}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+Band: early_night & 0.0038 & (0.0062) & 0.546 & 7,234,005 & 0.0565 \\
+Band: deep_night & 0.0070 & (0.0072) & 0.333 & 7,234,005 & 0.0566 \\
+Band: late_night & 0.0011 & (0.0099) & 0.914 & 7,234,005 & 0.0566 \\
+Weekday & 0.0046 & (0.0064) & 0.471 & 4,134,190 & 0.0531 \\
+Weekend & 0.0013 & (0.0066) & 0.847 & 3,099,815 & 0.0611 \\
+Alert 10pm-midnight & 0.0039 & (0.0062) & 0.532 & 7,234,005 & 0.0565 \\
+Alert midnight-3am & 0.0084 & (0.0073) & 0.248 & 7,234,005 & 0.0566 \\
+Alert 3am-6am & -0.0022 & (0.0097) & 0.823 & 7,234,005 & 0.0566 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by county. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10.} \\
+\end{tabular}
+\end{table}

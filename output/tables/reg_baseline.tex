@@ -1,0 +1,16 @@
+\begin{table}[htbp]\centering
+\caption{Effect of Nighttime AMBER Alert on Traffic Fatalities (Timing-Aligned Outcome)}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+(1) Pooled OLS & 0.0308*** & (0.0104) & 0.003 & 7,234,005 & 0.0565 \\
+(2) County FE & 0.0050 & (0.0047) & 0.289 & 7,234,005 & 0.0565 \\
+(3) Baseline & 0.0044 & (0.0047) & 0.347 & 7,234,005 & 0.0565 \\
+(5) + Year FE & 0.0054 & (0.0047) & 0.251 & 7,234,005 & 0.0565 \\
+(6) DoW×Year FE & 0.0056 & (0.0047) & 0.229 & 7,234,005 & 0.0565 \\
+(7) Year×Month FE & 0.0056 & (0.0047) & 0.232 & 7,234,005 & 0.0565 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by county. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10. Outcome is \textit{fatals\_next\_commute}: fatals$_{t+0}$ for midnight--6am alerts, fatals$_{t+1}$ otherwise.} \\
+\end{tabular}
+\end{table}
