@@ -75,18 +75,25 @@ def load_panel() -> pd.DataFrame:
         log.warning("Amber clean file not found — alert breadth unavailable")
         df["alert_breadth"] = 0
 
-    # Merge weather controls if available (from 01c_fetch_weather.py)
+    # Merge weather controls if available (from 01c_fetch_weather.py).
+    # Drop any stale/sparse weather columns already in the panel before merging.
     if WEATHER_PATH.exists():
         wx = pd.read_parquet(WEATHER_PATH, columns=["fips", "date", "prcp_mm", "tmax_c"])
-        wx["date"] = pd.to_datetime(wx["date"])
+        # Drop old sparse columns if present
+        old_wx_cols = [c for c in ["prcp_mm", "tmax_c"] if c in df.columns]
+        if old_wx_cols:
+            df = df.drop(columns=old_wx_cols)
+        # Normalise datetime resolution before merge
+        wx["date"] = pd.to_datetime(wx["date"]).astype("datetime64[us]")
+        df["date"] = pd.to_datetime(df["date"]).astype("datetime64[us]")
         df = df.merge(wx, on=["fips", "date"], how="left")
         cov = df["prcp_mm"].notna().mean()
-        log.info("Weather merged: prcp_mm/tmax_c coverage=%.1f%%, "
+        log.info("PRISM weather merged: coverage=%.1f%%, "
                  "mean prcp=%.1f mm, mean tmax=%.1f °C",
                  cov * 100,
                  df["prcp_mm"].mean(), df["tmax_c"].mean())
     else:
-        log.info("Weather file not found — run 01c_fetch_weather.py + 01d_merge_weather.py. "
+        log.info("Weather file not found — run 01c_fetch_weather.py. "
                  "Proceeding without weather controls.")
 
     return df
