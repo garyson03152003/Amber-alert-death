@@ -1000,6 +1000,163 @@ def run_event_study_workday(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Split event study: workday-night vs weekend-night effects at each k
+# ---------------------------------------------------------------------------
+
+def run_event_study_split(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Dynamic effects k ∈ {-W,...,+W}, separately for workday-night and
+    weekend-night alerts.
+
+    For each k, estimates:
+        Y_{c,t+k} = β_wd·WorkdayNight + β_we·WeekendNight + FE + controls + ε
+
+    by calling fe_ols_from_panel twice (swapping which indicator is 'treatment'
+    and which is 'control') — equivalent to a single multivariate OLS.
+
+    Two specs per split per k:
+      count    — raw count, county+DoW×Month FE, state-clustered
+      comb_wls — combined (fatal+serious)/100k, log-pop WLS, state-clustered
+
+    Output columns: k, split ('workday'/'weekend'), spec, coef, se, pval, ...
+    """
+    import gc
+    import time as _time
+
+    # --- Step 0: band-specific workday/weekend indicator ---
+    df = df.copy()
+    early_night   = df["night_band"] == "early_night"
+    midnight_band = df["night_band"].isin(["deep_night", "late_night"])
+    early_workday    = early_night   & df["dow"].isin([0, 1, 2, 3, 6])
+    midnight_workday = midnight_band & df["dow"].isin([0, 1, 2, 3, 4])
+    workday_mask = early_workday | midnight_workday
+
+    df["night_alert_workday"] = (df["night_alert"].astype(bool) & workday_mask).astype(int)
+    df["night_alert_weekend"] = (df["night_alert"].astype(bool) & ~workday_mask).astype(int)
+
+    n_wd = int(df["night_alert_workday"].sum())
+    n_we = int(df["night_alert_weekend"].sum())
+    log.info("Split EVS: %d workday-night + %d weekend-night treated county-days",
+             n_wd, n_we)
+
+    # --- Step 1: aligned outcome in-place ---
+    df.sort_values(["fips", "date"], inplace=True)
+    midnight_mask2 = df["night_band"].isin(["deep_night", "late_night"])
+    df["fatals_next_commute"] = df["fatals_t1"]
+    df.loc[midnight_mask2, "fatals_next_commute"] = df.loc[midnight_mask2, "fatals_t0"]
+
+    has_combined = False
+    if "serious_injuries" in df.columns:
+        df["_sinj_t1"] = df.groupby("fips")["serious_injuries"].shift(-1).fillna(0)
+        df["_sinj_nc"] = df["_sinj_t1"].copy()
+        df.loc[midnight_mask2, "_sinj_nc"] = df.loc[midnight_mask2, "serious_injuries"]
+        df["combined_next_commute"] = df["fatals_next_commute"] + df["_sinj_nc"]
+        df.drop(columns=["_sinj_t1", "_sinj_nc"], inplace=True)
+        has_combined = True
+
+    has_pop = False
+    if "population" in df.columns:
+        county_mean_pop = df.groupby("fips")["population"].transform("mean")
+        _pop = df["population"].fillna(county_mean_pop)
+        df["_log_pop"] = np.log(_pop.clip(lower=1))
+        df["_pop_100k"] = _pop / 100_000
+        del _pop
+        has_pop = True
+
+    # --- Step 2: lean DataFrame ---
+    BASE_COLS = ["date", "county_code", "state_code",
+                 "dow_month_code", "night_alert_workday", "night_alert_weekend",
+                 "fatals_next_commute"]
+    hol_cols  = [c for c in HOLIDAY if c in df.columns]
+    extra_cols = (
+        (["combined_next_commute"] if has_combined else [])
+        + (["_log_pop", "_pop_100k"] if has_pop else [])
+        + hol_cols
+    )
+    lean = df[BASE_COLS + extra_cols].sort_values(["county_code", "date"]).copy()
+    gc.collect()
+
+    if has_pop:
+        lean.rename(columns={"_log_pop": "log_pop", "_pop_100k": "pop_100k"}, inplace=True)
+        df.drop(columns=["_log_pop", "_pop_100k"], inplace=True)
+
+    del midnight_mask2, workday_mask, early_night, midnight_band
+    del early_workday, midnight_workday
+    hol_ctrl = [c for c in HOLIDAY if c in lean.columns]
+
+    log.info("Split event study: %d k-values × 2 splits × 2 specs, %d obs",
+             2 * EVENT_STUDY_WINDOW + 1, len(lean))
+
+    results = []
+    for k in range(-EVENT_STUDY_WINDOW, EVENT_STUDY_WINDOW + 1):
+        _t_k = _time.time()
+
+        # --- count outcomes ---
+        col_wd = "_ykwd"; col_we = "_ykwe"
+        lean[col_wd] = lean.groupby("county_code")["fatals_next_commute"].shift(-k)
+        lean[col_we] = lean[col_wd]   # same shifted outcome for both splits
+        sub = lean.dropna(subset=[col_wd])
+
+        # β_workday: treatment=workday, control=weekend
+        r_wd = fe_ols_from_panel(sub, col_wd,
+                                 treatment="night_alert_workday",
+                                 controls=["night_alert_weekend"] + hol_ctrl,
+                                 county=True, dm=True, cluster_col="state_code",
+                                 label=f"k={k:+d} [count, workday]")
+        r_wd["k"] = k; r_wd["split"] = "workday"; r_wd["spec"] = "count"
+        results.append(r_wd)
+
+        # β_weekend: treatment=weekend, control=workday
+        r_we = fe_ols_from_panel(sub, col_we,
+                                 treatment="night_alert_weekend",
+                                 controls=["night_alert_workday"] + hol_ctrl,
+                                 county=True, dm=True, cluster_col="state_code",
+                                 label=f"k={k:+d} [count, weekend]")
+        r_we["k"] = k; r_we["split"] = "weekend"; r_we["spec"] = "count"
+        results.append(r_we)
+
+        del sub
+        lean.drop(columns=[col_wd, col_we], inplace=True)
+
+        # --- combined rate, WLS ---
+        if has_combined and has_pop:
+            col_r_wd = "_ykr_wd"; col_r_we = "_ykr_we"
+            shifted = (lean.groupby("county_code")["combined_next_commute"].shift(-k)
+                       / lean["pop_100k"])
+            lean[col_r_wd] = shifted
+            lean[col_r_we] = shifted
+            del shifted
+            sub_r = lean.dropna(subset=[col_r_wd, "log_pop"])
+
+            r2_wd = fe_ols_from_panel(sub_r, col_r_wd,
+                                      treatment="night_alert_workday",
+                                      controls=["night_alert_weekend"] + hol_ctrl,
+                                      county=True, dm=True, weights_col="log_pop",
+                                      cluster_col="state_code",
+                                      label=f"k={k:+d} [comb/100k WLS, workday]")
+            r2_wd["k"] = k; r2_wd["split"] = "workday"; r2_wd["spec"] = "comb_wls"
+            results.append(r2_wd)
+
+            r2_we = fe_ols_from_panel(sub_r, col_r_we,
+                                      treatment="night_alert_weekend",
+                                      controls=["night_alert_workday"] + hol_ctrl,
+                                      county=True, dm=True, weights_col="log_pop",
+                                      cluster_col="state_code",
+                                      label=f"k={k:+d} [comb/100k WLS, weekend]")
+            r2_we["k"] = k; r2_we["split"] = "weekend"; r2_we["spec"] = "comb_wls"
+            results.append(r2_we)
+
+            del sub_r
+            lean.drop(columns=[col_r_wd, col_r_we], inplace=True)
+
+        gc.collect()
+        log.info("  Split EVS k=%+d done in %.1fs", k, _time.time() - _t_k)
+
+    del lean; gc.collect()
+    return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
 # Population-reached as continuous treatment dosage
 # ---------------------------------------------------------------------------
 
