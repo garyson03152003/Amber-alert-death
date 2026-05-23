@@ -519,98 +519,126 @@ def run_event_study(df: pd.DataFrame) -> pd.DataFrame:
     Dynamic effects k ∈ {-W,...,+W} where W = EVENT_STUDY_WINDOW (default 5).
 
     Four specs per k:
-      (1) count          — raw fatality count, county+DoW×Month FE, log_pop control
+      (1) count          — raw fatality count, county+DoW×Month FE, holiday control
       (2) count_outDM    — (1) + outcome-date DoW×Month FE (robustness for Friday clustering)
       (3) comb_rate_logWLS      — combined (fatal+serious) per 100k, log-pop WLS
       (4) comb_rate_logWLS_outDM — (3) + outcome-date DoW×Month FE
 
-    log_pop is included as a covariate in all specs to control for within-county
-    population trends (county FEs absorb the cross-sectional average level).
-
-    Memory note: lean DataFrame (only needed columns) to avoid OOM.
+    Memory-optimized: computes aligned outcomes in-place on df (avoiding the 2.5 GB
+    copy that add_aligned_outcome() makes), uses integer _out_dm_code (avoiding ~1 GB
+    of Python string allocations), and uses county_code (int) for groupby shifts
+    instead of fips (object string).
     """
-    df_al = add_aligned_outcome(df)
+    import gc
 
-    has_combined = "combined_next_commute" in df_al.columns
-    has_pop      = "population" in df_al.columns and "log_pop" in df_al.columns
+    # --- Step 1: compute aligned outcome columns in-place on df ---
+    # (add_aligned_outcome makes a full df.copy() — here we avoid that)
+    df.sort_values(["fips", "date"], inplace=True)
+    midnight_mask = df["night_band"].isin(["deep_night", "late_night"])
 
-    BASE_COLS = ["fips", "date", "county_code", "state_code",
+    df["fatals_next_commute"] = df["fatals_t1"]
+    df.loc[midnight_mask, "fatals_next_commute"] = df.loc[midnight_mask, "fatals_t0"]
+
+    has_combined = False
+    if "serious_injuries" in df.columns:
+        df["_sinj_t1"] = df.groupby("fips")["serious_injuries"].shift(-1).fillna(0)
+        df["_sinj_nc"] = df["_sinj_t1"].copy()
+        df.loc[midnight_mask, "_sinj_nc"] = df.loc[midnight_mask, "serious_injuries"]
+        df["combined_next_commute"] = df["fatals_next_commute"] + df["_sinj_nc"]
+        df.drop(columns=["_sinj_t1", "_sinj_nc"], inplace=True)
+        has_combined = True
+
+    has_pop = False
+    if "population" in df.columns:
+        county_mean_pop = df.groupby("fips")["population"].transform("mean")
+        _pop = df["population"].fillna(county_mean_pop)
+        df["_log_pop"] = np.log(_pop.clip(lower=1))
+        df["_pop_100k"] = _pop / 100_000
+        del _pop
+        has_pop = True
+
+    # --- Step 2: build lean DataFrame (only needed columns, no fips object string) ---
+    # Using county_code (int) instead of fips (object) saves ~400 MB and speeds groupby.
+    BASE_COLS = ["date", "county_code", "state_code",
                  "dow_month_code", "night_alert", "fatals_next_commute"]
-    extra = ([c for c in ["combined_next_commute", "population", "log_pop"]
-              + HOLIDAY
-              if c in df_al.columns])
-    lean = df_al[BASE_COLS + extra].sort_values(["fips", "date"]).copy()
-    del df_al
+    extra_cols = (
+        (["combined_next_commute"] if has_combined else [])
+        + (["_log_pop", "_pop_100k"] if has_pop else [])
+        + [c for c in HOLIDAY if c in df.columns]
+    )
+    lean = df[BASE_COLS + extra_cols].sort_values(["county_code", "date"]).copy()
+    gc.collect()
 
-    # Pre-compute county mean population for rate denominator (time-invariant)
+    # Rename internal columns to public names
     if has_pop:
-        county_mean_pop = lean.groupby("fips")["population"].transform("mean")
-        lean["pop_100k"] = lean["population"].fillna(county_mean_pop) / 100_000
+        lean.rename(columns={"_log_pop": "log_pop", "_pop_100k": "pop_100k"}, inplace=True)
+        df.drop(columns=["_log_pop", "_pop_100k"], inplace=True)
 
     hol_ctrl = [c for c in HOLIDAY if c in lean.columns]
 
+    log.info("Event study: %d k-values, 4 specs each, %d obs",
+             2 * EVENT_STUDY_WINDOW + 1, len(lean))
+
     results = []
     for k in range(-EVENT_STUDY_WINDOW, EVENT_STUDY_WINDOW + 1):
-        # Outcome-date DoW×Month code (robustness check for Friday-alert clustering).
-        # shift(-k) puts the outcome at date+k, so outcome DoW = DoW of date+k.
-        # At k=0 this equals dow_month_code (redundant but harmless).
+        # --- Integer _out_dm_code: dayofweek ∈ {0..6} × month ∈ {1..12} ---
+        # Integer arithmetic saves ~1 GB vs string concatenation on 7.2M rows.
+        # Codes: 0..83  (7 days × 12 months = 84 cells)
         outcome_dates = lean["date"] + pd.Timedelta(days=k)
-        out_dm_str = (outcome_dates.dt.dayofweek.astype(str) + "_"
-                      + outcome_dates.dt.month.astype(str))
-        lean["_out_dm_code"] = pd.Categorical(out_dm_str).codes.astype(np.int32)
+        lean["_out_dm_code"] = (
+            (outcome_dates.dt.dayofweek * 12 + outcome_dates.dt.month - 1)
+            .astype(np.int32)
+        )
+        del outcome_dates
 
-        # --- spec 1: raw count ---
+        # --- spec 1 & 2: raw count ---
         col_c = "_yk_count"
-        lean[col_c] = lean.groupby("fips")["fatals_next_commute"].shift(-k)
+        lean[col_c] = lean.groupby("county_code")["fatals_next_commute"].shift(-k)
         sub = lean.dropna(subset=[col_c])
 
         r = fe_ols_from_panel(sub, col_c, county=True, dm=True,
-                              controls=hol_ctrl,
-                              cluster_col="state_code",
+                              controls=hol_ctrl, cluster_col="state_code",
                               label=f"k={k:+d} [count]")
-        r["k"] = k; r["spec"] = "count"
-        results.append(r)
+        r["k"] = k; r["spec"] = "count"; results.append(r)
 
-        # --- spec 2: raw count + outcome-date DoW×Month ---
         r_odm = fe_ols_from_panel(sub, col_c, county=True, dm=True,
-                                  controls=hol_ctrl,
-                                  extra_fes=["_out_dm_code"],
+                                  controls=hol_ctrl, extra_fes=["_out_dm_code"],
                                   cluster_col="state_code",
                                   label=f"k={k:+d} [count+outDM]")
-        r_odm["k"] = k; r_odm["spec"] = "count_outDM"
-        results.append(r_odm)
+        r_odm["k"] = k; r_odm["spec"] = "count_outDM"; results.append(r_odm)
 
+        del sub
         lean.drop(columns=[col_c], inplace=True)
 
-        # --- spec 3: combined rate, log-pop WLS ---
+        # --- spec 3 & 4: combined rate, log-pop WLS ---
         if has_combined and has_pop:
             col_r = "_yk_rate"
-            shifted_count = lean.groupby("fips")["combined_next_commute"].shift(-k)
-            lean[col_r] = shifted_count / lean["pop_100k"]
+            lean[col_r] = (lean.groupby("county_code")["combined_next_commute"].shift(-k)
+                           / lean["pop_100k"])
             sub_r = lean.dropna(subset=[col_r, "log_pop"])
 
             r2 = fe_ols_from_panel(sub_r, col_r, county=True, dm=True,
-                                   controls=hol_ctrl,
-                                   weights_col="log_pop",
+                                   controls=hol_ctrl, weights_col="log_pop",
                                    cluster_col="state_code",
                                    label=f"k={k:+d} [comb/100k logWLS]")
-            r2["k"] = k; r2["spec"] = "comb_rate_logWLS"
-            results.append(r2)
+            r2["k"] = k; r2["spec"] = "comb_rate_logWLS"; results.append(r2)
 
-            # --- spec 4: combined rate + outcome-date DoW×Month ---
             r2_odm = fe_ols_from_panel(sub_r, col_r, county=True, dm=True,
-                                       controls=hol_ctrl,
-                                       extra_fes=["_out_dm_code"],
-                                       weights_col="log_pop",
-                                       cluster_col="state_code",
+                                       controls=hol_ctrl, extra_fes=["_out_dm_code"],
+                                       weights_col="log_pop", cluster_col="state_code",
                                        label=f"k={k:+d} [comb/100k logWLS+outDM]")
             r2_odm["k"] = k; r2_odm["spec"] = "comb_rate_logWLS_outDM"
             results.append(r2_odm)
 
+            del sub_r
             lean.drop(columns=[col_r], inplace=True)
 
         lean.drop(columns=["_out_dm_code"], inplace=True)
+        gc.collect()
+        log.info("  Event study k=%+d done (%d specs)", k, len([r for r in results if r.get("k") == k]))
 
+    del lean
+    gc.collect()
     return pd.DataFrame(results)
 
 
@@ -801,11 +829,13 @@ def run_threshold_sensitivity(df_raw: pd.DataFrame) -> pd.DataFrame:
     Shows how coefficients and SEs vary with sample restriction.
     Outcome: fatals_next_commute (raw count).
     """
+    import gc
     thresholds = [0, 1, 3, 5, 10, 20]
     results = []
     for thr in thresholds:
         df_t = prep_panel(df_raw.copy(), min_fatals=thr)
         df_al = add_aligned_outcome(df_t)
+        del df_t; gc.collect()   # free before computing rate columns
 
         # Rate outcome
         county_mean_pop = df_al.groupby("fips")["population"].transform("mean")
@@ -829,6 +859,8 @@ def run_threshold_sensitivity(df_raw: pd.DataFrame) -> pd.DataFrame:
             r["n_counties"] = n_counties
             r["n_treated"]  = n_treated
             results.append(r)
+
+        del df_al; gc.collect()
 
     return pd.DataFrame(results)
 

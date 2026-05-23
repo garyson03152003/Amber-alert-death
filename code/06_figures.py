@@ -259,14 +259,26 @@ def placebo_plot() -> None:
         return
     p = pd.read_csv(p_path).dropna(subset=["coef"])
 
-    label_to_k = {"Placebo: t−1": -1, "Same-day: t": 0,
-                  "Main: t+1": 1, "Placebo: t+2": 2}
-    p["k"] = p["model"].map(label_to_k)
+    # Map model labels robustly — handle both unicode minus and ASCII hyphen,
+    # and the "Main: aligned" label produced by run_placebo().
+    def _assign_k(m: str) -> float:
+        if "t-1" in m or "t−1" in m or "t−1" in m:
+            return -1.0
+        if "aligned" in m.lower() or "main" in m.lower():
+            return 0.0
+        if "t+2" in m:
+            return 2.0
+        return float("nan")
+
+    p["k"] = p["model"].apply(_assign_k)
     p = p.dropna(subset=["k"]).sort_values("k")
+
+    ks = sorted(p["k"].unique())
 
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.axhline(0, color="black", lw=0.8, ls="--")
-    ax.axvspan(0.5, 1.5, alpha=0.06, color=BLUE)
+    # Highlight the main estimate (k=0)
+    ax.axvspan(-0.5, 0.5, alpha=0.06, color=BLUE)
 
     ax.errorbar(p["k"], p["coef"],
                 yerr=[p["coef"]-p["ci_lo"], p["ci_hi"]-p["coef"]],
@@ -276,9 +288,9 @@ def placebo_plot() -> None:
         color = RED if "Placebo" in row["model"] else BLUE
         ax.scatter(row["k"], row["coef"], color=color, s=60, zorder=5)
 
-    ax.set_xticks([-1, 0, 1, 2])
-    ax.set_xticklabels(["t−1\n(placebo)", "t\n(same day)",
-                         "t+1\n(main)", "t+2\n(placebo)"])
+    tick_labels = {-1: "t−1\n(placebo)", 0: "t\n(main/aligned)", 2: "t+2\n(placebo)"}
+    ax.set_xticks(ks)
+    ax.set_xticklabels([tick_labels.get(int(k), str(int(k))) for k in ks])
     ax.set_ylabel("Effect on fatalities (county-day, FE-adjusted)")
     ax.set_title("Fig. 5  Main Estimate and Placebo Tests")
 
