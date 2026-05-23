@@ -1555,5 +1555,208 @@ def main() -> None:
     log.info("Done. Results saved to output/tables/")
 
 
+# ---------------------------------------------------------------------------
+# Commuting-flow spillover: do alerts in neighbouring counties affect crashes
+# in the work county?
+# ---------------------------------------------------------------------------
+
+COMMUTING_WEIGHTS_PATH = (
+    Path(__file__).parent.parent / "data" / "processed" / "commuting"
+    / "county_commuting_weights.parquet"
+)
+
+
+def _build_cross_spillover(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each (county c, date t), compute:
+        cross_spillover_ct = Σ_{j ≠ c}  w_{j→c} × night_alert_{j,t}
+
+    where w_{j→c} = fraction of workers in c who commute FROM county j
+    (from ACS 2016-2020 county-to-county commuting flows).
+
+    Returns a copy of df with new column 'cross_spillover'.
+    The column is 0 on all non-alert dates and on own-only alert dates.
+    """
+    if not COMMUTING_WEIGHTS_PATH.exists():
+        raise FileNotFoundError(
+            f"Commuting weights not found at {COMMUTING_WEIGHTS_PATH}. "
+            "Run the weight-building script first."
+        )
+
+    weights = pd.read_parquet(COMMUTING_WEIGHTS_PATH)  # fips_home, fips_work, weight
+    log.info("Commuting weights: %d OD pairs, %d work counties",
+             len(weights), weights["fips_work"].nunique())
+
+    # ----- Step 1: get alert events (non-zero night_alert rows) -----
+    # Panel fips is a 5-char string; weights use integer FIPS
+    fips_in_sample = set(df["fips"].unique())
+    alert_events = df.loc[df["night_alert"] > 0, ["fips", "date"]].copy()
+    alert_events["fips_home"] = alert_events["fips"].astype(int)
+
+    if alert_events.empty:
+        log.warning("No alert events found — cross_spillover will be all zeros")
+        df = df.copy()
+        df["cross_spillover"] = 0.0
+        return df
+
+    # ----- Step 2: merge with weights and exclude own-county -----
+    # Each alert event fans out to all work counties whose workers commute from it
+    spill_pairs = alert_events.merge(weights, on="fips_home", how="inner")
+    spill_pairs = spill_pairs[spill_pairs["fips_home"] != spill_pairs["fips_work"]]
+
+    # Restrict work counties to analysis sample
+    spill_pairs["fips_work_str"] = spill_pairs["fips_work"].astype(str).str.zfill(5)
+    spill_pairs = spill_pairs[spill_pairs["fips_work_str"].isin(fips_in_sample)]
+
+    log.info("Spillover pairs: %d (alert events × weight links)", len(spill_pairs))
+
+    # ----- Step 3: aggregate to (work county, date) -----
+    spillover = (
+        spill_pairs.groupby(["fips_work_str", "date"])["weight"]
+        .sum()
+        .reset_index()
+        .rename(columns={"weight": "cross_spillover", "fips_work_str": "fips"})
+    )
+
+    log.info("Spillover non-zero county-days: %d (mean weight=%.4f)",
+             len(spillover), spillover["cross_spillover"].mean())
+
+    # ----- Step 4: merge back -----
+    df = df.copy()
+    df = df.merge(spillover, on=["fips", "date"], how="left")
+    df["cross_spillover"] = df["cross_spillover"].fillna(0.0)
+
+    log.info("cross_spillover: mean=%.5f, max=%.4f, nonzero rows=%d",
+             df["cross_spillover"].mean(),
+             df["cross_spillover"].max(),
+             (df["cross_spillover"] > 0).sum())
+    return df
+
+
+def run_commuting_spillover(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Test whether night alerts in neighbouring counties raise next-day crashes
+    in the work county, via worker sleep disruption.
+
+    Model:
+        Y_ct = β_own · OwnAlert_ct + β_spill · CrossSpillover_ct
+               + county_FE + DoW×Month_FE + ε
+
+    where CrossSpillover_ct = Σ_{j≠c} w_{j→c} × night_alert_{j,t}
+    and w_{j→c} = fraction of c's workforce that commutes from county j
+    (ACS 2016-2020, 5-year estimates).
+
+    Specs:
+      (I)  count baseline    — raw fatality count, county+DoW×Month FE
+      (II) count TWFE2       — + county×year FE + lag(fatals_tm1)
+      (III) comb/100k WLS    — combined (fatal+serious)/100k, log-pop WLS
+
+    Returns DataFrame with one row per (spec, coefficient_type) combination.
+    Coefficient_type ∈ {'own', 'spillover'}.
+    """
+    import gc
+
+    log.info("Building commuting spillover variable…")
+    df_sp = _build_cross_spillover(df)
+
+    # Aligned outcome + combined + population (same as add_aligned_outcome)
+    df_sp = add_aligned_outcome(df_sp)
+    df_sp.sort_values(["fips", "date"], inplace=True)
+
+    has_combined = "combined_next_commute" in df_sp.columns
+    has_pop      = "population" in df_sp.columns
+
+    if has_pop:
+        county_mean_pop = df_sp.groupby("fips")["population"].transform("mean")
+        _pop = df_sp["population"].fillna(county_mean_pop)
+        df_sp["log_pop"]  = np.log(_pop.clip(lower=1))
+        df_sp["pop_100k"] = _pop / 100_000
+        del _pop
+
+    # county×year FE for TWFE2
+    df_sp["county_year_code"] = pd.Categorical(
+        df_sp["county_code"].astype(str) + "_" + df_sp["year"].astype(str)
+    ).codes.astype(np.int32)
+
+    hol_ctrl  = [c for c in HOLIDAY if c in df_sp.columns]
+    has_lag   = "fatals_tm1" in df_sp.columns
+    twfe_ctrl = hol_ctrl + (["fatals_tm1"] if has_lag else [])
+
+    results = []
+
+    def _extract_both(r_own, r_spill, spec_label):
+        """Store own-alert and spillover coefficients as separate rows."""
+        for r, ctype in [(r_own, "own"), (r_spill, "spillover")]:
+            if "error" not in r:
+                results.append({
+                    "spec": spec_label, "coef_type": ctype,
+                    "coef": r["coef"], "se": r["se"], "pval": r["pval"],
+                    "n_obs": r.get("n_obs", np.nan),
+                })
+
+    # ---- Spec I: count, baseline FE ----
+    log.info("Commuting spillover (I) — count, baseline FE")
+    ctrl = ["cross_spillover"] + hol_ctrl
+    r_own = fe_ols_from_panel(df_sp, "fatals_next_commute",
+                              treatment="night_alert", controls=ctrl,
+                              county=True, dm=True,
+                              cluster_col="state_code",
+                              label="own [count, baseline]")
+    r_sp  = fe_ols_from_panel(df_sp, "fatals_next_commute",
+                              treatment="cross_spillover",
+                              controls=["night_alert"] + hol_ctrl,
+                              county=True, dm=True,
+                              cluster_col="state_code",
+                              label="spillover [count, baseline]")
+    _extract_both(r_own, r_sp, "count_baseline")
+
+    # ---- Spec II: count, TWFE2 ----
+    log.info("Commuting spillover (II) — count, TWFE2")
+    ctrl_tw = ["cross_spillover"] + twfe_ctrl
+    r_own_tw = fe_ols_from_panel(df_sp, "fatals_next_commute",
+                                 treatment="night_alert", controls=ctrl_tw,
+                                 county=False, dm=True,
+                                 extra_fes=["county_year_code"],
+                                 cluster_col="state_code",
+                                 label="own [count, TWFE2]")
+    r_sp_tw  = fe_ols_from_panel(df_sp, "fatals_next_commute",
+                                 treatment="cross_spillover",
+                                 controls=["night_alert"] + twfe_ctrl,
+                                 county=False, dm=True,
+                                 extra_fes=["county_year_code"],
+                                 cluster_col="state_code",
+                                 label="spillover [count, TWFE2]")
+    _extract_both(r_own_tw, r_sp_tw, "count_twfe2")
+
+    # ---- Spec III: combined/100k WLS ----
+    if has_combined and has_pop:
+        log.info("Commuting spillover (III) — combined/100k, log-pop WLS")
+        df_sp["comb_rate"] = df_sp["combined_next_commute"] / df_sp["pop_100k"]
+        sub_r = df_sp.dropna(subset=["comb_rate", "log_pop"])
+        ctrl_r = ["cross_spillover"] + hol_ctrl
+        r_own_r = fe_ols_from_panel(sub_r, "comb_rate",
+                                    treatment="night_alert", controls=ctrl_r,
+                                    county=True, dm=True,
+                                    weights_col="log_pop",
+                                    cluster_col="state_code",
+                                    label="own [comb/100k WLS]")
+        r_sp_r  = fe_ols_from_panel(sub_r, "comb_rate",
+                                    treatment="cross_spillover",
+                                    controls=["night_alert"] + hol_ctrl,
+                                    county=True, dm=True,
+                                    weights_col="log_pop",
+                                    cluster_col="state_code",
+                                    label="spillover [comb/100k WLS]")
+        _extract_both(r_own_r, r_sp_r, "comb_wls")
+        del sub_r
+
+    del df_sp; gc.collect()
+
+    out = pd.DataFrame(results)
+    log.info("=== Commuting spillover results ===\n%s",
+             out[["spec","coef_type","coef","se","pval","n_obs"]].to_string(index=False))
+    return out
+
+
 if __name__ == "__main__":
     main()
