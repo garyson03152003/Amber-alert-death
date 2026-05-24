@@ -27,10 +27,16 @@ Timing convention:
   to a single "night_alert" indicator keyed on the crash date, so no
   additional outcome shift is needed — the outcome is same-day crashes.
 
-Outcome variables (per 100k, on the crash_date):
-  crashes_per_100k   — total crashes
-  fatals_per_100k    — fatalities
-  serious_per_100k   — serious injuries (KABCO-A)
+Two model families run in parallel:
+
+  OLS-rate:  outcome = crashes_per_100k  (count / population × 100,000)
+             β = absolute change in crashes per 100k on alert nights
+
+  Poisson PPML (pyfixest.fepois):
+             outcome = crash count  with offset = log(population)
+             exp(β) = Incident Rate Ratio (IRR); 100×(exp(β)−1) = % change
+             County FE + date FE + DoW absorbed inside fepois().
+             SE clustered by county.
 
 Treatment:
   night_alert — 1 if county received a nighttime AMBER alert whose
@@ -422,16 +428,66 @@ except ImportError:
     HAS_LINEARMODELS = False
     log.warning("linearmodels not installed — using within-transform OLS fallback")
 
+try:
+    import pyfixest as pf
+    HAS_PYFIXEST = True
+except ImportError:
+    HAS_PYFIXEST = False
+    log.warning("pyfixest not installed — Poisson PPML specs will be skipped")
+
 from statsmodels.regression.linear_model import OLS
 import statsmodels.api as sm
 
 results_rows = []
 
+# OLS outcomes (rate per 100k) and their raw count equivalents for Poisson
 OUTCOMES = [
-    ("crashes_per_100k", "All crashes / 100k (crash day)"),
-    ("fatals_per_100k",  "Fatalities / 100k (crash day)"),
-    ("serious_per_100k", "Serious inj / 100k (crash day)"),
+    ("crashes_per_100k", "All crashes / 100k",  "crashes"),
+    ("fatals_per_100k",  "Fatalities / 100k",   "fatals"),
+    ("serious_per_100k", "Serious inj / 100k",  "serious_inj"),
 ]
+
+# String label for day-of-week in pyfixest formula
+panel["dow_str"] = "dow" + panel["dow"].astype(str)
+
+
+def run_poisson_ppml(sub2: pd.DataFrame, rate_col: str, label: str) -> dict | None:
+    """
+    Poisson PPML with county FE + date FE + DoW dummies.
+    Uses crashes_per_100k (the rate) as the PPML outcome — PPML handles
+    non-integer outcomes; exp(β) is the incident rate ratio (IRR).
+    pyfixest.fepois() absorbs high-dimensional FEs without a dummy matrix.
+    SE clustered by county (fips).
+    """
+    if not HAS_PYFIXEST:
+        return None
+    sub2 = sub2.dropna(subset=[rate_col]).copy()
+    # Drop zero-rate rows (PPML requires y > 0; zeros create separation issues)
+    sub2 = sub2[sub2[rate_col] > 0]
+    if len(sub2) < 100 or sub2["night_alert"].std() < 1e-12:
+        return None
+
+    sub2["_fips_str"] = sub2["fips"].astype(str)
+    sub2["_date_str"] = sub2["date"].astype(str)
+
+    formula = f"{rate_col} ~ night_alert + C(dow_str) | _fips_str + _date_str"
+    try:
+        fit = pf.fepois(formula, data=sub2, vcov={"CRV1": "_fips_str"})
+        coef_tbl = fit.tidy()   # index = coefficient name
+        if "night_alert" not in coef_tbl.index:
+            return None
+        b  = float(coef_tbl.loc["night_alert", "Estimate"])
+        se = float(coef_tbl.loc["night_alert", "Std. Error"])
+        pv = float(coef_tbl.loc["night_alert", "Pr(>|t|)"])
+        n  = int(fit._N)
+        irr = round(float(np.exp(b)), 6)
+        pct = round(100 * (np.exp(b) - 1), 3)
+        return dict(beta=round(b, 6), se=round(se, 6), pvalue=round(pv, 4),
+                    irr=irr, pct_change=pct, n_obs=n,
+                    method="Poisson PPML (pyfixest, county+date FE+DoW)")
+    except Exception as exc:
+        log.warning("  [%s] Poisson PPML failed for %s: %s", label, rate_col, exc)
+        return None
 
 
 def run_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict | None:
@@ -524,29 +580,46 @@ for state_filter in [None] + sorted(panel.state.unique().tolist()):
         log.warning("  [%s] fewer than 10 treated obs — skipping", label)
         continue
 
-    for outcome_col, outcome_label in OUTCOMES:
+    for outcome_col, outcome_label, count_col in OUTCOMES:
         sub2 = sub.dropna(subset=[outcome_col]).copy()
         if len(sub2) < 100:
             continue
 
-        # Use PanelOLS for per-state (≤300k rows); within-transform for ALL
+        # ── OLS on rate per 100k ──────────────────────────────────────────────
         use_panel_ols = HAS_LINEARMODELS and (state_filter is not None) and (len(sub2) < 300_000)
-        if use_panel_ols:
-            result = run_twfe_panelols(sub2, outcome_col, label)
-        else:
-            result = run_twfe(sub2, outcome_col, label)
+        ols_result = (run_twfe_panelols(sub2, outcome_col, label)
+                      if use_panel_ols else
+                      run_twfe(sub2, outcome_col, label))
 
-        if result is None:
-            continue
-        result.update({"state": label, "outcome": outcome_label,
-                       "n_treated": int(sub.night_alert.sum())})
-        results_rows.append(result)
-        stars = ("***" if result["pvalue"] < 0.01 else
-                 "**"  if result["pvalue"] < 0.05 else
-                 "*"   if result["pvalue"] < 0.10 else "")
-        log.info("  [%s] %-35s β=%+.4f  se=%.4f  p=%.3f %s  n=%d",
-                 label, outcome_label, result["beta"], result["se"],
-                 result["pvalue"], stars, result["n_obs"])
+        if ols_result is not None:
+            ols_result.update({"state": label, "outcome": outcome_label,
+                               "n_treated": int(sub.night_alert.sum()),
+                               "model": "OLS"})
+            results_rows.append(ols_result)
+            stars = ("***" if ols_result["pvalue"] < 0.01 else
+                     "**"  if ols_result["pvalue"] < 0.05 else
+                     "*"   if ols_result["pvalue"] < 0.10 else "")
+            log.info("  [%s] OLS  %-30s β=%+.4f  se=%.4f  p=%.3f %s",
+                     label, outcome_label,
+                     ols_result["beta"], ols_result["se"],
+                     ols_result["pvalue"], stars)
+
+        # ── Poisson PPML on rate per 100k (incident rate ratio) ──────────────
+        if sub2[outcome_col].sum() > 0:
+            pois_result = run_poisson_ppml(sub2, outcome_col, label)
+            if pois_result is not None:
+                pois_result.update({"state": label, "outcome": outcome_label,
+                                    "n_treated": int(sub.night_alert.sum()),
+                                    "model": "Poisson"})
+                results_rows.append(pois_result)
+                stars = ("***" if pois_result["pvalue"] < 0.01 else
+                         "**"  if pois_result["pvalue"] < 0.05 else
+                         "*"   if pois_result["pvalue"] < 0.10 else "")
+                log.info("  [%s] PPML %-30s β=%+.4f  IRR=%.4f  p=%.3f %s  (%.1f%%)",
+                         label, outcome_label,
+                         pois_result["beta"], pois_result["irr"],
+                         pois_result["pvalue"], stars,
+                         pois_result["pct_change"])
 
 results = pd.DataFrame(results_rows)
 
@@ -556,12 +629,19 @@ log.info("Night AMBER alert → same-day traffic outcomes (TWFE, county+date FE,
 log.info("(early-night alerts: effective crash date = alert date + 1; late-night: same day)")
 log.info("")
 if not results.empty:
-    for _, row in results[results.state == "ALL"].iterrows():
-        stars = ("***" if row.pvalue < 0.01 else
-                 "**"  if row.pvalue < 0.05 else
-                 "*"   if row.pvalue < 0.10 else "")
-        log.info("  %-35s  β=%+.4f (SE=%.4f)  p=%.3f %s",
+    all_rows = results[results.state == "ALL"]
+    log.info("  OLS (β = change in rate per 100k):")
+    for _, row in all_rows[all_rows.get("model", "OLS") == "OLS"].iterrows():
+        stars = "***" if row.pvalue < 0.01 else "**" if row.pvalue < 0.05 else "*" if row.pvalue < 0.10 else ""
+        log.info("    %-30s  β=%+.4f (SE=%.4f)  p=%.3f %s",
                  row.outcome, row.beta, row.se, row.pvalue, stars)
+    log.info("  Poisson PPML (IRR = multiplicative factor on crash rate):")
+    for _, row in all_rows[all_rows.get("model", "OLS") == "Poisson"].iterrows():
+        stars = "***" if row.pvalue < 0.01 else "**" if row.pvalue < 0.05 else "*" if row.pvalue < 0.10 else ""
+        irr = row.get("irr", float("nan"))
+        pct = row.get("pct_change", float("nan"))
+        log.info("    %-30s  IRR=%.4f (%+.1f%%)  p=%.3f %s",
+                 row.outcome, irr, pct, row.pvalue, stars)
 
     results.to_csv(OUTPUT_TABS / "state_dot_analysis.csv", index=False)
     log.info("\nSaved → %s", OUTPUT_TABS / "state_dot_analysis.csv")

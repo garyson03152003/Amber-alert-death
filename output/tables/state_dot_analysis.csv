@@ -1,25 +1,41 @@
-beta,se,pvalue,n_obs,method,state,outcome,n_treated
--0.395686,0.13333,0.003,1021823,Within-transform TWFE (county+date FE+DoW),ALL,All crashes / 100k (crash day),529
-0.035322,0.043817,0.4202,1021823,Within-transform TWFE (county+date FE+DoW),ALL,Fatalities / 100k (crash day),529
--0.110352,0.068731,0.1084,1021823,Within-transform TWFE (county+date FE+DoW),ALL,Serious inj / 100k (crash day),529
-0.031876,0.175101,0.8555,128459,PanelOLS TWFE (linearmodels+DoW),CA,All crashes / 100k (crash day),126
-0.031685,0.034643,0.3604,128459,PanelOLS TWFE (linearmodels+DoW),CA,Fatalities / 100k (crash day),126
--0.316411,0.189692,0.0953,128459,PanelOLS TWFE (linearmodels+DoW),CA,Serious inj / 100k (crash day),126
-0.075943,0.455084,0.8675,44757,PanelOLS TWFE (linearmodels+DoW),FL,All crashes / 100k (crash day),16
-0.001087,0.008916,0.903,44757,PanelOLS TWFE (linearmodels+DoW),FL,Fatalities / 100k (crash day),16
-0.014431,0.09048,0.8733,44757,PanelOLS TWFE (linearmodels+DoW),FL,Serious inj / 100k (crash day),16
--61.561659,43.568744,0.1577,142190,Within-transform TWFE (county+date FE+DoW),IA,All crashes / 100k (crash day),44
-0.212812,1.077721,0.8435,142190,Within-transform TWFE (county+date FE+DoW),IA,Fatalities / 100k (crash day),44
-1.938375,2.987258,0.5164,142190,Within-transform TWFE (county+date FE+DoW),IA,Serious inj / 100k (crash day),44
--0.573187,0.275257,0.0373,178138,PanelOLS TWFE (linearmodels+DoW),IL,All crashes / 100k (crash day),189
--0.013054,0.066025,0.8433,178138,PanelOLS TWFE (linearmodels+DoW),IL,Fatalities / 100k (crash day),189
--0.148188,0.218927,0.4985,178138,PanelOLS TWFE (linearmodels+DoW),IL,Serious inj / 100k (crash day),189
--2.496553,1.915333,0.1924,22303,PanelOLS TWFE (linearmodels+DoW),NV,All crashes / 100k (crash day),33
-0.978075,0.682091,0.1516,22303,PanelOLS TWFE (linearmodels+DoW),NV,Fatalities / 100k (crash day),33
-0.477142,0.559471,0.3938,22303,PanelOLS TWFE (linearmodels+DoW),NV,Serious inj / 100k (crash day),33
-1.121035,0.634517,0.0773,43492,PanelOLS TWFE (linearmodels+DoW),NY,All crashes / 100k (crash day),37
-0.002175,0.00369,0.5555,43492,PanelOLS TWFE (linearmodels+DoW),NY,Fatalities / 100k (crash day),37
-0.0,0.0,,43492,Within-transform TWFE (county+date FE+DoW),NY,Serious inj / 100k (crash day),37
-0.337434,0.599993,0.5738,208524,PanelOLS TWFE (linearmodels+DoW),WI,All crashes / 100k (crash day),83
-0.193329,0.210117,0.3575,208524,PanelOLS TWFE (linearmodels+DoW),WI,Fatalities / 100k (crash day),83
-0.205506,0.187839,0.2739,208524,PanelOLS TWFE (linearmodels+DoW),WI,Serious inj / 100k (crash day),83
+beta,se,pvalue,n_obs,method,state,outcome,n_treated,model,irr,pct_change
+-0.395686,0.13333,0.003,1021823,Within-transform TWFE (county+date FE+DoW),ALL,All crashes / 100k,529,OLS,,
+-0.058692,0.021344,0.006,1021823,"Poisson PPML (pyfixest, county+date FE+DoW)",ALL,All crashes / 100k,529,Poisson,0.942997,-5.7
+0.035322,0.043817,0.4202,1021823,Within-transform TWFE (county+date FE+DoW),ALL,Fatalities / 100k,529,OLS,,
+-0.121636,0.082736,0.1415,50119,"Poisson PPML (pyfixest, county+date FE+DoW)",ALL,Fatalities / 100k,529,Poisson,0.88547,-11.453
+-0.110352,0.068731,0.1084,1021823,Within-transform TWFE (county+date FE+DoW),ALL,Serious inj / 100k,529,OLS,,
+0.041002,0.059421,0.4902,251976,"Poisson PPML (pyfixest, county+date FE+DoW)",ALL,Serious inj / 100k,529,Poisson,1.041854,4.185
+0.031876,0.175101,0.8555,128459,PanelOLS TWFE (linearmodels+DoW),CA,All crashes / 100k,126,OLS,,
+-0.014888,0.031323,0.6346,128459,"Poisson PPML (pyfixest, county+date FE+DoW)",CA,All crashes / 100k,126,Poisson,0.985223,-1.478
+0.031685,0.034643,0.3604,128459,PanelOLS TWFE (linearmodels+DoW),CA,Fatalities / 100k,126,OLS,,
+-0.131878,0.116135,0.2561,19815,"Poisson PPML (pyfixest, county+date FE+DoW)",CA,Fatalities / 100k,126,Poisson,0.876448,-12.355
+-0.316411,0.189692,0.0953,128459,PanelOLS TWFE (linearmodels+DoW),CA,Serious inj / 100k,126,OLS,,
+-0.022335,0.05072,0.6597,107953,"Poisson PPML (pyfixest, county+date FE+DoW)",CA,Serious inj / 100k,126,Poisson,0.977912,-2.209
+0.075943,0.455084,0.8675,44757,PanelOLS TWFE (linearmodels+DoW),FL,All crashes / 100k,16,OLS,,
+0.033683,0.300675,0.9108,44757,"Poisson PPML (pyfixest, county+date FE+DoW)",FL,All crashes / 100k,16,Poisson,1.034256,3.426
+0.001087,0.008916,0.903,44757,PanelOLS TWFE (linearmodels+DoW),FL,Fatalities / 100k,16,OLS,,
+0.014431,0.09048,0.8733,44757,PanelOLS TWFE (linearmodels+DoW),FL,Serious inj / 100k,16,OLS,,
+-61.561659,43.568744,0.1577,142190,Within-transform TWFE (county+date FE+DoW),IA,All crashes / 100k,44,OLS,,
+0.212812,1.077721,0.8435,142190,Within-transform TWFE (county+date FE+DoW),IA,Fatalities / 100k,44,OLS,,
+1.938375,2.987258,0.5164,142190,Within-transform TWFE (county+date FE+DoW),IA,Serious inj / 100k,44,OLS,,
+-0.573187,0.275257,0.0373,178138,PanelOLS TWFE (linearmodels+DoW),IL,All crashes / 100k,189,OLS,,
+-0.065036,0.03453,0.0596,178138,"Poisson PPML (pyfixest, county+date FE+DoW)",IL,All crashes / 100k,189,Poisson,0.937033,-6.297
+-0.013054,0.066025,0.8433,178138,PanelOLS TWFE (linearmodels+DoW),IL,Fatalities / 100k,189,OLS,,
+-0.94045,0.180776,0.0,5891,"Poisson PPML (pyfixest, county+date FE+DoW)",IL,Fatalities / 100k,189,Poisson,0.390452,-60.955
+-0.148188,0.218927,0.4985,178138,PanelOLS TWFE (linearmodels+DoW),IL,Serious inj / 100k,189,OLS,,
+0.241885,0.265389,0.3621,31392,"Poisson PPML (pyfixest, county+date FE+DoW)",IL,Serious inj / 100k,189,Poisson,1.273647,27.365
+-2.496553,1.915333,0.1924,22303,PanelOLS TWFE (linearmodels+DoW),NV,All crashes / 100k,33,OLS,,
+-0.11693,0.109736,0.2866,22303,"Poisson PPML (pyfixest, county+date FE+DoW)",NV,All crashes / 100k,33,Poisson,0.889648,-11.035
+0.978075,0.682091,0.1516,22303,PanelOLS TWFE (linearmodels+DoW),NV,Fatalities / 100k,33,OLS,,
+0.477142,0.559471,0.3938,22303,PanelOLS TWFE (linearmodels+DoW),NV,Serious inj / 100k,33,OLS,,
+0.997705,2087.663484,0.9996,2759,"Poisson PPML (pyfixest, county+date FE+DoW)",NV,Serious inj / 100k,33,Poisson,2.712051,171.205
+1.121035,0.634517,0.0773,43492,PanelOLS TWFE (linearmodels+DoW),NY,All crashes / 100k,37,OLS,,
+0.134688,0.083124,0.1052,43492,"Poisson PPML (pyfixest, county+date FE+DoW)",NY,All crashes / 100k,37,Poisson,1.14418,14.418
+0.002175,0.00369,0.5555,43492,PanelOLS TWFE (linearmodels+DoW),NY,Fatalities / 100k,37,OLS,,
+0.0,0.0,,43492,Within-transform TWFE (county+date FE+DoW),NY,Serious inj / 100k,37,OLS,,
+0.337434,0.599993,0.5738,208524,PanelOLS TWFE (linearmodels+DoW),WI,All crashes / 100k,83,OLS,,
+0.021141,0.112087,0.8504,208524,"Poisson PPML (pyfixest, county+date FE+DoW)",WI,All crashes / 100k,83,Poisson,1.021366,2.137
+0.193329,0.210117,0.3575,208524,PanelOLS TWFE (linearmodels+DoW),WI,Fatalities / 100k,83,OLS,,
+-0.113412,0.07515,0.1313,3813,"Poisson PPML (pyfixest, county+date FE+DoW)",WI,Fatalities / 100k,83,Poisson,0.892783,-10.722
+0.205506,0.187839,0.2739,208524,PanelOLS TWFE (linearmodels+DoW),WI,Serious inj / 100k,83,OLS,,
+0.43106,0.51232,0.4001,23282,"Poisson PPML (pyfixest, county+date FE+DoW)",WI,Serious inj / 100k,83,Poisson,1.538888,53.889
