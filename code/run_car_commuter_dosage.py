@@ -210,10 +210,41 @@ if CELL_PATH.exists():
     # Zero out non-treated counties
     df["cell_pop_reached"] *= (df["night_alert"] > 0).astype(float)
     df["log_cell_reached"] = np.log1p(df["cell_pop_reached"])
-    has_cell = True
+    has_cell    = True
+    has_cellcar = False   # set True after (F) block below
     log.info("Built log_cell_reached: mean=%.2f on treated", df.loc[df["night_alert"]>0,"log_cell_reached"].mean())
+
+    # ── (F) Cell-connectivity × car-commuter combined dosage ─────────────────
+    # cell_car_pop_c = car_total_c × cell_share_c
+    #   = "car commuters with cellular service" — the most targeted WEA dose:
+    #   people who (1) received the WEA blast at night, and (2) drive to work
+    # car_share and cell_share have Corr = −0.110 (negatively correlated:
+    #   urban → low car, high cell; rural → high car, moderate cell)
+    # so the product std (9.9pp) > car alone (7.5pp) — more county-level variation
+    car_cell = car[["fips","car_total"]].merge(cell[["fips","cell_share"]], on="fips", how="inner")
+    car_cell["cell_car_pop"] = car_cell["car_total"].astype(float) * car_cell["cell_share"]
+
+    alerts_cellcar = alerts_raw.merge(car_cell[["fips","cell_car_pop"]],
+                                       left_on="county_fips", right_on="fips", how="left")
+    alerts_cellcar["cell_car_pop"] = alerts_cellcar["cell_car_pop"].fillna(0)
+    night_alerts_cellcar = alerts_cellcar[alerts_cellcar["is_night"]].copy()
+
+    alert_day_cellcar = (night_alerts_cellcar.groupby("date")["cell_car_pop"]
+                         .sum().reset_index()
+                         .rename(columns={"cell_car_pop": "cell_car_reached"}))
+    alert_day_cellcar["date"] = pd.to_datetime(alert_day_cellcar["date"])
+
+    df = df.merge(alert_day_cellcar, on="date", how="left")
+    df["cell_car_reached"] = df["cell_car_reached"].fillna(0)
+    df["cell_car_reached"] *= (df["night_alert"] > 0).astype(float)
+    df["log_cell_car_reached"] = np.log1p(df["cell_car_reached"])
+    has_cellcar = True   # both (E) and (F) are ready
+    log.info("Built log_cell_car_reached (car_commuters × cell_share): mean=%.2f on treated",
+             df.loc[df["night_alert"]>0,"log_cell_car_reached"].mean())
 else:
-    log.warning("Cell connectivity file not found (%s); skipping (E)", CELL_PATH)
+    has_cell    = False
+    has_cellcar = False
+    log.warning("Cell connectivity file not found (%s); skipping (E) and (F)", CELL_PATH)
     log.warning("Run code/01f_fetch_cell_connectivity.py first.")
 
 # Diagnostics
@@ -231,11 +262,20 @@ if "log_breadth" in df.columns:
 log.info("Corr(log_car_reached, log_pop_reached): %.3f",
          treated["log_car_reached"].corr(treated["log_pop_reached"]))
 if has_cell:
-    log.info("Corr(log_pop_reached, log_cell_reached): %.3f",
+    log.info("Corr(log_pop_reached, log_cell_reached):    %.3f",
              treated["log_pop_reached"].corr(treated["log_cell_reached"]))
+if has_cellcar:
+    log.info("Corr(log_breadth, log_cell_car_reached):    %.3f",
+             treated["log_breadth"].corr(treated["log_cell_car_reached"]))
+    log.info("Corr(log_pop_reached, log_cell_car_reached):%.3f",
+             treated["log_pop_reached"].corr(treated["log_cell_car_reached"]))
+    log.info("Corr(log_car_reached, log_cell_car_reached):%.3f",
+             treated["log_car_reached"].corr(treated["log_cell_car_reached"]))
 
 log.info("Within-county variance:")
-extra = ["log_cell_reached"] if has_cell else []
+extra = []
+if has_cell:    extra.append("log_cell_reached")
+if has_cellcar: extra.append("log_cell_car_reached")
 for v in ["log_breadth","log_car_reached","log_pop_reached"] + extra:
     if v in df.columns:
         within_var = df.groupby("fips")[v].var().mean()
@@ -268,9 +308,11 @@ run_spec("(A) Binary [count]",         "night_alert",     "fatals_next_commute")
 if "log_breadth" in df.columns:
     run_spec("(B) Log-breadth [count]", "log_breadth",     "fatals_next_commute")
 run_spec("(C) Log-pop-reached [count]","log_pop_reached",  "fatals_next_commute")
-run_spec("(D) Log-car-reached [count]","log_car_reached",  "fatals_next_commute")
+run_spec("(D) Log-car-reached [count]",     "log_car_reached",      "fatals_next_commute")
 if has_cell:
-    run_spec("(E) Log-cell-reached [count]","log_cell_reached", "fatals_next_commute")
+    run_spec("(E) Log-cell-reached [count]",   "log_cell_reached",     "fatals_next_commute")
+if has_cellcar:
+    run_spec("(F) Log-cell×car-reached [count]","log_cell_car_reached","fatals_next_commute")
 
 if has_comb and has_pop:
     log.info("\n=== WLS rate (combined/100k) ===")
@@ -278,9 +320,11 @@ if has_comb and has_pop:
     if "log_breadth" in df.columns:
         run_spec("(B) Log-breadth [WLS]",   "log_breadth",      "comb_rate", "log_pop")
     run_spec("(C) Log-pop-reached [WLS]",   "log_pop_reached",  "comb_rate", "log_pop")
-    run_spec("(D) Log-car-reached [WLS]",   "log_car_reached",  "comb_rate", "log_pop")
+    run_spec("(D) Log-car-reached [WLS]",      "log_car_reached",      "comb_rate", "log_pop")
     if has_cell:
-        run_spec("(E) Log-cell-reached [WLS]","log_cell_reached","comb_rate", "log_pop")
+        run_spec("(E) Log-cell-reached [WLS]",   "log_cell_reached",     "comb_rate", "log_pop")
+    if has_cellcar:
+        run_spec("(F) Log-cell×car-reached [WLS]","log_cell_car_reached","comb_rate", "log_pop")
 
 # ── Save ─────────────────────────────────────────────────────────────────────
 out = pd.DataFrame(results)
