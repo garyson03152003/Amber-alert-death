@@ -502,11 +502,14 @@ def _pyfixest_coef(fit, coef_name: str) -> tuple[float, float, float, int] | Non
 
 def run_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict | None:
     """
-    Population-weighted WLS TWFE via pyfixest.feols (county+date FE+DoW).
-    Weights = county population (analytic weights), so large counties count
-    proportionally more than tiny sparsely-populated ones.
+    Population-weighted WLS TWFE via pyfixest.feols (county + date FE).
+    Weights = county population (analytic weights).
+    SE: two-way cluster by (county × year) — handles within-county serial
+    correlation AND within-year cross-county common shocks.
+    State-level clustering is avoided: only 11 states → too few for asymptotics.
+    DoW dummies are omitted from the feols formula because calendar-date FEs
+    already absorb day-of-week variation exactly.
     Falls back to unweighted iterative within-transform if pyfixest unavailable.
-    SE clustered by county (fips).
     """
     sub2 = sub2.dropna(subset=[outcome_col, "population"]).copy()
     if len(sub2) < 100 or sub2["night_alert"].std() < 1e-12:
@@ -515,20 +518,28 @@ def run_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict | None:
     if HAS_PYFIXEST:
         sub2["_fips_str"] = sub2["fips"].astype(str)
         sub2["_date_str"] = sub2["date"].astype(str)
+        sub2["_year_str"] = sub2["year"].astype(str)
         sub2["_pop"]      = sub2["population"].astype(float)
-        formula = f"{outcome_col} ~ night_alert + C(dow_str) | _fips_str + _date_str"
-        try:
-            fit  = pf.feols(formula, data=sub2, weights="_pop",
-                            vcov={"CRV1": "_fips_str"})
-            vals = _pyfixest_coef(fit, "night_alert")
-            if vals is None:
-                return None
-            b, se, pv, n = vals
-            return dict(beta=round(b,6), se=round(se,6), pvalue=round(pv,4), n_obs=n,
-                        method="WLS TWFE (pyfixest.feols, pop-weighted, county+date FE+DoW)")
-        except Exception as exc:
-            log.warning("  [%s] feols failed for %s: %s — falling back to within-transform",
-                        label, outcome_col, exc)
+        # No C(dow_str): date FEs absorb DoW perfectly
+        formula = f"{outcome_col} ~ night_alert | _fips_str + _date_str"
+        for vcov_spec, method_tag in [
+            ({"CRV1": "_fips_str + _year_str"}, "2-way SE: county×year"),
+            ({"CRV1": "_fips_str"},              "SE: county"),
+        ]:
+            try:
+                fit  = pf.feols(formula, data=sub2, weights="_pop", vcov=vcov_spec)
+                vals = _pyfixest_coef(fit, "night_alert")
+                if vals is None:
+                    continue
+                b, se, pv, n = vals
+                if np.isnan(se):          # two-way failed silently → try county-only
+                    continue
+                return dict(beta=round(b,6), se=round(se,6), pvalue=round(pv,4), n_obs=n,
+                            method=f"WLS TWFE (pyfixest, pop-wt, county+date FE, {method_tag})")
+            except Exception as exc:
+                log.warning("  [%s] feols[%s] failed for %s: %s",
+                            label, method_tag, outcome_col, exc)
+                continue
 
     # ── Fallback: unweighted iterative within-transform ───────────────────────
     dow_dummies = pd.get_dummies(sub2["dow"], prefix="dow", drop_first=True).astype(float)
@@ -579,24 +590,30 @@ def run_poisson_ppml(sub2: pd.DataFrame, rate_col: str, label: str) -> dict | No
 
     sub2["_fips_str"] = sub2["fips"].astype(str)
     sub2["_date_str"] = sub2["date"].astype(str)
+    sub2["_year_str"] = sub2["year"].astype(str)
     sub2["_pop"]      = sub2["population"].astype(float)
 
-    formula = f"{rate_col} ~ night_alert + C(dow_str) | _fips_str + _date_str"
-    try:
-        fit = pf.fepois(formula, data=sub2, weights="_pop",
-                        vcov={"CRV1": "_fips_str"})
-        vals = _pyfixest_coef(fit, "night_alert")
-        if vals is None:
-            return None
-        b, se, pv, n = vals
-        irr = round(float(np.exp(b)), 6)
-        pct = round(100 * (np.exp(b) - 1), 3)
-        return dict(beta=round(b,6), se=round(se,6), pvalue=round(pv,4),
-                    irr=irr, pct_change=pct, n_obs=n,
-                    method="Poisson PPML (pyfixest, pop-weighted, county+date FE+DoW)")
-    except Exception as exc:
-        log.warning("  [%s] Poisson PPML failed for %s: %s", label, rate_col, exc)
-        return None
+    formula = f"{rate_col} ~ night_alert | _fips_str + _date_str"
+    for vcov_spec, method_tag in [
+        ({"CRV1": "_fips_str + _year_str"}, "2-way SE: county×year"),
+        ({"CRV1": "_fips_str"},              "SE: county"),
+    ]:
+        try:
+            fit = pf.fepois(formula, data=sub2, weights="_pop", vcov=vcov_spec)
+            vals = _pyfixest_coef(fit, "night_alert")
+            if vals is None:
+                continue
+            b, se, pv, n = vals
+            if np.isnan(se):
+                continue
+            irr = round(float(np.exp(b)), 6)
+            pct = round(100 * (np.exp(b) - 1), 3)
+            return dict(beta=round(b,6), se=round(se,6), pvalue=round(pv,4),
+                        irr=irr, pct_change=pct, n_obs=n,
+                        method=f"Poisson PPML (pyfixest, pop-wt, county+date FE, {method_tag})")
+        except Exception as exc:
+            log.warning("  [%s] PPML[%s] failed for %s: %s", label, method_tag, rate_col, exc)
+    return None
 
 
 def run_sleep_phase_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> list[dict] | None:
@@ -624,31 +641,39 @@ def run_sleep_phase_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> li
     if HAS_PYFIXEST:
         sub2["_fips_str"] = sub2["fips"].astype(str)
         sub2["_date_str"] = sub2["date"].astype(str)
+        sub2["_year_str"] = sub2["year"].astype(str)
         sub2["_pop"]      = sub2["population"].astype(float)
-        # Build joint formula: all active phases as regressors
-        rhs = " + ".join(active) + " + C(dow_str)"
+        # No C(dow_str): date FEs absorb DoW
+        rhs = " + ".join(active)
         formula = f"{outcome_col} ~ {rhs} | _fips_str + _date_str"
-        try:
-            fit  = pf.feols(formula, data=sub2, weights="_pop",
-                            vcov={"CRV1": "_fips_str"})
-            tbl  = fit.tidy()
-            rows = []
-            for ph in active:
-                if ph not in tbl.index:
-                    continue
-                b  = float(tbl.loc[ph, "Estimate"])
-                se = float(tbl.loc[ph, "Std. Error"])
-                pv = float(tbl.loc[ph, "Pr(>|t|)"])
-                rows.append(dict(
-                    phase=ph, phase_label=PHASE_LABELS[ph],
-                    beta=round(b,6), se=round(se,6), pvalue=round(pv,4),
-                    n_treated_phase=int(sub2[ph].sum()),
-                    n_obs=int(fit._N),
-                    method="Sleep-phase WLS TWFE (pop-weighted, county+date FE+DoW, joint)",
-                ))
-            return rows or None
-        except Exception as exc:
-            log.warning("  [%s] sleep-phase feols failed: %s — using within-transform", label, exc)
+        for vcov_spec, method_tag in [
+            ({"CRV1": "_fips_str + _year_str"}, "2-way SE: county×year"),
+            ({"CRV1": "_fips_str"},              "SE: county"),
+        ]:
+            try:
+                fit  = pf.feols(formula, data=sub2, weights="_pop", vcov=vcov_spec)
+                tbl  = fit.tidy()
+                rows = []
+                for ph in active:
+                    if ph not in tbl.index:
+                        continue
+                    b  = float(tbl.loc[ph, "Estimate"])
+                    se = float(tbl.loc[ph, "Std. Error"])
+                    pv = float(tbl.loc[ph, "Pr(>|t|)"])
+                    if np.isnan(se):
+                        rows = []
+                        break
+                    rows.append(dict(
+                        phase=ph, phase_label=PHASE_LABELS[ph],
+                        beta=round(b,6), se=round(se,6), pvalue=round(pv,4),
+                        n_treated_phase=int(sub2[ph].sum()),
+                        n_obs=int(fit._N),
+                        method=f"Sleep-phase WLS TWFE (pop-wt, county+date FE, {method_tag}, joint)",
+                    ))
+                if rows:
+                    return rows
+            except Exception as exc:
+                log.warning("  [%s] sleep-phase feols[%s] failed: %s", label, method_tag, exc)
 
     # ── Fallback: unweighted iterative within-transform ───────────────────────
     dow_dummies = pd.get_dummies(sub2["dow"], prefix="dow", drop_first=True).astype(float)

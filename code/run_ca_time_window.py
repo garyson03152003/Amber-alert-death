@@ -211,9 +211,8 @@ def run_twfe_window(sub2: pd.DataFrame,
     sub2["_fips_str"] = sub2["fips"].astype(str)
     sub2["_date_str"] = sub2["date"].astype(str)
     sub2["_pop"]      = sub2["population"].astype(float)
-    sub2["_dow_str"]  = "dow" + sub2["dow"].astype(str)
-
-    formula = f"{outcome_col} ~ {treatment_col} + C(_dow_str) | _fips_str + _date_str"
+    # CA has only 7 years → county-only clustering (year dim too small for 2-way)
+    formula = f"{outcome_col} ~ {treatment_col} | _fips_str + _date_str"
     try:
         fit = pf.feols(formula, data=sub2, weights="_pop",
                        vcov={"CRV1": "_fips_str"})
@@ -272,7 +271,7 @@ def run_joint_phase_window(sub2, outcome_col, label):
     sub2["_pop"]      = sub2["population"].astype(float)
     sub2["_dow_str"]  = "dow" + sub2["dow"].astype(str)
 
-    rhs     = " + ".join(active) + " + C(_dow_str)"
+    rhs     = " + ".join(active)
     formula = f"{outcome_col} ~ {rhs} | _fips_str + _date_str"
     try:
         fit  = pf.feols(formula, data=sub2, weights="_pop",
