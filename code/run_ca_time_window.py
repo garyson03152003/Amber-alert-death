@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytz
+import pyfixest as pf
 import statsmodels.api as sm
 from statsmodels.regression.linear_model import OLS
 
@@ -194,57 +195,41 @@ panel["fips"] = panel["fips"].astype(str)
 log.info("Final panel: %d rows  treated nights: %d",
          len(panel), panel["night_alert"].sum())
 
-# ── 6. TWFE regression function ───────────────────────────────────────────────
+# ── 6. TWFE regression function (population-weighted) ─────────────────────────
 def run_twfe_window(sub2: pd.DataFrame,
                     outcome_col: str,
                     treatment_col: str,
                     label: str) -> dict | None:
     """
-    Two-way within-transform OLS (county FE + date FE + DoW).
-    Returns dict with beta, se, pvalue, n_obs, n_treated.
+    Population-weighted WLS TWFE via pyfixest.feols (county+date FE+DoW).
+    Weights = county population so large counties (LA, SF) dominate.
     """
-    sub2 = sub2.dropna(subset=[outcome_col]).copy()
-    if len(sub2) < 50:
-        return None
-    if sub2[treatment_col].std() < 1e-12:
+    sub2 = sub2.dropna(subset=[outcome_col, "population"]).copy()
+    if len(sub2) < 50 or sub2[treatment_col].std() < 1e-12:
         return None
 
-    dow_dummies = pd.get_dummies(sub2["dow"], prefix="dow", drop_first=True).astype(float)
-    dow_cols    = dow_dummies.columns.tolist()
-    sub2        = pd.concat([sub2, dow_dummies], axis=1)
+    sub2["_fips_str"] = sub2["fips"].astype(str)
+    sub2["_date_str"] = sub2["date"].astype(str)
+    sub2["_pop"]      = sub2["population"].astype(float)
+    sub2["_dow_str"]  = "dow" + sub2["dow"].astype(str)
 
-    sub2["_y"] = sub2[outcome_col].astype(float)
-    sub2["_x"] = sub2[treatment_col].astype(float)
-    all_cols   = ["_y", "_x"] + dow_cols
-
-    for c in all_cols:
-        sub2[c] -= sub2[c].mean()
-
-    for _ in range(5):
-        for c in all_cols:
-            sub2[c] = (sub2[c]
-                       - sub2.groupby("fips")[c].transform("mean")
-                       - sub2.groupby("date")[c].transform("mean"))
-
-    if sub2["_x"].std() < 1e-12:
-        return None
-
-    X = sm.add_constant(sub2[["_x"] + dow_cols])
+    formula = f"{outcome_col} ~ {treatment_col} + C(_dow_str) | _fips_str + _date_str"
     try:
-        mod = OLS(sub2["_y"], X).fit(
-            cov_type="cluster", cov_kwds={"groups": sub2["fips"]}
+        fit = pf.feols(formula, data=sub2, weights="_pop",
+                       vcov={"CRV1": "_fips_str"})
+        tbl = fit.tidy()
+        if treatment_col not in tbl.index:
+            return None
+        return dict(
+            beta     = round(float(tbl.loc[treatment_col, "Estimate"]), 6),
+            se       = round(float(tbl.loc[treatment_col, "Std. Error"]), 6),
+            pvalue   = round(float(tbl.loc[treatment_col, "Pr(>|t|)"]), 4),
+            n_obs    = int(fit._N),
+            n_treated= int(sub2[treatment_col].sum()),
         )
     except Exception as e:
-        log.warning("  OLS failed [%s/%s/%s]: %s", label, outcome_col, treatment_col, e)
+        log.warning("  feols failed [%s/%s/%s]: %s", label, outcome_col, treatment_col, e)
         return None
-
-    return dict(
-        beta     = round(float(mod.params["_x"]), 6),
-        se       = round(float(mod.bse["_x"]), 6),
-        pvalue   = round(float(mod.pvalues["_x"]), 4),
-        n_obs    = int(mod.nobs),
-        n_treated= int(sub2[treatment_col].sum()),
-    )
 
 
 # ── 7. Run regressions: each sleep-phase × each crash-window ──────────────────
@@ -275,58 +260,42 @@ log.info("")
 log.info("─── Per sleep-phase, per crash-window (joint TWFE) ───")
 
 def run_joint_phase_window(sub2, outcome_col, label):
-    """TWFE with all 4 phase indicators simultaneously; return list of dicts."""
+    """Population-weighted TWFE with all 4 phase indicators simultaneously."""
     active = [c for c in PHASE_COLS
               if c in sub2.columns and sub2[c].sum() >= 3]
     if not active:
         return None
-    sub2 = sub2.dropna(subset=[outcome_col]).copy()
+    sub2 = sub2.dropna(subset=[outcome_col, "population"]).copy()
 
-    dow_dummies = pd.get_dummies(sub2["dow"], prefix="dow", drop_first=True).astype(float)
-    dow_cols    = dow_dummies.columns.tolist()
-    sub2        = pd.concat([sub2, dow_dummies], axis=1)
+    sub2["_fips_str"] = sub2["fips"].astype(str)
+    sub2["_date_str"] = sub2["date"].astype(str)
+    sub2["_pop"]      = sub2["population"].astype(float)
+    sub2["_dow_str"]  = "dow" + sub2["dow"].astype(str)
 
-    tx_map   = {c: f"_tx_{c}" for c in active}
-    sub2["_y"] = sub2[outcome_col].astype(float)
-    for orig, renamed in tx_map.items():
-        sub2[renamed] = sub2[orig].astype(float)
-
-    all_cols = ["_y"] + list(tx_map.values()) + dow_cols
-    for c in all_cols:
-        sub2[c] -= sub2[c].mean()
-    for _ in range(5):
-        for c in all_cols:
-            sub2[c] = (sub2[c]
-                       - sub2.groupby("fips")[c].transform("mean")
-                       - sub2.groupby("date")[c].transform("mean"))
-
-    if sub2["_y"].std() < 1e-10:
-        return None
-
-    X = sm.add_constant(sub2[list(tx_map.values()) + dow_cols])
+    rhs     = " + ".join(active) + " + C(_dow_str)"
+    formula = f"{outcome_col} ~ {rhs} | _fips_str + _date_str"
     try:
-        mod = OLS(sub2["_y"], X).fit(
-            cov_type="cluster", cov_kwds={"groups": sub2["fips"]}
-        )
+        fit  = pf.feols(formula, data=sub2, weights="_pop",
+                        vcov={"CRV1": "_fips_str"})
+        tbl  = fit.tidy()
+        rows = []
+        for ph in active:
+            if ph not in tbl.index:
+                continue
+            rows.append(dict(
+                phase       = ph,
+                phase_label = PHASE_LABELS[ph],
+                beta        = round(float(tbl.loc[ph, "Estimate"]), 6),
+                se          = round(float(tbl.loc[ph, "Std. Error"]), 6),
+                pvalue      = round(float(tbl.loc[ph, "Pr(>|t|)"]), 4),
+                n_obs       = int(fit._N),
+                n_treated   = int(sub2[ph].sum()),
+                treatment   = "sleep_phase_joint",
+            ))
+        return rows or None
     except Exception as e:
-        log.warning("  Joint OLS failed [%s]: %s", label, e)
+        log.warning("  Joint feols failed [%s]: %s — skipping", label, e)
         return None
-
-    rows = []
-    for orig, renamed in tx_map.items():
-        if renamed not in mod.params:
-            continue
-        rows.append(dict(
-            phase        = orig,
-            phase_label  = PHASE_LABELS[orig],
-            beta         = round(float(mod.params[renamed]), 6),
-            se           = round(float(mod.bse[renamed]), 6),
-            pvalue       = round(float(mod.pvalues[renamed]), 4),
-            n_obs        = int(mod.nobs),
-            n_treated    = int(sub2[orig].sum()),
-            treatment    = "sleep_phase_joint",
-        ))
-    return rows or None
 
 for wname, _, _, wlabel in WINDOWS:
     out_col = f"{wname}_100k"
