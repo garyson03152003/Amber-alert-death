@@ -47,23 +47,17 @@ DATA_PROC.mkdir(parents=True, exist_ok=True)
 # ── California CCRS direct download URLs ─────────────────────────────────────
 # One crashes CSV per year; pattern confirmed from data.ca.gov API.
 # Resource IDs from the CCRS dataset catalog.
+# Verified direct download URLs (resource IDs confirmed from data.ca.gov portal)
 CCRS_CRASH_URLS = {
-    2016: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2016.csv",
-    2017: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2017.csv",
-    2018: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2018.csv",
-    2019: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2019.csv",
-    2020: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2020.csv",
-    2021: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2021.csv",
-    2022: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2022.csv",
-    2023: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2023.csv",
-    2024: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2024.csv",
-}
-
-# Alternative: try direct resource URL pattern with correct resource IDs
-# (from agent research: 2024 = f775df59..., 2025 = 9f4fc839...)
-CCRS_CRASH_URLS_ALT = {
+    2016: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/3d5f2586-cf68-4213-aa1c-60df37399d10/download/crashes_2016.csv",
+    2017: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/4784664d-b7cf-4427-af25-7c7307bad56c/download/crashes_2017.csv",
+    2018: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/a4b57216-5110-43d3-884c-d95366b19158/download/crashes_2018.csv",
+    2019: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/2b4c7d03-e684-435e-80da-17935de9499f/download/crashes_2019.csv",
+    2020: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/a2e0605d-0695-4bce-806d-4d0dda7ace68/download/crashes_2020.csv",
+    2021: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/d08692e2-6d36-487e-bca0-28cd127a626f/download/crashes_2021.csv",
+    2022: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/7828780b-117b-455e-9275-986ad3ffde50/download/crashes_2022.csv",
+    2023: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/436642c0-cd04-4a4c-b45e-564b66437476/download/crashes_2023.csv",
     2024: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/f775df59-b89b-4f82-bd3d-8807fa3a22a0/download/crashes_2024.csv",
-    2023: "https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_2023.csv",
 }
 
 # ── California county FIPS mapping ────────────────────────────────────────────
