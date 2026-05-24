@@ -1,0 +1,18 @@
+\begin{table}[htbp]\centering
+\caption{Robustness: Restricting to Narrowly-Targeted Alerts}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+Breadth ≤5 [count] & -0.0219 & (0.0275) & 0.429 & 7,234,005 & 0.0565 \\
+Breadth ≤5 [comb/100k] & -0.0140 & (0.0133) & 0.298 & 7,229,634 & 0.0687 \\
+Breadth ≤10 [count] & 0.0074 & (0.0162) & 0.649 & 7,234,005 & 0.0565 \\
+Breadth ≤10 [comb/100k] & -0.0119 & (0.0101) & 0.246 & 7,229,634 & 0.0687 \\
+Breadth ≤20 [count] & -0.0056 & (0.0092) & 0.546 & 7,234,005 & 0.0565 \\
+Breadth ≤20 [comb/100k] & -0.0172* & (0.0089) & 0.061 & 7,229,634 & 0.0687 \\
+Breadth all [count] & 0.0044 & (0.0037) & 0.244 & 7,234,005 & 0.0565 \\
+Breadth all [comb/100k] & 0.0193* & (0.0099) & 0.056 & 7,229,634 & 0.0687 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by county. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10. Treatment restricted to alerts covering $\leq K$ counties. SEs clustered at state level.} \\
+\end{tabular}
+\end{table}

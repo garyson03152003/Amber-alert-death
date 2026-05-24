@@ -1,0 +1,13 @@
+\begin{table}[htbp]\centering
+\caption{Placebo Tests}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+Placebo: t-1 & 0.0025 & (0.0039) & 0.528 & 7,232,350 & 0.0566 \\
+Main: aligned & 0.0044 & (0.0047) & 0.349 & 7,234,005 & 0.0565 \\
+Placebo: t+2 & -0.0091** & (0.0046) & 0.047 & 7,232,350 & 0.0566 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by county. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10.} \\
+\end{tabular}
+\end{table}

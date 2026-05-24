@@ -1,0 +1,16 @@
+\begin{table}[htbp]\centering
+\caption{Effect of Nighttime AMBER Alert on Traffic Fatality Rate (per 100,000 Population)}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+(1) Pooled OLS & 0.0160** & (0.0074) & 0.032 & 7,229,634 & 0.0544 \\
+(2) County FE & 0.0106 & (0.0074) & 0.153 & 7,229,634 & 0.0544 \\
+(3) Baseline & 0.0096 & (0.0074) & 0.196 & 7,229,634 & 0.0544 \\
+(5) + Year FE & 0.0104 & (0.0074) & 0.158 & 7,229,634 & 0.0544 \\
+(6) DoW×Year FE & 0.0109 & (0.0074) & 0.140 & 7,229,634 & 0.0544 \\
+(7) Year×Month FE & 0.0107 & (0.0074) & 0.146 & 7,229,634 & 0.0544 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by county. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10. Outcome is \textit{fatals\_rate\_next\_commute}: fatalities per 100,000 county population, timing-aligned.} \\
+\end{tabular}
+\end{table}

@@ -1,0 +1,13 @@
+\begin{table}[htbp]\centering
+\caption{Falsification: Daytime AMBER Alert Has No Effect}
+\begin{tabular}{lccccc}
+\hline\hline
+Model & $\hat\beta$ & SE & $p$-value & $N$ & Mean $y$ \\
+\midrule
+Same-day (daytime alert) & 0.0001 & (0.0016) & 0.962 & 7,234,005 & 0.0566 \\
+Next-day (daytime alert) & -0.0013 & (0.0020) & 0.510 & 7,234,005 & 0.0565 \\
+Next-commute (night alert) [ref] & 0.0044 & (0.0037) & 0.244 & 7,234,005 & 0.0565 \\
+\hline\hline
+\multicolumn{6}{p{0.9\textwidth}}{\footnotesize SE clustered by county. County FE and DoW$\times$Month FE absorbed via pyhdfe. *** $p{<}$0.01, ** $p{<}$0.05, * $p{<}$0.10. Day alert = issued 9am--4pm local time. Night alert shown for comparison.} \\
+\end{tabular}
+\end{table}
