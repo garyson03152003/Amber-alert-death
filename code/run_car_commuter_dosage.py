@@ -28,6 +28,7 @@ log = get_logger("car_dosage")
 
 CAR_PATH  = DATA_PROC / "county_car_commuters.parquet"
 CELL_PATH = DATA_PROC / "county_cell_connectivity.parquet"
+COV_PATH  = DATA_PROC / "county_coverage_weight.parquet"
 OUTPUT_TABS.mkdir(parents=True, exist_ok=True)
 
 if not CAR_PATH.exists():
@@ -247,6 +248,42 @@ else:
     log.warning("Cell connectivity file not found (%s); skipping (E) and (F)", CELL_PATH)
     log.warning("Run code/01f_fetch_cell_connectivity.py first.")
 
+# ── (G) Population-weighted coverage (density-based, not subscription) ───────
+# coverage_fraction_c = f(pop_density_c) calibrated to FCC Form 477 aggregates
+# coverage_pop_c = population_c × coverage_fraction_c
+# National pop-wtd average = 97.5%; range 73%–99.5% across counties
+# Addresses the subscription-vs-coverage distinction: WEA needs no plan,
+# only tower proximity. Dense counties (NYC) → 99.5%; frontier → 73%.
+has_cov = False
+if COV_PATH.exists():
+    log.info("Loading density-based coverage weight …")
+    cov = pd.read_parquet(COV_PATH, columns=["fips","coverage_fraction","coverage_pop"])
+    cov["fips"] = cov["fips"].astype(str).str.zfill(5)
+    log.info("  Coverage fraction: mean=%.1f%%  range %.1f%%–%.1f%%",
+             cov.coverage_fraction.mean()*100,
+             cov.coverage_fraction.min()*100,
+             cov.coverage_fraction.max()*100)
+
+    # Aggregate: sum coverage_pop across alert counties per date
+    pop_data3 = cov[["fips","coverage_pop"]].copy()
+    alerts_cov = alerts_raw.merge(pop_data3, left_on="county_fips", right_on="fips", how="left")
+    alerts_cov["coverage_pop"] = alerts_cov["coverage_pop"].fillna(0)
+    night_alerts_cov = alerts_cov[alerts_cov["is_night"]].copy()
+
+    alert_day_cov = (night_alerts_cov.groupby("date")["coverage_pop"]
+                     .sum().reset_index()
+                     .rename(columns={"coverage_pop": "cov_pop_reached"}))
+    alert_day_cov["date"] = pd.to_datetime(alert_day_cov["date"])
+    df = df.merge(alert_day_cov, on="date", how="left")
+    df["cov_pop_reached"] = df["cov_pop_reached"].fillna(0)
+    df["cov_pop_reached"] *= (df["night_alert"] > 0).astype(float)
+    df["log_cov_reached"] = np.log1p(df["cov_pop_reached"])
+    has_cov = True
+    log.info("Built log_cov_reached: mean=%.2f on treated",
+             df.loc[df["night_alert"]>0,"log_cov_reached"].mean())
+else:
+    log.warning("Coverage weight file not found; run code/01g_build_coverage_weight.py")
+
 # Diagnostics
 treated = df[df["night_alert"] > 0]
 log.info("\n=== Dosage variable diagnostics (treated county-days only) ===")
@@ -272,10 +309,17 @@ if has_cellcar:
     log.info("Corr(log_car_reached, log_cell_car_reached):%.3f",
              treated["log_car_reached"].corr(treated["log_cell_car_reached"]))
 
+if has_cov:
+    log.info("Corr(log_pop_reached, log_cov_reached):  %.3f",
+             treated["log_pop_reached"].corr(treated["log_cov_reached"]))
+    log.info("Corr(log_breadth,     log_cov_reached):  %.3f",
+             treated["log_breadth"].corr(treated["log_cov_reached"]))
+
 log.info("Within-county variance:")
 extra = []
 if has_cell:    extra.append("log_cell_reached")
 if has_cellcar: extra.append("log_cell_car_reached")
+if has_cov:     extra.append("log_cov_reached")
 for v in ["log_breadth","log_car_reached","log_pop_reached"] + extra:
     if v in df.columns:
         within_var = df.groupby("fips")[v].var().mean()
@@ -312,7 +356,9 @@ run_spec("(D) Log-car-reached [count]",     "log_car_reached",      "fatals_next
 if has_cell:
     run_spec("(E) Log-cell-reached [count]",   "log_cell_reached",     "fatals_next_commute")
 if has_cellcar:
-    run_spec("(F) Log-cell×car-reached [count]","log_cell_car_reached","fatals_next_commute")
+    run_spec("(F) Log-cell×car-reached [count]", "log_cell_car_reached","fatals_next_commute")
+if has_cov:
+    run_spec("(G) Log-coverage-pop [count]",      "log_cov_reached",    "fatals_next_commute")
 
 if has_comb and has_pop:
     log.info("\n=== WLS rate (combined/100k) ===")
@@ -324,7 +370,9 @@ if has_comb and has_pop:
     if has_cell:
         run_spec("(E) Log-cell-reached [WLS]",   "log_cell_reached",     "comb_rate", "log_pop")
     if has_cellcar:
-        run_spec("(F) Log-cell×car-reached [WLS]","log_cell_car_reached","comb_rate", "log_pop")
+        run_spec("(F) Log-cell×car-reached [WLS]", "log_cell_car_reached","comb_rate", "log_pop")
+    if has_cov:
+        run_spec("(G) Log-coverage-pop [WLS]",      "log_cov_reached",    "comb_rate", "log_pop")
 
 # ── Save ─────────────────────────────────────────────────────────────────────
 out = pd.DataFrame(results)
