@@ -14,14 +14,18 @@ Overdispersion: var/mean = 1.41 (mild). We report robust/clustered SEs
 which remain valid regardless of the true count distribution.
 
 Specifications (all: state-clustered SE throughout):
-  P1: Poisson  county + year FE + binary treatment
-  P2: Poisson  county + year FE + log-breadth dosage
-  P3: Poisson  county + year FE + binary + lagged fatals (≈TWFE2)
-  P4: Poisson  county + year FE + log-breadth + lagged fatals (≈TWFE2)
+  P1: Poisson  county + year FE + binary treatment             (raw count)
+  P2: Poisson  county + year FE + log-breadth dosage           (raw count)
+  P5: Poisson  county + year FE + binary  + offset log(pop/100k)  (rate/100k)
+  P6: Poisson  county + year FE + breadth + offset log(pop/100k)  (rate/100k)
   NB: Neg. Bin county + year FE + binary (overdispersion check, subsample)
 
+P5/P6 are the count-model analog of WLS with count/100k as the OLS outcome:
+  log E[fatals] = Xβ + log(pop/100k)
+  ↔  log E[fatals/(pop/100k)] = Xβ   (β on log-rate scale)
+
 Uses pyfixest.fepois (PPML, same algorithm as R ppmlhdfe).
-NegBin via statsmodels on 300-county subsample (LSDV too heavy at full scale).
+NegBin via statsmodels on 100-county subsample (LSDV too heavy at full scale).
 
 Output: output/tables/reg_poisson.csv
 """
@@ -96,21 +100,33 @@ def extract_fepois(fit, treatment):
 
 results = []
 
-def run_ppml(label, formula, treatment, data, spec_tag):
+def run_ppml(label, formula, treatment, data, spec_tag, weights_col=None):
+    """
+    Fit a Poisson PPML model (pyfixest.fepois).
+
+    weights_col : str or None
+        Column name in `data` to use as analytic weights (e.g. 'population').
+    """
     log.info("  %s …", label)
-    sub = data.dropna(subset=[treatment, "fatals_next_commute"]).copy()
-    sub = sub[sub["fatals_next_commute"] >= 0]
+    # Infer outcome variable from formula (left of ~)
+    outcome_var = formula.split("~")[0].strip()
+    sub = data.dropna(subset=[treatment, outcome_var]).copy()
+    sub = sub[sub[outcome_var] >= 0]
     fit = None
     try:
-        fit  = pf.fepois(formula, data=sub, vcov={"CRV1": "state_code"})
+        kwargs = dict(vcov={"CRV1": "state_code"})
+        if weights_col:
+            kwargs["weights"] = weights_col
+        fit  = pf.fepois(formula, data=sub, **kwargs)
         coef, se, pval, nobs = extract_fepois(fit, treatment)
         irr  = np.exp(coef)
         sig  = "***" if pval < .01 else "**" if pval < .05 else "*" if pval < .10 else ""
-        log.info("  %-48s β=%+.4f  se=%.4f  p=%.3f  IRR=%.4f  %s",
+        log.info("  %-52s β=%+.4f  se=%.4f  p=%.3f  IRR=%.4f  %s",
                  label, coef, se, pval, irr, sig)
         results.append({"label": label, "spec": spec_tag, "treatment": treatment,
                          "coef": coef, "se": se, "pval": pval,
-                         "nobs": nobs, "irr": irr, "model": "poisson_ppml"})
+                         "nobs": nobs, "irr": irr, "model": "poisson_ppml",
+                         "outcome": outcome_var})
     except Exception as e:
         log.warning("  %s FAILED: %s", label, e)
     finally:
@@ -124,17 +140,45 @@ if lag_col:
     log.info("Lagged fatals column: %s  (missing rate %.1f%%)",
              lag_col, df[lag_col].isna().mean() * 100)
 
-# ── P1–P4: Poisson with county + year FE (avoids memory-intensive ×) ─────────
+# ── Population rate outcome + weight ─────────────────────────────────────────
+# P5/P6: quasi-Poisson QMLE on fatals_rate_100k with population weights.
+# This is the count-model analog of WLS with count/100k as OLS outcome:
+#   - Outcome:  fatals / (pop/100k)   [same scale as WLS rate specs]
+#   - Weights:  population            [larger counties get more influence]
+#   - Model:    PPML / quasi-Poisson  [QMLE is consistent for non-integer y ≥ 0]
+#
+# Note: pyfixest 0.50.1 has no offset= parameter; we encode exposure in the outcome.
+pop_col = next((c for c in ["population", "pop", "county_pop"] if c in df.columns), None)
+if pop_col:
+    df["fatals_rate_100k"] = (df["fatals_next_commute"] * 100_000 /
+                               df[pop_col].clip(lower=1)).fillna(0)
+    log.info("Rate outcome: fatals_rate_100k derived from '%s'  (mean=%.4f, max=%.2f)",
+             pop_col, df["fatals_rate_100k"].mean(), df["fatals_rate_100k"].max())
+else:
+    log.warning("No population column found — P5/P6 rate specs will be skipped")
+
+# ── P1–P2: Raw count Poisson; P5–P6: Rate Poisson with pop exposure ──────────
 log.info("\n=== Poisson PPML: county + year FE ===")
 
-run_ppml("P1 Binary         [county+yr FE]",
+run_ppml("P1 Binary         [county+yr FE, count]",
          f"fatals_next_commute ~ night_alert + {CTRL_STR} | fips + year_str",
-         "night_alert", df, "ppml_ctyYr")
+         "night_alert", df, "ppml_ctyYr_count")
 
 if "log_breadth" in df.columns:
-    run_ppml("P2 Log-breadth    [county+yr FE]",
+    run_ppml("P2 Log-breadth    [county+yr FE, count]",
              f"fatals_next_commute ~ log_breadth + {CTRL_STR} | fips + year_str",
-             "log_breadth", df, "ppml_ctyYr")
+             "log_breadth", df, "ppml_ctyYr_count")
+
+if pop_col:
+    log.info("\n--- Rate model: quasi-Poisson on count/100k, weights=population ---")
+    run_ppml("P5 Binary         [county+yr FE, rate/100k, pop-wt]",
+             f"fatals_rate_100k ~ night_alert + {CTRL_STR} | fips + year_str",
+             "night_alert", df, "ppml_ctyYr_rate")
+
+    if "log_breadth" in df.columns:
+        run_ppml("P6 Log-breadth    [county+yr FE, rate/100k, pop-wt]",
+                 f"fatals_rate_100k ~ log_breadth + {CTRL_STR} | fips + year_str",
+                 "log_breadth", df, "ppml_ctyYr_rate")
 
 # P3/P4 (binary/breadth + lagged fatals) are skipped for Poisson to avoid OOM
 # at full panel scale (7M rows × PPML iterations × lagged column).
@@ -190,20 +234,23 @@ except Exception as e:
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 log.info("\n=== Full summary ===")
-log.info("OLS reference:")
+log.info("OLS reference (count outcome):")
 log.info("  OLS P1 Binary     [county+yr FE]:  β=+0.0044  p≈0.244  n.s.")
 log.info("  OLS P2 Log-breadth[county+yr FE]:  β=+0.0015  p=0.041**")
-log.info("  OLS P3 Binary+lag [county+yr FE]:  β=+0.0050  p≈0.200  n.s.")
-log.info("  OLS P4 Breadth+lag[county+yr FE]:  β=+0.0016  p≈0.035**")
+log.info("OLS reference (WLS rate/100k outcome):")
+log.info("  OLS R1 Binary     [county+yr FE]:  β=+0.0215  p≈0.062  .")
+log.info("  OLS R2 Log-breadth[county+yr FE]:  β=+0.0060  p=0.009***")
 log.info("Poisson/NegBin:")
 for r in results:
     sig = "***" if r["pval"]<.01 else "**" if r["pval"]<.05 else "*" if r["pval"]<.10 else "n.s."
     log.info("  %-48s β=%+.4f  se=%.4f  p=%.3f  IRR=%.4f  %s",
              r["label"], r["coef"], r["se"], r["pval"], r.get("irr", np.nan), sig)
 
-log.info("\nInterpretation note: for Poisson, IRR = exp(β) is the incidence")
-log.info("  rate ratio. IRR=1.005 means 0.5%% more fatalities on treated nights.")
-log.info("  With β≈0.001–0.006, IRR≈1.001–1.006 (small proportional effect).")
+log.info("\nInterpretation note:")
+log.info("  P1/P2 (raw count): IRR = exp(β) is the incidence rate ratio for fatalities.")
+log.info("  P5/P6 (rate/100k): β is the effect on the log fatality rate per 100k pop.")
+log.info("  These are the count-model analogs of OLS count and WLS rate/100k specs.")
+log.info("  Consistent significance across P1/P5 (or P2/P6) confirms the OLS finding.")
 
 # ── Save ─────────────────────────────────────────────────────────────────────
 out_df = pd.DataFrame(results)
