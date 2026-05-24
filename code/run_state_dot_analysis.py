@@ -11,21 +11,30 @@ Data sources:
   - Census county population: data/processed/county_population.parquet
 
 Method: Two-Way Fixed Effects (TWFE) OLS
-  crashes_per_100k_{it+1} = β · night_alert_{it}
-                           + county_FE_i + date_FE_t
-                           + ε_{it}
+  crashes_per_100k_{i, crash_date} = β · night_alert_{i, crash_date}
+                                    + county_FE_i + date_FE_t
+                                    + ε_{it}
 
-where t indexes the alert date and t+1 is the next calendar day.
-Standard errors clustered by county.
+Timing convention:
+  "night" = 10pm–6am local time.  The crash date an alert is expected to
+  affect differs by sub-window:
+    • Early night (22:00–23:59): alert on calendar day D  →  crash date D+1
+      (alert fires before midnight; disrupted drivers are on the road on D+1)
+    • Late night  (00:00–05:59): alert on calendar day D  →  crash date D
+      (alert fires after midnight, already IS the next morning; crashes
+       recorded on the same calendar day D)
+  Both sub-windows target the same next-morning commute.  We collapse them
+  to a single "night_alert" indicator keyed on the crash date, so no
+  additional outcome shift is needed — the outcome is same-day crashes.
 
-Outcome variables (per 100k):
+Outcome variables (per 100k, on the crash_date):
   crashes_per_100k   — total crashes
   fatals_per_100k    — fatalities
   serious_per_100k   — serious injuries (KABCO-A)
 
 Treatment:
-  night_alert — 1 if county received nighttime AMBER alert (10pm-6am local)
-                on day t
+  night_alert — 1 if county received a nighttime AMBER alert whose
+                effective crash date equals the panel date (crash_date)
 
 Output: output/tables/state_dot_analysis.csv  (main regression table)
         output/tables/state_dot_descriptives.csv (summary stats)
@@ -127,43 +136,192 @@ log.info("  Reading AMBER data from: %s", AMBER_CSV.name)
 alerts = pd.read_csv(AMBER_CSV, parse_dates=["sent_utc"])
 log.info("  Raw AMBER records: %d", len(alerts))
 
-# Convert UTC → local night classification
-# Use state_fips → UTC offset (approximate; ignores DST)
-STATE_UTC_OFFSET = {
-    "01": -6, "02": -9, "04": -7, "05": -6, "06": -8, "08": -7, "09": -5,
-    "10": -5, "11": -5, "12": -5, "13": -5, "15": -10, "16": -7, "17": -6,
-    "18": -5, "19": -6, "20": -6, "21": -6, "22": -6, "23": -5, "24": -5,
-    "25": -5, "26": -5, "27": -6, "28": -6, "29": -6, "30": -7, "31": -6,
-    "32": -8, "33": -5, "34": -5, "35": -7, "36": -5, "37": -5, "38": -6,
-    "39": -5, "40": -6, "41": -8, "42": -5, "44": -5, "45": -5, "46": -6,
-    "47": -6, "48": -6, "49": -7, "50": -5, "51": -5, "53": -8, "54": -5,
-    "55": -6, "56": -7,
+# Convert UTC → local time with proper DST handling (via pytz)
+# ─────────────────────────────────────────────────────────────────────────────
+# Primary timezone per state FIPS (2-digit).  America/Indiana/Indianapolis
+# observes EST/EDT; America/Phoenix has no DST.
+import pytz
+
+STATE_TIMEZONE = {
+    "01": "America/Chicago",               # Alabama
+    "02": "America/Anchorage",             # Alaska
+    "04": "America/Phoenix",               # Arizona (no DST)
+    "05": "America/Chicago",               # Arkansas
+    "06": "America/Los_Angeles",           # California
+    "08": "America/Denver",                # Colorado
+    "09": "America/New_York",              # Connecticut
+    "10": "America/New_York",              # Delaware
+    "11": "America/New_York",              # DC
+    "12": "America/New_York",              # Florida (majority ET; panhandle counties overridden below)
+    "13": "America/New_York",              # Georgia
+    "15": "Pacific/Honolulu",             # Hawaii (no DST)
+    "16": "America/Boise",                # Idaho (majority MT; panhandle PT overridden below)
+    "17": "America/Chicago",              # Illinois
+    "18": "America/Indiana/Indianapolis", # Indiana (observes ET/EDT)
+    "19": "America/Chicago",              # Iowa
+    "20": "America/Chicago",              # Kansas (majority CT; western counties overridden)
+    "21": "America/New_York",             # Kentucky (majority ET; western counties overridden)
+    "22": "America/Chicago",              # Louisiana
+    "23": "America/New_York",             # Maine
+    "24": "America/New_York",             # Maryland
+    "25": "America/New_York",             # Massachusetts
+    "26": "America/Detroit",              # Michigan (majority ET; UP counties overridden)
+    "27": "America/Chicago",              # Minnesota
+    "28": "America/Chicago",              # Mississippi
+    "29": "America/Chicago",              # Missouri
+    "30": "America/Denver",               # Montana
+    "31": "America/Chicago",              # Nebraska (majority CT; Panhandle overridden)
+    "32": "America/Los_Angeles",          # Nevada
+    "33": "America/New_York",             # New Hampshire
+    "34": "America/New_York",             # New Jersey
+    "35": "America/Denver",               # New Mexico
+    "36": "America/New_York",             # New York
+    "37": "America/New_York",             # North Carolina
+    "38": "America/Chicago",              # North Dakota (majority CT; western overridden)
+    "39": "America/New_York",             # Ohio
+    "40": "America/Chicago",              # Oklahoma
+    "41": "America/Los_Angeles",          # Oregon (majority PT; eastern overridden)
+    "42": "America/New_York",             # Pennsylvania
+    "44": "America/New_York",             # Rhode Island
+    "45": "America/New_York",             # South Carolina
+    "46": "America/Chicago",              # South Dakota (majority CT; western overridden)
+    "47": "America/Chicago",              # Tennessee (majority CT; eastern counties overridden)
+    "48": "America/Chicago",              # Texas (majority CT; El Paso area overridden)
+    "49": "America/Denver",               # Utah
+    "50": "America/New_York",             # Vermont
+    "51": "America/New_York",             # Virginia
+    "53": "America/Los_Angeles",          # Washington
+    "54": "America/New_York",             # West Virginia
+    "55": "America/Chicago",              # Wisconsin
+    "56": "America/Denver",               # Wyoming
 }
 
-alerts["state_fips"] = alerts["fips"].astype(str).str.zfill(5).str[:2]
-alerts["utc_offset"] = alerts["state_fips"].map(STATE_UTC_OFFSET).fillna(-6)
-alerts["sent_local"] = alerts["sent_utc"] + pd.to_timedelta(alerts["utc_offset"], unit="h")
-alerts["hour_local"] = alerts["sent_local"].dt.hour
+# Per-county FIPS overrides for states that span two time zones.
+# Sources: USNO timezone boundaries; US Census TIGER.
+COUNTY_TIMEZONE_OVERRIDE = {
+    # Florida panhandle (CT)
+    "12033": "America/Chicago", "12059": "America/Chicago",
+    "12077": "America/Chicago", "12113": "America/Chicago",
+    "12131": "America/Chicago",
+    # Idaho panhandle (PT)
+    "16021": "America/Los_Angeles", "16055": "America/Los_Angeles",
+    "16057": "America/Los_Angeles", "16069": "America/Los_Angeles",
+    "16079": "America/Los_Angeles",
+    # Kansas western (MT)
+    "20129": "America/Denver", "20189": "America/Denver",
+    # Kentucky western (CT)
+    "21007": "America/Chicago", "21083": "America/Chicago",
+    "21139": "America/Chicago", "21145": "America/Chicago",
+    "21157": "America/Chicago", "21179": "America/Chicago",
+    "21195": "America/Chicago", "21221": "America/Chicago",
+    # Michigan Upper Peninsula (CT)
+    "26003": "America/Chicago", "26013": "America/Chicago",
+    "26033": "America/Chicago", "26041": "America/Chicago",
+    "26043": "America/Chicago", "26053": "America/Chicago",
+    "26061": "America/Chicago", "26071": "America/Chicago",
+    "26083": "America/Chicago", "26095": "America/Chicago",
+    "26097": "America/Chicago", "26103": "America/Chicago",
+    "26131": "America/Chicago", "26153": "America/Chicago",
+    # Nebraska panhandle (MT)
+    "31007": "America/Denver", "31057": "America/Denver",
+    "31069": "America/Denver", "31123": "America/Denver",
+    "31157": "America/Denver", "31165": "America/Denver",
+    "31173": "America/Denver",
+    # North Dakota western (MT)
+    "38011": "America/Denver", "38025": "America/Denver",
+    "38041": "America/Denver", "38053": "America/Denver",
+    "38055": "America/Denver", "38087": "America/Denver",
+    "38105": "America/Denver",
+    # Oregon eastern (MT)
+    "41001": "America/Denver", "41017": "America/Denver",
+    "41021": "America/Denver", "41023": "America/Denver",
+    "41025": "America/Denver", "41035": "America/Denver",
+    "41037": "America/Denver", "41045": "America/Denver",
+    "41049": "America/Denver", "41055": "America/Denver",
+    "41059": "America/Denver", "41065": "America/Denver",
+    # South Dakota western (MT)
+    "46017": "America/Denver", "46033": "America/Denver",
+    "46047": "America/Denver", "46063": "America/Denver",
+    "46065": "America/Denver", "46093": "America/Denver",
+    "46105": "America/Denver", "46113": "America/Denver",
+    "46117": "America/Denver",
+    # Tennessee eastern (ET)
+    "47001": "America/New_York", "47009": "America/New_York",
+    "47013": "America/New_York", "47025": "America/New_York",
+    "47029": "America/New_York", "47051": "America/New_York",
+    "47063": "America/New_York", "47065": "America/New_York",
+    "47067": "America/New_York", "47073": "America/New_York",
+    "47089": "America/New_York", "47097": "America/New_York",
+    "47105": "America/New_York", "47107": "America/New_York",
+    "47121": "America/New_York", "47129": "America/New_York",
+    "47139": "America/New_York", "47143": "America/New_York",
+    "47145": "America/New_York", "47151": "America/New_York",
+    "47155": "America/New_York", "47163": "America/New_York",
+    "47171": "America/New_York", "47173": "America/New_York",
+    "47179": "America/New_York", "47189": "America/New_York",
+    # Texas El Paso area (MT)
+    "48141": "America/Denver", "48229": "America/Denver",
+}
+
+# Build a FIPS → timezone name mapping
+alerts["fips_5"] = alerts["fips"].astype(str).str.zfill(5)
+alerts["state_fips"] = alerts["fips_5"].str[:2]
+
+alerts["tz_name"] = (alerts["fips_5"]
+                     .map(COUNTY_TIMEZONE_OVERRIDE)
+                     .fillna(alerts["state_fips"].map(STATE_TIMEZONE))
+                     .fillna("America/Chicago"))   # fallback
+
+# DST-aware UTC → local conversion using pytz
+# sent_utc is already tz-aware (UTC); convert to local tz row-by-row.
+# Group by timezone to batch the conversion efficiently.
+alerts["hour_local"] = pd.NA
+alerts["sent_local"]  = pd.NaT
+
+utc_series = pd.to_datetime(alerts["sent_utc"], utc=True)
+
+for tz_name, idx in alerts.groupby("tz_name").groups.items():
+    tz = pytz.timezone(tz_name)
+    local = utc_series.loc[idx].dt.tz_convert(tz)
+    alerts.loc[idx, "hour_local"] = local.dt.hour
+    alerts.loc[idx, "sent_local"] = local.dt.tz_localize(None)  # strip tz for merges
+
+alerts["hour_local"] = alerts["hour_local"].astype(int)
+log.info("  Timezone-aware local conversion done (%d unique tz used)", alerts["tz_name"].nunique())
 
 # Night alert: 10pm–6am local
 alerts["is_night"] = (alerts["hour_local"] >= 22) | (alerts["hour_local"] < 6)
 
-# Alert date = calendar date of the alert (local time) — strip tz so merge works
-alerts["alert_date"] = alerts["sent_local"].dt.normalize().dt.tz_localize(None)
+# Calendar date of alert (local time) — sent_local is already tz-naive
+alerts["alert_date"] = alerts["sent_local"].dt.normalize()
+
+# Effective crash date: the calendar day whose crashes this alert is expected to affect.
+#   Early night (22–23h): alert fires before midnight on day D  →  crash date D+1
+#   Late night  ( 0– 5h): alert fires after midnight, already on day D  →  crash date D
+# Both sub-windows disrupt the same next-morning commute; keying on crash_date lets
+# us match directly to same-day crashes without a separate t+1 shift.
+alerts["effective_crash_date"] = np.where(
+    alerts["hour_local"] >= 22,
+    alerts["alert_date"] + pd.Timedelta(days=1),
+    alerts["alert_date"],
+)
 
 log.info("  Total alerts: %d   Night alerts: %d (%.1f%%)",
          len(alerts), alerts.is_night.sum(), 100*alerts.is_night.mean())
+log.info("  Early-night (22–23h): %d   Late-night (0–5h): %d",
+         (alerts["is_night"] & (alerts["hour_local"] >= 22)).sum(),
+         (alerts["is_night"] & (alerts["hour_local"] < 6)).sum())
 
-# Collapse to county-day: 1 if any night alert issued to that county that day
+# Collapse to county-crash_date: 1 if any night alert targets that county-day
 night_alerts = (
     alerts[alerts.is_night]
-    .groupby(["fips", "alert_date"])
+    .groupby(["fips", "effective_crash_date"])
     .size()
     .reset_index(name="n_alerts")
 )
 night_alerts["fips"] = night_alerts["fips"].astype(str).str.zfill(5)
 night_alerts["night_alert"] = 1
-log.info("  County-nights with ≥1 night AMBER alert: %d", len(night_alerts))
+log.info("  County-crash_dates with ≥1 night AMBER alert: %d", len(night_alerts))
 
 # ── 3. Load population data ───────────────────────────────────────────────────
 log.info("=== Loading population data ===")
@@ -198,29 +356,25 @@ panel["crashes_per_100k"]  = 100_000 * panel["crashes"]  / panel["population"]
 panel["fatals_per_100k"]   = 100_000 * panel["fatals"]   / panel["population"]
 panel["serious_per_100k"]  = 100_000 * panel["serious_inj"] / panel["population"]
 
-# Shift crashes: outcome is next-day crashes (t+1)
-# We sort and shift within (fips, state) groups so we don't bleed across states
+# Sort panel (no t+1 shift needed — effective_crash_date already accounts for timing)
 panel = panel.sort_values(["state", "fips", "date"])
-for col in ["crashes", "fatals", "serious_inj",
-            "crashes_per_100k", "fatals_per_100k", "serious_per_100k"]:
-    panel[f"{col}_t1"] = panel.groupby(["state", "fips"])[col].shift(-1)
 
-# Day of week + month for controls
+# Day of week + month
 panel["dow"]   = panel["date"].dt.dayofweek   # 0=Mon
 panel["month"] = panel["date"].dt.month
 
-# Merge night alerts (alert on day t → outcome on day t+1)
+# Merge: match alert's effective_crash_date to the panel's crash date
 night_alerts["fips"] = night_alerts["fips"].astype(str).str.zfill(5)
 panel = panel.merge(
-    night_alerts[["fips", "alert_date", "night_alert"]],
-    left_on=["fips", "date"], right_on=["fips", "alert_date"],
+    night_alerts[["fips", "effective_crash_date", "night_alert"]],
+    left_on=["fips", "date"], right_on=["fips", "effective_crash_date"],
     how="left"
 )
 panel["night_alert"] = panel["night_alert"].fillna(0).astype(int)
 
 # Restrict to study years that overlap between crash data and alert data
 panel = panel[panel["year"].between(2013, 2022)]
-panel = panel.dropna(subset=["crashes_per_100k_t1"])
+panel = panel.dropna(subset=["crashes_per_100k"])
 
 log.info("  Panel rows after merge: %d", len(panel))
 log.info("  Counties: %d  States: %d  Date range: %s – %s",
@@ -243,11 +397,11 @@ for state in sorted(panel.state.unique()):
         "counties":          s.fips.nunique(),
         "date_range":        f"{s.date.min().date()} – {s.date.max().date()}",
         "night_alert_days":  s.night_alert.sum(),
-        "mean_crashes_100k": s.crashes_per_100k_t1.mean(),
-        "mean_crashes_alert":  s_alert.crashes_per_100k_t1.mean() if len(s_alert) else np.nan,
-        "mean_crashes_notalert": s_noalert.crashes_per_100k_t1.mean() if len(s_noalert) else np.nan,
-        "mean_fatals_100k":  s.fatals_per_100k_t1.mean(),
-        "mean_serious_100k": s.serious_per_100k_t1.mean(),
+        "mean_crashes_100k": s.crashes_per_100k.mean(),
+        "mean_crashes_alert":  s_alert.crashes_per_100k.mean() if len(s_alert) else np.nan,
+        "mean_crashes_notalert": s_noalert.crashes_per_100k.mean() if len(s_noalert) else np.nan,
+        "mean_fatals_100k":  s.fatals_per_100k.mean(),
+        "mean_serious_100k": s.serious_per_100k.mean(),
     })
 
 desc = pd.DataFrame(desc_rows)
@@ -274,9 +428,9 @@ import statsmodels.api as sm
 results_rows = []
 
 OUTCOMES = [
-    ("crashes_per_100k_t1", "All crashes / 100k (t+1)"),
-    ("fatals_per_100k_t1",  "Fatalities / 100k (t+1)"),
-    ("serious_per_100k_t1", "Serious inj / 100k (t+1)"),
+    ("crashes_per_100k", "All crashes / 100k (crash day)"),
+    ("fatals_per_100k",  "Fatalities / 100k (crash day)"),
+    ("serious_per_100k", "Serious inj / 100k (crash day)"),
 ]
 
 
@@ -381,7 +535,8 @@ results = pd.DataFrame(results_rows)
 
 # ── 7. Summary ────────────────────────────────────────────────────────────────
 log.info("\n=== Summary ===")
-log.info("Night AMBER alert → next-day traffic outcomes (TWFE, county+date FE, clustered SE)")
+log.info("Night AMBER alert → same-day traffic outcomes (TWFE, county+date FE, clustered SE)")
+log.info("(early-night alerts: effective crash date = alert date + 1; late-night: same day)")
 log.info("")
 if not results.empty:
     for _, row in results[results.state == "ALL"].iterrows():
