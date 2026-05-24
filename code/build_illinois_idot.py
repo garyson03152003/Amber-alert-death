@@ -5,20 +5,22 @@ Download Illinois IDOT crash data from the ArcGIS Open Data Hub
 and build a county-day panel of serious injuries and fatalities.
 
 Source: https://gis-idot.opendata.arcgis.com/
-No authentication required; one dataset per year (2014–2024).
+No authentication required; one dataset per year (2016–2024).
 
 Illinois is the 9th most-alerted state (1,608 alerts in our sample).
 The IDOT data uses KABCO severity with individual injury count columns:
-  INJURIES_FATAL
-  INJURIES_INCAPACITATING    ← Suspected Serious Injury (A)
-  INJURIES_NON_INCAPACITATING
-  INJURIES_REPORTED_NOT_EVIDENT
-  INJURIES_NO_INDICATION
+  TotalFatals             ← K (Fatal)
+  AInjuries               ← A (Suspected Serious Injury)
+  BInjuries               ← B (Suspected Minor Injury)
+  CInjuries               ← C (Possible Injury)
+  TotalInjured            ← All injury types combined
 
-County is coded as COUNTY or COUNTY_CITY_CD (county FIPS available via name lookup).
+County is coded as CountyCode (1–102, matching IL county FIPS suffix).
+FIPS = "17" + str(CountyCode * 2 - 1).zfill(3)
 
-The ArcGIS FeatureServer query endpoint allows bulk CSV export.
-Base URL:  https://gis.idot.illinois.gov/arcgis/rest/services/StatewideData/Crashes_{year}/FeatureServer/0
+Data access: opendata download API issues a pre-signed Azure CSV URL.
+Base: https://gis-idot.opendata.arcgis.com/api/download/v1/items/{item_id}/csv?layers=0
+Fallback: services2.arcgis.com FeatureServer pagination.
 
 Output: data/processed/illinois_idot_county_day.parquet
 """
@@ -27,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import urllib.request, urllib.parse
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
@@ -38,8 +41,31 @@ log = get_logger("illinois_idot")
 OUT_PATH = DATA_PROC / "illinois_idot_county_day.parquet"
 DATA_PROC.mkdir(parents=True, exist_ok=True)
 
+HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; research)"}
+
+# ── Item IDs and FeatureServer URLs (from gis-idot.opendata.arcgis.com DCAT catalog) ──
+IDOT_ITEMS = {
+    2016: {"item_id": "583e29335ef348c5990ff63dd0acd153",
+           "fs_url": "https://services2.arcgis.com/aIrBD8yn1TDTEXoz/arcgis/rest/services/Crashes_2016_SDMExtract/FeatureServer/0"},
+    2017: {"item_id": "3291ad89f44448e0be3b26e7b05ea90f",
+           "fs_url": "https://services2.arcgis.com/aIrBD8yn1TDTEXoz/arcgis/rest/services/Crashes_2017_SDMExtract/FeatureServer/0"},
+    2018: {"item_id": "5cb42e3eb58c4a2b8066ae1e374c24fc",
+           "fs_url": "https://services2.arcgis.com/aIrBD8yn1TDTEXoz/arcgis/rest/services/Crashes_2018_SDMExtract/FeatureServer/0"},
+    2019: {"item_id": "c47903b664164b719cce04a2e7584dac",
+           "fs_url": "https://services2.arcgis.com/aIrBD8yn1TDTEXoz/arcgis/rest/services/Crashes2019/FeatureServer/0"},
+    2020: {"item_id": "c286e23e9bf44af397a5da24aaeff8f8",
+           "fs_url": "https://services2.arcgis.com/aIrBD8yn1TDTEXoz/arcgis/rest/services/Crashes_2020/FeatureServer/0"},
+    2021: {"item_id": "bc11eb27849249c89868d6b4cd178613",
+           "fs_url": "https://services2.arcgis.com/aIrBD8yn1TDTEXoz/arcgis/rest/services/CRASHES2021/FeatureServer/0"},
+    2022: {"item_id": "f3a4623c8d14486a9947d29a966bbf9d",
+           "fs_url": "https://services2.arcgis.com/aIrBD8yn1TDTEXoz/arcgis/rest/services/CRASHES_2022/FeatureServer/0"},
+    2023: {"item_id": "ae1333c03cca42c8ae2014bf74666f15",
+           "fs_url": "https://services2.arcgis.com/aIrBD8yn1TDTEXoz/arcgis/rest/services/CRASHES_2023/FeatureServer/0"},
+    2024: {"item_id": "e765e485839f4573b882b06ad84376c9",
+           "fs_url": "https://services2.arcgis.com/aIrBD8yn1TDTEXoz/arcgis/rest/services/CRASHES__2024/FeatureServer/0"},
+}
+
 # Illinois county FIPS (state 17, counties 001–203, every other)
-# Map: county name → FIPS code (from US Census)
 IL_COUNTY_FIPS_BY_NAME = {
     "ADAMS": "17001", "ALEXANDER": "17003", "BOND": "17005", "BOONE": "17007",
     "BROWN": "17009", "BUREAU": "17011", "CALHOUN": "17013", "CARROLL": "17015",
@@ -68,103 +94,97 @@ IL_COUNTY_FIPS_BY_NAME = {
     "WASHINGTON": "17189", "WAYNE": "17191", "WHITE": "17193", "WHITESIDE": "17195",
     "WILL": "17197", "WILLIAMSON": "17199", "WINNEBAGO": "17201", "WOODFORD": "17203",
 }
+VALID_IL_FIPS = set(IL_COUNTY_FIPS_BY_NAME.values())
 
-# ArcGIS FeatureServer endpoints per year
-IDOT_ENDPOINTS = {
-    yr: (f"https://gis.idot.illinois.gov/arcgis/rest/services/StatewideData/"
-         f"Crashes_{yr}/FeatureServer/0/query")
-    for yr in range(2016, 2025)
-}
 
-def fetch_idot_year_arcgis(year: int) -> pd.DataFrame | None:
+def fetch_via_download_api(item_id: str, year: int, retries: int = 2) -> pd.DataFrame | None:
     """
-    Fetch all crash records for one year via ArcGIS FeatureServer query.
-    Paginates in chunks of 1,000 records (ArcGIS max per request).
+    Use the opendata download API to get a pre-signed CSV URL, then download it.
+    The API redirects to a temporary Azure blob URL. Retries on empty result.
     """
-    import urllib.request, urllib.parse
+    api_url = (f"https://gis-idot.opendata.arcgis.com/api/download/v1/items/"
+               f"{item_id}/csv?layers=0")
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(api_url, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                content = resp.read()
+            # Strip UTF-8 BOM if present
+            if content.startswith(b'\xef\xbb\xbf'):
+                content = content[3:]
+            df = pd.read_csv(io.StringIO(content.decode("utf-8", errors="replace")),
+                             low_memory=False)
+            if not df.empty:
+                log.info("  [download-API] %d rows for %d", len(df), year)
+                return df
+            log.warning("  [download-API] 0 rows for %d (attempt %d/%d) — retrying",
+                        year, attempt + 1, retries + 1)
+            time.sleep(3.0)
+        except Exception as e:
+            log.warning("  [download-API] failed for %d (attempt %d/%d): %s",
+                        year, attempt + 1, retries + 1, e)
+            if attempt < retries:
+                time.sleep(3.0)
+    return None
 
-    base_url = IDOT_ENDPOINTS.get(year)
-    if not base_url:
-        return None
 
-    # First: get total record count
-    count_params = urllib.parse.urlencode({
-        "where": "1=1",
-        "returnCountOnly": "true",
-        "f": "json",
-    })
+def fetch_via_featureserver(fs_url: str, year: int) -> pd.DataFrame | None:
+    """
+    Paginate the FeatureServer query endpoint (CSV output).
+    services2.arcgis.com is reachable even when gis.idot.illinois.gov is not.
+    """
+    query_url = fs_url.rstrip("/") + "/query"
+
+    # Get total count
     try:
-        req = urllib.request.Request(
-            f"{base_url}?{count_params}",
-            headers={"User-Agent": "Mozilla/5.0 (research)"}
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            info = json.loads(resp.read().decode())
+        count_params = urllib.parse.urlencode({"where": "1=1", "returnCountOnly": "true", "f": "json"})
+        req = urllib.request.Request(f"{query_url}?{count_params}", headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            info = json.loads(r.read())
         total = info.get("count", 0)
-        log.info("  Year %d: %d total records", year, total)
+        log.info("  [FeatureServer] %d total records for %d", total, year)
     except Exception as e:
-        log.warning("  Count query failed for %d: %s", year, e)
+        log.warning("  [FeatureServer] count failed for %d: %s", year, e)
         return None
 
     if total == 0:
         return None
 
-    # Try CSV export with all records (if server supports it)
-    # ArcGIS 10.8+ allows resultRecordCount=-1 for bulk export
-    bulk_params = urllib.parse.urlencode({
-        "where": "1=1",
-        "outFields": "CRASH_DATE,COUNTY,INJURIES_FATAL,INJURIES_INCAPACITATING,"
-                     "INJURIES_NON_INCAPACITATING,COUNTY_NAME",
-        "resultRecordCount": min(total, 32000),  # reasonable chunk
-        "f": "csv",
-    })
-    try:
-        req = urllib.request.Request(
-            f"{base_url}?{bulk_params}",
-            headers={"User-Agent": "Mozilla/5.0 (research)"}
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            content = resp.read()
-        df = pd.read_csv(io.StringIO(content.decode("latin1")), low_memory=False)
-        log.info("  Got %d rows in bulk request", len(df))
-        if len(df) >= total * 0.9:
-            return df
-    except Exception as e:
-        log.debug("  Bulk CSV failed: %s — falling back to pagination", e)
-
-    # Paginate
+    # Paginate in chunks of 2000 using JSON (CSV returns 400 on some years)
     parts = []
     offset = 0
-    page_size = 1000
+    page_size = 2000
     while offset < total:
         params = urllib.parse.urlencode({
             "where": "1=1",
-            "outFields": "CRASH_DATE,COUNTY,COUNTY_NAME,INJURIES_FATAL,"
-                         "INJURIES_INCAPACITATING,INJURIES_NON_INCAPACITATING",
+            "outFields": "*",
             "resultOffset": offset,
             "resultRecordCount": page_size,
-            "f": "csv",
+            "f": "json",
         })
         try:
-            req = urllib.request.Request(
-                f"{base_url}?{params}",
-                headers={"User-Agent": "Mozilla/5.0 (research)"}
-            )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                chunk = resp.read()
-            chunk_df = pd.read_csv(io.StringIO(chunk.decode("latin1")), low_memory=False)
+            req = urllib.request.Request(f"{query_url}?{params}", headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=120) as r:
+                page_data = json.loads(r.read())
+            features = page_data.get("features", [])
+            if not features:
+                break
+            rows = [f["attributes"] for f in features]
+            chunk_df = pd.DataFrame(rows)
             parts.append(chunk_df)
             offset += len(chunk_df)
             if len(chunk_df) < page_size:
                 break
+            time.sleep(0.3)
         except Exception as e:
-            log.warning("  Page offset=%d failed: %s", offset, e)
+            log.warning("  [FeatureServer] page offset=%d failed: %s", offset, e)
             break
-        time.sleep(0.2)
 
     if not parts:
         return None
-    return pd.concat(parts, ignore_index=True)
+    df = pd.concat(parts, ignore_index=True)
+    log.info("  [FeatureServer] fetched %d rows for %d", len(df), year)
+    return df
 
 
 def process_idot_df(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
@@ -172,57 +192,82 @@ def process_idot_df(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     if df is None or df.empty:
         return None
 
-    df.columns = [c.upper().strip() for c in df.columns]
-    log.info("  Columns available: %s", list(df.columns)[:15])
+    df.columns = [c.strip() for c in df.columns]
+    log.info("  Columns (first 20): %s", list(df.columns)[:20])
 
-    # Date column
-    date_col = next((c for c in df.columns if "CRASH_DATE" in c or "DATE" in c), None)
-    if date_col is None:
-        log.warning("  No date column for %d", year)
+    # ── Date ────────────────────────────────────────────────────────────────────
+    # 2020+: CrashYr (4-digit), CrashMonth, CrashDay (camelCase)
+    # 2016–2019: "Crash Date" column (string), or "Crash Year" (2-digit), "Crash Month", "Crash Day"
+    date_col = next((c for c in df.columns
+                     if c in ("CrashDate", "Crash Date", "CRASH_DATE", "CrashDateTime")), None)
+
+    yr_col  = next((c for c in df.columns if c in ("CrashYr",   "Crash Year")),  None)
+    mo_col  = next((c for c in df.columns if c in ("CrashMonth", "Crash Month")), None)
+    day_col = next((c for c in df.columns if c in ("CrashDay",   "Crash Day")),   None)
+
+    if date_col:
+        df["crash_date"] = pd.to_datetime(df[date_col], errors="coerce")
+    elif yr_col and mo_col and day_col:
+        yr_vals = pd.to_numeric(df[yr_col], errors="coerce")
+        # 2-digit year (e.g. 16 → 2016); 4-digit year (e.g. 2020) use as-is
+        yr_str = yr_vals.apply(lambda y: f"20{int(y):02d}" if pd.notna(y) and y < 100
+                               else str(int(y)) if pd.notna(y) else "")
+        df["crash_date"] = pd.to_datetime(
+            yr_str + "-" +
+            df[mo_col].astype(str).str.zfill(2) + "-" +
+            df[day_col].astype(str).str.zfill(2),
+            errors="coerce"
+        )
+    else:
+        log.warning("  No date info for %d; cols=%s", year, list(df.columns)[:30])
         return None
-    df["crash_date"] = pd.to_datetime(df[date_col], errors="coerce")
+
     df = df.dropna(subset=["crash_date"])
 
-    # County → FIPS
-    county_name_col = next((c for c in df.columns if "COUNTY" in c and "NAME" in c), None)
-    county_code_col = next((c for c in df.columns if c == "COUNTY"), None)
-
-    if county_name_col:
-        df["county_upper"] = df[county_name_col].astype(str).str.upper().str.strip()
-        df["fips"] = df["county_upper"].map(IL_COUNTY_FIPS_BY_NAME)
-    elif county_code_col:
-        # numeric code → need offset; try assuming it's 1–102 (IL has 102 counties)
-        df["county_num"] = pd.to_numeric(df[county_code_col], errors="coerce")
-        df["fips"] = ("17" + (df["county_num"] * 2 - 1).astype("Int64").astype(str).str.zfill(3))
-        # validate
-        valid = df["fips"].isin(IL_COUNTY_FIPS_BY_NAME.values())
-        if valid.mean() < 0.8:
-            # try direct mapping as FIPS suffix
-            df["fips"] = "17" + df["county_num"].astype("Int64").astype(str).str.zfill(3)
-    else:
-        log.warning("  No county identifier for %d", year)
+    # ── County → FIPS ────────────────────────────────────────────────────────────
+    # 2020+: CountyCode; 2016–2019: "County Code"
+    county_col = next((c for c in df.columns
+                       if c in ("CountyCode", "County Code", "COUNTY", "County")), None)
+    if county_col is None:
+        log.warning("  No county column for %d; cols=%s", year, list(df.columns)[:30])
         return None
 
-    df = df.dropna(subset=["fips"])
+    df["_county_num"] = pd.to_numeric(df[county_col], errors="coerce")
+    df = df.dropna(subset=["_county_num"])
+    df["_county_num"] = df["_county_num"].astype(int)
+    df["fips"] = "17" + ((df["_county_num"] * 2 - 1).astype(str).str.zfill(3))
+    invalid = ~df["fips"].isin(VALID_IL_FIPS)
+    if invalid.mean() > 0.05:
+        log.warning("  %.1f%% rows have unrecognised county code for %d",
+                    invalid.mean() * 100, year)
+    df = df[~invalid]
 
-    # Injury counts
-    fatal_col   = next((c for c in df.columns if "FATAL" in c and "INJUR" in c), None)
-    serious_col = next((c for c in df.columns if "INCAPAC" in c), None)
+    # ── Severity counts ──────────────────────────────────────────────────────────
+    # 2020+: TotalFatals, AInjuries, TotalInjured (camelCase)
+    # 2016–2019: "Total Fatals", "Incapacitating Injuries", "Total Injured"
+    fatal_col   = next((c for c in df.columns
+                        if c in ("TotalFatals", "Total Fatals",
+                                 "INJURIES_FATAL", "FATAL")), None)
+    serious_col = next((c for c in df.columns
+                        if c in ("AInjuries", "Incapacitating Injuries",
+                                 "INJURIES_INCAPACITATING")), None)
+    injured_col = next((c for c in df.columns
+                        if c in ("TotalInjured", "Total Injured",
+                                 "NUMBERINJURED")), None)
 
-    if fatal_col:
-        df["fatals"] = pd.to_numeric(df[fatal_col], errors="coerce").fillna(0)
-    else:
-        df["fatals"] = 0
-    if serious_col:
-        df["serious_inj"] = pd.to_numeric(df[serious_col], errors="coerce").fillna(0)
-    else:
-        df["serious_inj"] = 0
+    df["fatals"]     = pd.to_numeric(df[fatal_col],   errors="coerce").fillna(0) if fatal_col   else 0
+    df["serious_inj"]= pd.to_numeric(df[serious_col], errors="coerce").fillna(0) if serious_col else 0
+    df["all_injured"]= pd.to_numeric(df[injured_col], errors="coerce").fillna(0) if injured_col else 0
 
-    # Aggregate
+    log.info("  fatal_col=%s  serious_col=%s  injured_col=%s",
+             fatal_col, serious_col, injured_col)
+
+    # ── Aggregate to county-day ──────────────────────────────────────────────────
     agg = (df.groupby(["fips", "crash_date"])
-              .agg(il_fatals=("fatals", "sum"),
+              .agg(il_fatals     =("fatals",      "sum"),
                    il_serious_inj=("serious_inj", "sum"),
-                   il_crashes=("fips", "count"))
+                   il_all_injured=("all_injured",  "sum"),
+                   il_crashes    =("fatals",       "count"))
               .reset_index()
               .rename(columns={"crash_date": "date"}))
     log.info("  → %d county-days  fatals=%.0f  serious=%.0f",
@@ -231,29 +276,45 @@ def process_idot_df(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
 
 
 # ── Main download loop ────────────────────────────────────────────────────────
-log.info("Downloading Illinois IDOT crash data via ArcGIS …")
+log.info("Downloading Illinois IDOT crash data …")
 parts = []
+
 for yr in range(2016, 2025):
     log.info("Year %d …", yr)
-    raw = fetch_idot_year_arcgis(yr)
+    info = IDOT_ITEMS.get(yr, {})
+    item_id = info.get("item_id")
+    fs_url  = info.get("fs_url")
+
+    raw = None
+    if item_id:
+        raw = fetch_via_download_api(item_id, yr)
+    # Fall back to FeatureServer if download API fails or returns 0 rows
+    if (raw is None or raw.empty) and fs_url:
+        log.info("  Falling back to FeatureServer pagination …")
+        raw = fetch_via_featureserver(fs_url, yr)
+
     agg = process_idot_df(raw, yr)
     if agg is not None:
         parts.append(agg)
+    else:
+        log.warning("  Year %d: no data obtained", yr)
+
     time.sleep(2.0)
     gc.collect()
 
 if not parts:
     log.error("No Illinois data downloaded. Check network access.")
     log.info("Manual alternative: visit https://gis-idot.opendata.arcgis.com/ "
-             "and download per-year CSV files, then re-run with local files.")
+             "and download per-year CSV files.")
     sys.exit(1)
 
 il_panel = pd.concat(parts, ignore_index=True)
 il_panel["date"] = pd.to_datetime(il_panel["date"])
 il_panel = (il_panel.groupby(["fips", "date"])
-                     .agg(il_fatals=("il_fatals", "sum"),
+                     .agg(il_fatals     =("il_fatals",      "sum"),
                           il_serious_inj=("il_serious_inj", "sum"),
-                          il_crashes=("il_crashes", "sum"))
+                          il_all_injured=("il_all_injured", "sum"),
+                          il_crashes    =("il_crashes",     "sum"))
                      .reset_index())
 
 log.info("\nFinal Illinois IDOT panel:")

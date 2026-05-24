@@ -140,23 +140,28 @@ def download_ccrs_year(year: int) -> pd.DataFrame | None:
     try:
         import urllib.request
 
-        # Try two URL patterns
+        # Try two URL patterns: known resource IDs first, then generic pattern
         urls_to_try = [
             f"https://data.ca.gov/dataset/80c6a49d-c6b3-40ba-86d8-379c9741b4be/resource/crashes_{year}.csv",
         ]
-        if year in CCRS_CRASH_URLS_ALT:
-            urls_to_try.insert(0, CCRS_CRASH_URLS_ALT[year])
+        if year in CCRS_CRASH_URLS:
+            urls_to_try.insert(0, CCRS_CRASH_URLS[year])
+
+        import requests as _requests
+        HEADERS = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            "Referer": "https://data.ca.gov/",
+            "Accept": "text/html,application/xhtml+xml,*/*",
+        }
 
         df = None
         for url in urls_to_try:
             try:
                 log.info("  Trying %s", url)
-                req = urllib.request.Request(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0 (research data download)"}
-                )
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    content = resp.read()
+                resp = _requests.get(url, headers=HEADERS, timeout=120,
+                                     stream=True, allow_redirects=True)
+                resp.raise_for_status()
+                content = resp.content
                 df = pd.read_csv(io.StringIO(content.decode("latin1")),
                                  low_memory=False)
                 log.info("  Downloaded %d rows for %d", len(df), year)
@@ -171,64 +176,75 @@ def download_ccrs_year(year: int) -> pd.DataFrame | None:
 
         log.info("  Columns: %s", list(df.columns)[:10])
 
-        # Normalize column names
+        # Normalize column names (strip leading tabs/spaces, uppercase)
         df.columns = [c.upper().strip() for c in df.columns]
 
-        # Find county column
-        county_col = next((c for c in df.columns
-                           if "COUNTY" in c and "CODE" in c), None)
+        # ── Date column ─────────────────────────────────────────────────────
+        # CCRS uses "CRASH DATE TIME"; fall back to any column with DATE in name
+        date_col = next((c for c in df.columns if c == "CRASH DATE TIME"), None)
+        if date_col is None:
+            date_col = next((c for c in df.columns
+                             if "DATE" in c and "CREATED" not in c
+                             and "MODIFIED" not in c and "REVIEWED" not in c
+                             and "PREPARED" not in c and "NOTIF" not in c), None)
+        if date_col is None:
+            log.warning("  No date column found for %d; columns: %s",
+                        year, list(df.columns)[:30])
+            return None
+
+        # ── County column ────────────────────────────────────────────────────
+        # CCRS uses "COUNTY CODE" (integer 1–58, sequential alphabetical order)
+        # FIPS = "06" + str(code * 2 - 1).zfill(3)
+        county_col = next((c for c in df.columns if c == "COUNTY CODE"), None)
         if county_col is None:
             county_col = next((c for c in df.columns if "COUNTY" in c), None)
         if county_col is None:
             log.warning("  No county column found for %d; columns: %s",
-                        year, list(df.columns)[:20])
+                        year, list(df.columns)[:30])
             return None
 
-        # Find date column
-        date_col = next((c for c in df.columns
-                         if "COLLISION_DATE" in c or "CRASH_DATE" in c
-                         or c in ("DATE",)), None)
-        if date_col is None:
-            log.warning("  No date column found for %d; columns: %s",
-                        year, list(df.columns)[:20])
-            return None
+        # ── Severity columns ─────────────────────────────────────────────────
+        # CCRS crashes file provides total counts per crash
+        fatal_col   = next((c for c in df.columns if c == "NUMBERKILLED"), None)
+        if fatal_col is None:
+            fatal_col = next((c for c in df.columns if "KILLED" in c or "FATAL" in c), None)
+        injured_col = next((c for c in df.columns if c == "NUMBERINJURED"), None)
+        if injured_col is None:
+            injured_col = next((c for c in df.columns if "INJUR" in c and "NUMBER" in c), None)
 
-        # Find severity column(s)
-        # CCRS may have COLLISION_SEVERITY or individual count columns
-        sev_col = next((c for c in df.columns if "COLLISION_SEVERITY" in c), None)
-        fatal_col  = next((c for c in df.columns
-                           if "KILLED" in c or "FATAL" in c), None)
-        serious_col = next((c for c in df.columns
-                            if "SERIOUS" in c and "INJUR" in c), None)
+        log.info("  county_col=%s  date_col=%s  fatal_col=%s  injured_col=%s",
+                 county_col, date_col, fatal_col, injured_col)
 
-        log.info("  county_col=%s  date_col=%s  sev_col=%s  fatal_col=%s  serious_col=%s",
-                 county_col, date_col, sev_col, fatal_col, serious_col)
-
-        # Parse date
+        # ── Parse date ───────────────────────────────────────────────────────
         df["crash_date"] = pd.to_datetime(df[date_col], errors="coerce")
         df = df.dropna(subset=["crash_date"])
 
-        # Map county to FIPS
-        df[county_col] = pd.to_numeric(df[county_col], errors="coerce")
-        df = df.dropna(subset=[county_col])
-        df[county_col] = df[county_col].astype(int)
-        df["fips"] = df[county_col].map(CA_COUNTY_FIPS)
-        df = df.dropna(subset=["fips"])
+        # ── Map county → FIPS ────────────────────────────────────────────────
+        # Sequential county number 1–58 → FIPS 06001, 06003, … 06115
+        df["_county_num"] = pd.to_numeric(df[county_col], errors="coerce")
+        df = df.dropna(subset=["_county_num"])
+        df["_county_num"] = df["_county_num"].astype(int)
+        # Formula: FIPS = "06" + str(code * 2 - 1).zfill(3)
+        df["fips"] = "06" + ((df["_county_num"] * 2 - 1).astype(str).str.zfill(3))
+        # Validate against known set
+        valid_fips = set(CA_COUNTY_FIPS.values())
+        invalid = ~df["fips"].isin(valid_fips)
+        if invalid.mean() > 0.05:
+            log.warning("  %.1f%% rows have unknown county code — check mapping",
+                        invalid.mean() * 100)
+        df = df[~invalid]
 
-        # Build crash-level severity counts
+        # ── Severity counts ──────────────────────────────────────────────────
         if fatal_col:
             df["fatals"] = pd.to_numeric(df[fatal_col], errors="coerce").fillna(0)
-        elif sev_col:
-            df["fatals"] = (df[sev_col].astype(str).str.upper() == "FATAL").astype(int)
         else:
             df["fatals"] = 0
 
-        if serious_col:
-            df["serious_inj"] = pd.to_numeric(df[serious_col], errors="coerce").fillna(0)
-        elif sev_col:
-            sev_up = df[sev_col].astype(str).str.upper()
-            df["serious_inj"] = sev_up.isin(["SEVERE INJURY", "SUSPECTED SERIOUS INJURY",
-                                              "SUSPECTED SERIOUS",  "SERIOUS INJURY"]).astype(int)
+        # CCRS crashes file has NUMBERINJURED (all severities) but no separate
+        # serious-injury count at the crash level. Use NUMBERINJURED as a proxy;
+        # note this is broader than KABCO-A (Suspected Serious Injury).
+        if injured_col:
+            df["serious_inj"] = pd.to_numeric(df[injured_col], errors="coerce").fillna(0)
         else:
             df["serious_inj"] = 0
 
