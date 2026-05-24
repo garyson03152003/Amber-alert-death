@@ -329,6 +329,31 @@ night_alerts["fips"] = night_alerts["fips"].astype(str).str.zfill(5)
 night_alerts["night_alert"] = 1
 log.info("  County-crash_dates with ≥1 night AMBER alert: %d", len(night_alerts))
 
+# ── Sleep-phase indicators ─────────────────────────────────────────────────────
+# Four mutually-exclusive bins keyed on alert's local hour.
+# Name / hour-range / human label
+SLEEP_PHASES = [
+    ("ph_2223", 22, 23, "Still awake  (22–23h)"),
+    ("ph_0001",  0,  1, "Light sleep  (0–1h)"),
+    ("ph_0203",  2,  3, "Deep sleep   (2–3h)"),   # N3 peak
+    ("ph_0405",  4,  5, "Late/REM     (4–5h)"),
+]
+PHASE_COLS   = [p[0] for p in SLEEP_PHASES]
+PHASE_LABELS = {p[0]: p[3] for p in SLEEP_PHASES}
+
+phase_alert_frames = {}
+for ph_name, h_lo, h_hi, ph_label in SLEEP_PHASES:
+    ph = alerts[alerts["is_night"] & alerts["hour_local"].between(h_lo, h_hi)].copy()
+    collapsed = (
+        ph.groupby(["fips", "effective_crash_date"])
+        .size()
+        .reset_index(name=f"n_{ph_name}")
+    )
+    collapsed["fips"] = collapsed["fips"].astype(str).str.zfill(5)
+    collapsed[ph_name] = 1
+    phase_alert_frames[ph_name] = collapsed
+    log.info("  Sleep phase %-28s %d county-crash_dates", ph_label, len(collapsed))
+
 # ── 3. Load population data ───────────────────────────────────────────────────
 log.info("=== Loading population data ===")
 
@@ -377,6 +402,19 @@ panel = panel.merge(
     how="left"
 )
 panel["night_alert"] = panel["night_alert"].fillna(0).astype(int)
+
+# Merge sleep-phase indicators
+for ph_name, collapsed in phase_alert_frames.items():
+    panel = panel.merge(
+        collapsed[["fips", "effective_crash_date", ph_name]],
+        left_on=["fips", "date"], right_on=["fips", "effective_crash_date"],
+        how="left", suffixes=("", f"_{ph_name}")
+    )
+    panel[ph_name] = panel[ph_name].fillna(0).astype(int)
+    # drop the duplicate effective_crash_date column from this merge
+    dup_col = f"effective_crash_date_{ph_name}"
+    if dup_col in panel.columns:
+        panel = panel.drop(columns=[dup_col])
 
 # Restrict to study years that overlap between crash data and alert data
 panel = panel[panel["year"].between(2013, 2022)]
@@ -572,6 +610,78 @@ def run_twfe_panelols(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict 
         return run_twfe(sub2, outcome_col, label)
 
 
+def run_sleep_phase_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> list[dict] | None:
+    """
+    Joint TWFE with four sleep-phase treatment indicators as separate regressors.
+    Returns one dict per active phase, with β, SE, p-value directly comparable.
+
+    Sleep phase bins (local time):
+      ph_2223  22–23h  Still awake / falling asleep
+      ph_0001   0– 1h  Light sleep (N1/N2, first cycle)
+      ph_0203   2– 3h  Deep sleep  (N3, slow-wave; hardest to rouse)
+      ph_0405   4– 5h  Late sleep / REM (lighter, closer to waking)
+
+    Hypothesis: ph_0203 should have the largest (most negative) coefficient if
+    the mechanism is sleep-inertia-driven next-morning driving impairment.
+    """
+    sub2 = sub2.dropna(subset=[outcome_col]).copy()
+
+    # Only include phases that have ≥5 treated obs and non-zero variance
+    active = [c for c in PHASE_COLS
+              if c in sub2.columns and sub2[c].sum() >= 5 and sub2[c].std() > 1e-12]
+    if not active:
+        return None
+
+    dow_dummies = pd.get_dummies(sub2["dow"], prefix="dow", drop_first=True).astype(float)
+    dow_cols = dow_dummies.columns.tolist()
+    sub2 = pd.concat([sub2, dow_dummies], axis=1)
+
+    # Use underscore-prefixed names to avoid pandas method-name collision
+    tx_map = {c: f"_tx_{c}" for c in active}
+    sub2["_y"] = sub2[outcome_col].astype(float)
+    for orig, renamed in tx_map.items():
+        sub2[renamed] = sub2[orig].astype(float)
+
+    all_cols = ["_y"] + list(tx_map.values()) + dow_cols
+
+    # Overall centering then iterative county+date within-transform
+    for c in all_cols:
+        sub2[c] -= sub2[c].mean()
+    for _ in range(5):
+        for c in all_cols:
+            sub2[c] = (sub2[c]
+                       - sub2.groupby("fips")[c].transform("mean")
+                       - sub2.groupby("date")[c].transform("mean"))
+
+    if sub2["_y"].std() < 1e-10:
+        return None
+
+    X = sm.add_constant(sub2[list(tx_map.values()) + dow_cols])
+    try:
+        mod = OLS(sub2["_y"], X).fit(
+            cov_type="cluster", cov_kwds={"groups": sub2["fips"]}
+        )
+    except Exception as exc:
+        log.warning("  [%s] sleep-phase OLS failed: %s", label, exc)
+        return None
+
+    rows = []
+    for orig, renamed in tx_map.items():
+        if renamed not in mod.params:
+            continue
+        rows.append(dict(
+            phase=orig,
+            phase_label=PHASE_LABELS[orig],
+            beta=round(float(mod.params[renamed]), 6),
+            se=round(float(mod.bse[renamed]), 6),
+            pvalue=round(float(mod.pvalues[renamed]), 4),
+            n_treated_phase=int(sub2[orig].sum()),   # raw treated rows
+            n_obs=int(mod.nobs),
+            method="Sleep-phase TWFE (county+date FE+DoW, joint)",
+        ))
+    return rows or None
+
+
 for state_filter in [None] + sorted(panel.state.unique().tolist()):
     label = state_filter if state_filter else "ALL"
     sub = panel if state_filter is None else panel[panel.state == state_filter]
@@ -647,3 +757,58 @@ if not results.empty:
     log.info("\nSaved → %s", OUTPUT_TABS / "state_dot_analysis.csv")
 else:
     log.warning("No results produced.")
+
+# ── 8. Sleep-phase heterogeneity ──────────────────────────────────────────────
+log.info("\n=== Sleep-phase heterogeneity (crashes_per_100k, joint TWFE) ===")
+log.info("Hypothesis: deep-sleep alerts (2–3h) → worst sleep inertia → most crashes")
+log.info("")
+log.info("  %-8s  %-28s  %7s  %7s  %6s  %5s", "State", "Phase", "β", "SE", "p", "N_treated")
+log.info("  " + "-"*70)
+
+phase_rows: list[dict] = []
+for state_filter in [None] + sorted(panel.state.unique().tolist()):
+    label = state_filter if state_filter else "ALL"
+    sub = panel if state_filter is None else panel[panel.state == state_filter]
+
+    # Skip if no phase has enough treatment
+    active_phases = [c for c in PHASE_COLS if c in sub.columns and sub[c].sum() >= 5]
+    if not active_phases:
+        continue
+
+    sub2 = sub.dropna(subset=["crashes_per_100k"]).copy()
+    if len(sub2) < 100:
+        continue
+
+    phase_res = run_sleep_phase_twfe(sub2, "crashes_per_100k", label)
+    if not phase_res:
+        continue
+
+    for row in phase_res:
+        row["state"] = label
+        phase_rows.append(row)
+        stars = ("***" if row["pvalue"] < 0.01 else
+                 "**"  if row["pvalue"] < 0.05 else
+                 "*"   if row["pvalue"] < 0.10 else "")
+        log.info("  %-8s  %-28s  β=%+.4f  SE=%.4f  p=%.3f %-3s  N=%d",
+                 label, row["phase_label"],
+                 row["beta"], row["se"], row["pvalue"], stars,
+                 row["n_treated_phase"])
+
+if phase_rows:
+    phase_df = pd.DataFrame(phase_rows)
+    phase_path = OUTPUT_TABS / "sleep_phase_analysis.csv"
+    phase_df.to_csv(phase_path, index=False)
+    log.info("\nSaved → %s", phase_path)
+
+    # Print the ALL-states summary clearly
+    all_phase = phase_df[phase_df.state == "ALL"].sort_values("phase")
+    log.info("\n  ALL states — sleep-phase coefficients (crashes / 100k):")
+    log.info("  %-28s  %7s  %7s  %6s", "Phase", "β", "SE", "p")
+    for _, r in all_phase.iterrows():
+        stars = ("***" if r.pvalue < 0.01 else
+                 "**"  if r.pvalue < 0.05 else
+                 "*"   if r.pvalue < 0.10 else "")
+        log.info("  %-28s  %+7.4f  %7.4f  %.3f %s",
+                 r.phase_label, r.beta, r.se, r.pvalue, stars)
+else:
+    log.warning("No sleep-phase results produced.")

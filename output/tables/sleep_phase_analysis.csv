@@ -1,0 +1,22 @@
+phase,phase_label,beta,se,pvalue,n_treated_phase,n_obs,method,state
+ph_2223,Still awake  (22–23h),-0.112949,0.176707,0.5227,313,1021823,"Sleep-phase TWFE (county+date FE+DoW, joint)",ALL
+ph_0001,Light sleep  (0–1h),-0.373004,0.256519,0.1459,161,1021823,"Sleep-phase TWFE (county+date FE+DoW, joint)",ALL
+ph_0203,Deep sleep   (2–3h),-0.682566,0.311564,0.0285,97,1021823,"Sleep-phase TWFE (county+date FE+DoW, joint)",ALL
+ph_0405,Late/REM     (4–5h),0.072436,0.352503,0.8372,42,1021823,"Sleep-phase TWFE (county+date FE+DoW, joint)",ALL
+ph_2223,Still awake  (22–23h),-0.152157,0.202908,0.4533,54,128459,"Sleep-phase TWFE (county+date FE+DoW, joint)",CA
+ph_0001,Light sleep  (0–1h),0.078088,0.184777,0.6726,33,128459,"Sleep-phase TWFE (county+date FE+DoW, joint)",CA
+ph_0203,Deep sleep   (2–3h),0.288331,0.252923,0.2543,45,128459,"Sleep-phase TWFE (county+date FE+DoW, joint)",CA
+ph_0405,Late/REM     (4–5h),-0.241483,0.260053,0.3531,13,128459,"Sleep-phase TWFE (county+date FE+DoW, joint)",CA
+ph_2223,Still awake  (22–23h),0.075943,0.452572,0.8667,16,44757,"Sleep-phase TWFE (county+date FE+DoW, joint)",FL
+ph_0001,Light sleep  (0–1h),-61.561659,43.567824,0.1577,44,142190,"Sleep-phase TWFE (county+date FE+DoW, joint)",IA
+ph_2223,Still awake  (22–23h),-0.667864,0.309871,0.0311,166,178138,"Sleep-phase TWFE (county+date FE+DoW, joint)",IL
+ph_0001,Light sleep  (0–1h),0.009696,0.666291,0.9884,49,178138,"Sleep-phase TWFE (county+date FE+DoW, joint)",IL
+ph_0203,Deep sleep   (2–3h),0.110938,0.858858,0.8972,24,178138,"Sleep-phase TWFE (county+date FE+DoW, joint)",IL
+ph_2223,Still awake  (22–23h),5114.071586,3339.01459,0.1256,9,22303,"Sleep-phase TWFE (county+date FE+DoW, joint)",NV
+ph_0001,Light sleep  (0–1h),-12654.713945,3062.014406,0.0,7,22303,"Sleep-phase TWFE (county+date FE+DoW, joint)",NV
+ph_0203,Deep sleep   (2–3h),-5785.8188,2368.221893,0.0146,26,22303,"Sleep-phase TWFE (county+date FE+DoW, joint)",NV
+ph_0405,Late/REM     (4–5h),5783.322219,2368.337991,0.0146,5,22303,"Sleep-phase TWFE (county+date FE+DoW, joint)",NV
+ph_2223,Still awake  (22–23h),1.955429,1.794415,0.2758,9,43492,"Sleep-phase TWFE (county+date FE+DoW, joint)",NY
+ph_0001,Light sleep  (0–1h),0.851727,0.709107,0.2297,28,43492,"Sleep-phase TWFE (county+date FE+DoW, joint)",NY
+ph_2223,Still awake  (22–23h),3.607955,151.670563,0.981,58,208524,"Sleep-phase TWFE (county+date FE+DoW, joint)",WI
+ph_0405,Late/REM     (4–5h),0.20791,0.610355,0.7334,24,208524,"Sleep-phase TWFE (county+date FE+DoW, joint)",WI
