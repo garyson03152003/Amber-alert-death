@@ -6,8 +6,8 @@ per 100k residents, using all-crash (not fatals-only) state DOT data?
 
 Data sources:
   - State DOT crash panels (county-day or county-month):
-      CA, FL, IL, IA, MA, NV, PA, WI
-  - AMBER alert records: data/raw/amber/foia/openfema_ipaws_alerts_2013_2022.csv
+      CA, FL, IL, IA, MA, NV, NY, OR, VA, WI  (+ PA county-month)
+  - AMBER alert records: data/raw/amber/foia/openfema_ipaws_alerts_2013_2024.csv
   - Census county population: data/processed/county_population.parquet
 
 Method: Two-Way Fixed Effects (TWFE) OLS
@@ -55,7 +55,11 @@ STATE_FILES = {
     "IA": ("iowa_dot_county_day.parquet",           "ia_crashes", "ia_fatals", "ia_serious_inj"),
     "MA": ("massachusetts_massdot_county_day.parquet","ma_crashes","ma_fatals","ma_serious_inj"),
     "NV": ("nevada_ndot_county_day.parquet",        "nv_crashes", "nv_fatals", "nv_serious_inj"),
+    "OR": ("oregon_odot_county_day.parquet",        "or_crashes", "or_fatals", "or_serious_inj"),
+    "VA": ("virginia_vdot_county_day.parquet",      "va_crashes", "va_fatals", "va_serious_inj"),
     "WI": ("wisconsin_dot_county_day.parquet",      "wi_crashes", "wi_fatals", "wi_serious_inj"),
+    # NY: crash counts only; ny_fatal_crashes = fatal crashes (not fatalities); no serious_inj
+    "NY": ("newyork_dot_county_day.parquet",        "ny_crashes", "ny_fatal_crashes", None),
     # PA is county-MONTH — handled separately below
 }
 PA_FILE = "pennsylvania_penndot_county_month.parquet"
@@ -67,7 +71,14 @@ for state, (fname, c_crashes, c_fatals, c_serious) in STATE_FILES.items():
         log.warning("Missing %s — skipping %s", fname, state)
         continue
     df = pd.read_parquet(path)
-    df = df.rename(columns={c_crashes: "crashes", c_fatals: "fatals", c_serious: "serious_inj"})
+    rename_map = {c_crashes: "crashes", c_fatals: "fatals"}
+    if c_serious and c_serious in df.columns:
+        rename_map[c_serious] = "serious_inj"
+    df = df.rename(columns=rename_map)
+    # Ensure all expected columns exist
+    for col in ["crashes", "fatals", "serious_inj"]:
+        if col not in df.columns:
+            df[col] = 0
     df = df[["fips", "date", "crashes", "fatals", "serious_inj"]].copy()
     # Normalize date to calendar day (CA CCRS has individual crash timestamps)
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
@@ -103,11 +114,15 @@ log.info("Combined: %d records across %d states",
 # ── 2. Load AMBER alert data ──────────────────────────────────────────────────
 log.info("=== Loading AMBER alert data ===")
 
-AMBER_CSV = DATA_RAW / "amber" / "foia" / "openfema_ipaws_alerts_2013_2022.csv"
+AMBER_CSV = DATA_RAW / "amber" / "foia" / "openfema_ipaws_alerts_2013_2024.csv"
+if not AMBER_CSV.exists():
+    # fall back to old filename
+    AMBER_CSV = DATA_RAW / "amber" / "foia" / "openfema_ipaws_alerts_2013_2022.csv"
 if not AMBER_CSV.exists():
     log.error("AMBER alert file not found at %s", AMBER_CSV)
     log.error("Run: python code/02c_fetch_openfema_ipaws.py")
     sys.exit(1)
+log.info("  Reading AMBER data from: %s", AMBER_CSV.name)
 
 alerts = pd.read_csv(AMBER_CSV, parse_dates=["sent_utc"])
 log.info("  Raw AMBER records: %d", len(alerts))
@@ -133,8 +148,8 @@ alerts["hour_local"] = alerts["sent_local"].dt.hour
 # Night alert: 10pm–6am local
 alerts["is_night"] = (alerts["hour_local"] >= 22) | (alerts["hour_local"] < 6)
 
-# Alert date = calendar date of the alert (local time)
-alerts["alert_date"] = alerts["sent_local"].dt.normalize()
+# Alert date = calendar date of the alert (local time) — strip tz so merge works
+alerts["alert_date"] = alerts["sent_local"].dt.normalize().dt.tz_localize(None)
 
 log.info("  Total alerts: %d   Night alerts: %d (%.1f%%)",
          len(alerts), alerts.is_night.sum(), 100*alerts.is_night.mean())
@@ -251,7 +266,10 @@ try:
     HAS_LINEARMODELS = True
 except ImportError:
     HAS_LINEARMODELS = False
-    log.warning("linearmodels not installed — using statsmodels with entity dummies (slower)")
+    log.warning("linearmodels not installed — using within-transform OLS fallback")
+
+from statsmodels.regression.linear_model import OLS
+import statsmodels.api as sm
 
 results_rows = []
 
@@ -260,6 +278,72 @@ OUTCOMES = [
     ("fatals_per_100k_t1",  "Fatalities / 100k (t+1)"),
     ("serious_per_100k_t1", "Serious inj / 100k (t+1)"),
 ]
+
+
+def run_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict | None:
+    """
+    Two-way within-transform OLS (county FE + date FE).
+    Memory-efficient: never builds a dummy matrix.
+    Clustered SEs by county (fips).
+    """
+    sub2 = sub2.dropna(subset=[outcome_col]).copy()
+    if len(sub2) < 100 or sub2["night_alert"].std() < 1e-12:
+        return None
+
+    sub2 = sub2.copy()
+    sub2["_y"] = sub2[outcome_col]
+    sub2["_x"] = sub2["night_alert"].astype(float)
+
+    # Iterative within-transform (handles two-way FE without building dummy matrix)
+    sub2["_y"] -= sub2["_y"].mean()
+    sub2["_x"] -= sub2["_x"].mean()
+    for _ in range(5):
+        sub2["_y"] = (sub2["_y"]
+                      - sub2.groupby("fips")["_y"].transform("mean")
+                      - sub2.groupby("date")["_y"].transform("mean"))
+        sub2["_x"] = (sub2["_x"]
+                      - sub2.groupby("fips")["_x"].transform("mean")
+                      - sub2.groupby("date")["_x"].transform("mean"))
+
+    if sub2["_x"].std() < 1e-12:
+        return None
+
+    try:
+        mod = OLS(sub2["_y"], sm.add_constant(sub2["_x"])).fit(
+            cov_type="cluster", cov_kwds={"groups": sub2["fips"]}
+        )
+    except Exception as exc:
+        log.warning("  [%s] %s OLS failed: %s", label, outcome_col, exc)
+        return None
+
+    b  = mod.params["_x"]
+    se = mod.bse["_x"]
+    pv = mod.pvalues["_x"]
+    n  = int(mod.nobs)
+    return dict(beta=round(b, 6), se=round(se, 6), pvalue=round(pv, 4), n_obs=n,
+                method="Within-transform TWFE (county+date FE)")
+
+
+def run_twfe_panelols(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict | None:
+    """PanelOLS TWFE — use only when panel is small enough (< 300k rows)."""
+    sub2 = sub2.dropna(subset=[outcome_col]).copy()
+    if len(sub2) < 100:
+        return None
+    try:
+        sub_idx = sub2.set_index(["fips", "date"])
+        mod = PanelOLS(sub_idx[outcome_col], sub_idx[["night_alert"]],
+                       entity_effects=True, time_effects=True, drop_absorbed=True)
+        res = mod.fit(cov_type="clustered", cluster_entity=True)
+        b   = res.params["night_alert"]
+        se  = res.std_errors["night_alert"]
+        pv  = res.pvalues["night_alert"]
+        n   = int(res.nobs)
+        return dict(beta=round(b, 6), se=round(se, 6), pvalue=round(pv, 4), n_obs=n,
+                    method="PanelOLS TWFE (linearmodels)")
+    except Exception as exc:
+        log.warning("  [%s] PanelOLS failed (%s) — falling back to within-transform", label, exc)
+        return run_twfe(sub2, outcome_col, label)
+
 
 for state_filter in [None] + sorted(panel.state.unique().tolist()):
     label = state_filter if state_filter else "ALL"
@@ -274,74 +358,24 @@ for state_filter in [None] + sorted(panel.state.unique().tolist()):
         if len(sub2) < 100:
             continue
 
-        if HAS_LINEARMODELS:
-            try:
-                # Multi-index: entity=fips, time=date
-                sub2 = sub2.set_index(["fips", "date"])
-                mod = PanelOLS(
-                    sub2[outcome_col],
-                    sub2[["night_alert"]],
-                    entity_effects=True,
-                    time_effects=True,
-                    drop_absorbed=True,
-                )
-                res = mod.fit(cov_type="clustered", cluster_entity=True)
-                b   = res.params["night_alert"]
-                se  = res.std_errors["night_alert"]
-                pv  = res.pvalues["night_alert"]
-                n   = int(res.nobs)
-                results_rows.append({
-                    "state":   label,
-                    "outcome": outcome_label,
-                    "beta":    round(b, 6),
-                    "se":      round(se, 6),
-                    "pvalue":  round(pv, 4),
-                    "n_obs":   n,
-                    "n_treated": int(sub.night_alert.sum()),
-                    "method":  "PanelOLS TWFE (linearmodels)",
-                })
-                stars = "***" if pv < 0.01 else "**" if pv < 0.05 else "*" if pv < 0.10 else ""
-                log.info("  [%s] %-35s β=%+.4f  se=%.4f  p=%.3f %s  n=%d",
-                         label, outcome_label, b, se, pv, stars, n)
-            except Exception as exc:
-                log.warning("  [%s] %s failed: %s", label, outcome_label, exc)
+        # Use PanelOLS for per-state (≤300k rows); within-transform for ALL
+        use_panel_ols = HAS_LINEARMODELS and (state_filter is not None) and (len(sub2) < 300_000)
+        if use_panel_ols:
+            result = run_twfe_panelols(sub2, outcome_col, label)
         else:
-            # Fallback: statsmodels with absorbed dummies via within-transform
-            import statsmodels.formula.api as smf
-            sub2["y"] = sub2[outcome_col]
-            # Demean within county (entity FE) and within date (time FE)
-            sub2["y_dm"] = (sub2["y"]
-                            - sub2.groupby("fips")["y"].transform("mean")
-                            - sub2.groupby("date")["y"].transform("mean")
-                            + sub2["y"].mean())
-            sub2["x_dm"] = (sub2["night_alert"]
-                            - sub2.groupby("fips")["night_alert"].transform("mean")
-                            - sub2.groupby("date")["night_alert"].transform("mean")
-                            + sub2["night_alert"].mean())
-            if sub2["x_dm"].std() < 1e-10:
-                continue
-            from statsmodels.regression.linear_model import OLS
-            import statsmodels.api as sm
-            mod = OLS(sub2["y_dm"], sm.add_constant(sub2[["x_dm"]])).fit(
-                cov_type="cluster", cov_kwds={"groups": sub2["fips"]}
-            )
-            b  = mod.params["x_dm"]
-            se = mod.bse["x_dm"]
-            pv = mod.pvalues["x_dm"]
-            n  = int(mod.nobs)
-            results_rows.append({
-                "state":   label,
-                "outcome": outcome_label,
-                "beta":    round(b, 6),
-                "se":      round(se, 6),
-                "pvalue":  round(pv, 4),
-                "n_obs":   n,
-                "n_treated": int(sub.night_alert.sum()),
-                "method":  "Within-transform OLS (fallback)",
-            })
-            stars = "***" if pv < 0.01 else "**" if pv < 0.05 else "*" if pv < 0.10 else ""
-            log.info("  [%s] %-35s β=%+.4f  se=%.4f  p=%.3f %s  n=%d",
-                     label, outcome_label, b, se, pv, stars, n)
+            result = run_twfe(sub2, outcome_col, label)
+
+        if result is None:
+            continue
+        result.update({"state": label, "outcome": outcome_label,
+                       "n_treated": int(sub.night_alert.sum())})
+        results_rows.append(result)
+        stars = ("***" if result["pvalue"] < 0.01 else
+                 "**"  if result["pvalue"] < 0.05 else
+                 "*"   if result["pvalue"] < 0.10 else "")
+        log.info("  [%s] %-35s β=%+.4f  se=%.4f  p=%.3f %s  n=%d",
+                 label, outcome_label, result["beta"], result["se"],
+                 result["pvalue"], stars, result["n_obs"])
 
 results = pd.DataFrame(results_rows)
 

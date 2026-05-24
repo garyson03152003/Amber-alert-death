@@ -1,0 +1,22 @@
+beta,se,pvalue,n_obs,method,state,outcome,n_treated
+-0.234659,0.193757,0.2259,1021742,Within-transform TWFE (county+date FE),ALL,All crashes / 100k (t+1),495
+-0.0339,0.020611,0.1,1021742,Within-transform TWFE (county+date FE),ALL,Fatalities / 100k (t+1),495
+-0.099927,0.063194,0.1138,1021742,Within-transform TWFE (county+date FE),ALL,Serious inj / 100k (t+1),495
+0.025289,0.144239,0.8608,128459,PanelOLS TWFE (linearmodels),CA,All crashes / 100k (t+1),110
+-0.010638,0.03582,0.7665,128459,PanelOLS TWFE (linearmodels),CA,Fatalities / 100k (t+1),110
+0.164376,0.258413,0.5247,128459,PanelOLS TWFE (linearmodels),CA,Serious inj / 100k (t+1),110
+-54.059908,49.969917,0.2793,142190,Within-transform TWFE (county+date FE),IA,All crashes / 100k (t+1),44
+0.374043,1.400309,0.7894,142190,Within-transform TWFE (county+date FE),IA,Fatalities / 100k (t+1),44
+3.072133,2.354082,0.1919,142190,Within-transform TWFE (county+date FE),IA,Serious inj / 100k (t+1),44
+-0.11055,0.384179,0.7735,178138,PanelOLS TWFE (linearmodels),IL,All crashes / 100k (t+1),165
+-0.057586,0.036565,0.1153,178138,PanelOLS TWFE (linearmodels),IL,Fatalities / 100k (t+1),165
+-0.020034,0.101962,0.8442,178138,PanelOLS TWFE (linearmodels),IL,Serious inj / 100k (t+1),165
+-8.43383,6.146099,0.17,22303,PanelOLS TWFE (linearmodels),NV,All crashes / 100k (t+1),44
+-5.869405,5.285799,0.2668,22303,PanelOLS TWFE (linearmodels),NV,Fatalities / 100k (t+1),44
+1.016611,0.870736,0.243,22303,PanelOLS TWFE (linearmodels),NV,Serious inj / 100k (t+1),44
+0.884568,0.848619,0.2972,43492,PanelOLS TWFE (linearmodels),NY,All crashes / 100k (t+1),37
+0.071867,0.065741,0.2743,43492,PanelOLS TWFE (linearmodels),NY,Fatalities / 100k (t+1),37
+0.0,0.0,,43492,Within-transform TWFE (county+date FE),NY,Serious inj / 100k (t+1),37
+0.721082,0.526211,0.1706,208524,PanelOLS TWFE (linearmodels),WI,All crashes / 100k (t+1),93
+0.039587,0.04467,0.3755,208524,PanelOLS TWFE (linearmodels),WI,Fatalities / 100k (t+1),93
+0.092636,0.114127,0.417,208524,PanelOLS TWFE (linearmodels),WI,Serious inj / 100k (t+1),93
