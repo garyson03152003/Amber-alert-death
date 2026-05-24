@@ -12,8 +12,9 @@ No authentication required.
 Coverage: 2013–2020 (~100k–141k crashes/year; 14 counties)
 maxRecordCount: 2000 → ~50–70 pages per year
 
-Key fields (consistent across years):
-  CRASH_DATE          — epoch milliseconds
+Key fields:
+  CRASH_DATE      — epoch milliseconds (2018–2020 layers only)
+  CRASH_DATETIME  — epoch milliseconds (2013–2017 layers only; same semantic)
   CNTY_NAME           — county name (e.g. "MIDDLESEX", "SUFFOLK")
   NUMB_FATAL_INJR     — number of fatalities per crash
   NUMB_NONFATAL_INJR  — number of non-fatal injuries per crash (all levels)
@@ -23,6 +24,12 @@ Key fields (consistent across years):
                           "Non-fatal injury - Non-incapacitating"
                           "Non-fatal injury - Possible"
                           "No injury" / "No Apparent Injury (O)"
+
+NOTE on date field schema versioning:
+  2013–2017 FeatureServer layers use CRASH_DATETIME (not CRASH_DATE).
+  Requesting CRASH_DATE on those layers causes ArcGIS to return an embedded
+  JSON error {"code": 400, "message": "Unable to complete operation"} with
+  HTTP 200, yielding 0 features.  Per-year outFields are used to avoid this.
 
 Serious injury proxy: sum(NUMB_NONFATAL_INJR) for crashes where
   MAX_INJR_SVRTY_CL contains "Incapacitating" (= KABCO-A)
@@ -57,9 +64,14 @@ YEAR_SERVICES = {
 }
 YEARS = sorted(YEAR_SERVICES.keys())   # 2013–2020
 
-OUT_FIELDS = (
-    "CRASH_DATE,CNTY_NAME,NUMB_FATAL_INJR,NUMB_NONFATAL_INJR,MAX_INJR_SVRTY_CL"
-)
+COMMON_FIELDS = "CNTY_NAME,NUMB_FATAL_INJR,NUMB_NONFATAL_INJR,MAX_INJR_SVRTY_CL"
+# 2013–2017 layers use CRASH_DATETIME; 2018–2020 layers use CRASH_DATE
+YEAR_DATE_FIELD = {yr: "CRASH_DATETIME" for yr in range(2013, 2018)}
+YEAR_DATE_FIELD.update({yr: "CRASH_DATE" for yr in range(2018, 2021)})
+
+def out_fields(year: int) -> str:
+    return f"{YEAR_DATE_FIELD[year]},{COMMON_FIELDS}"
+
 PAGE_SIZE = 2000   # server maxRecordCount
 
 # ── Massachusetts county FIPS mapping ────────────────────────────────────────
@@ -85,6 +97,8 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
     """Paginate all crash records for one year from the appropriate service."""
     svc_path, svc_type = YEAR_SERVICES[year]
     query_url = f"{BASE_URL}/{svc_path}/query"
+    fields = out_fields(year)
+    date_field = YEAR_DATE_FIELD[year]
 
     # Count
     try:
@@ -93,7 +107,7 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
         }, timeout=45)
         r.raise_for_status()
         total = r.json().get("count", 0)
-        log.info("  [%d] %d records  (%s)", year, total, svc_type)
+        log.info("  [%d] %d records  (%s, date_field=%s)", year, total, svc_type, date_field)
     except Exception as exc:
         log.warning("  [%d] count failed: %s", year, exc)
         return None
@@ -105,18 +119,22 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
     # Paginate
     parts = []
     offset = 0
+    page = {}  # initialise so the features fallback below is safe
     while offset < total:
         for attempt in range(3):
             try:
                 r = session.get(query_url, params={
                     "where":             "1=1",
-                    "outFields":         OUT_FIELDS,
+                    "outFields":         fields,
                     "resultOffset":      offset,
                     "resultRecordCount": PAGE_SIZE,
                     "f":                 "json",
                 }, timeout=60)
                 r.raise_for_status()
                 page = r.json()
+                # ArcGIS can return HTTP 200 with embedded error
+                if "error" in page:
+                    raise ValueError(f"ArcGIS error: {page['error']}")
                 break
             except Exception as exc:
                 wait = 3 * (attempt + 1)
@@ -127,9 +145,10 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
                 else:
                     log.error("  [%d] gave up at offset=%d", year, offset)
                     offset = total  # exit outer loop
+                    page = {}
                     break
 
-        features = page.get("features", []) if "page" in dir() else []
+        features = page.get("features", [])
         if not features:
             break
         rows = [f["attributes"] for f in features]
@@ -157,7 +176,9 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     df = df.copy()
 
     # ── Date ─────────────────────────────────────────────────────────────────
-    df["crash_date"] = pd.to_datetime(df["CRASH_DATE"], unit="ms", errors="coerce")
+    # 2013-2017 layers → CRASH_DATETIME; 2018-2020 layers → CRASH_DATE
+    _date_col = "CRASH_DATE" if "CRASH_DATE" in df.columns else "CRASH_DATETIME"
+    df["crash_date"] = pd.to_datetime(df[_date_col], unit="ms", errors="coerce")
     df = df.dropna(subset=["crash_date"])
     df["crash_date"] = df["crash_date"].dt.normalize()
 
