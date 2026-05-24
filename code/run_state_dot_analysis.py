@@ -436,34 +436,46 @@ OUTCOMES = [
 
 def run_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict | None:
     """
-    Two-way within-transform OLS (county FE + date FE).
-    Memory-efficient: never builds a dummy matrix.
+    Two-way within-transform OLS (county FE + date FE + day-of-week dummies).
+    Memory-efficient: never builds a county or date dummy matrix.
+    Day-of-week dummies are included explicitly as continuous controls so they
+    survive the within-transform (with full calendar-date FEs, DoW is in
+    principle absorbed, but explicit dummies handle county-specific DoW patterns
+    in sparse / unbalanced panels).
     Clustered SEs by county (fips).
     """
     sub2 = sub2.dropna(subset=[outcome_col]).copy()
     if len(sub2) < 100 or sub2["night_alert"].std() < 1e-12:
         return None
 
-    sub2 = sub2.copy()
-    sub2["_y"] = sub2[outcome_col]
+    # Build DoW dummies (Mon=0 reference; 6 dummies)
+    dow_dummies = pd.get_dummies(sub2["dow"], prefix="dow", drop_first=True).astype(float)
+    dow_cols = dow_dummies.columns.tolist()
+    sub2 = pd.concat([sub2, dow_dummies], axis=1)
+
+    # Collect all columns to demean: outcome + treatment + DoW dummies
+    all_cols = ["_y", "_x"] + dow_cols
+    sub2["_y"] = sub2[outcome_col].astype(float)
     sub2["_x"] = sub2["night_alert"].astype(float)
 
-    # Iterative within-transform (handles two-way FE without building dummy matrix)
-    sub2["_y"] -= sub2["_y"].mean()
-    sub2["_x"] -= sub2["_x"].mean()
+    # Centre everything before iterating
+    for c in all_cols:
+        sub2[c] -= sub2[c].mean()
+
+    # Iterative within-transform (county FE + date FE, applied to all columns)
     for _ in range(5):
-        sub2["_y"] = (sub2["_y"]
-                      - sub2.groupby("fips")["_y"].transform("mean")
-                      - sub2.groupby("date")["_y"].transform("mean"))
-        sub2["_x"] = (sub2["_x"]
-                      - sub2.groupby("fips")["_x"].transform("mean")
-                      - sub2.groupby("date")["_x"].transform("mean"))
+        for c in all_cols:
+            sub2[c] = (sub2[c]
+                       - sub2.groupby("fips")[c].transform("mean")
+                       - sub2.groupby("date")[c].transform("mean"))
 
     if sub2["_x"].std() < 1e-12:
         return None
 
+    # OLS on demeaned variables; keep DoW dummies as additional regressors
+    X = sm.add_constant(sub2[["_x"] + dow_cols])
     try:
-        mod = OLS(sub2["_y"], sm.add_constant(sub2["_x"])).fit(
+        mod = OLS(sub2["_y"], X).fit(
             cov_type="cluster", cov_kwds={"groups": sub2["fips"]}
         )
     except Exception as exc:
@@ -475,17 +487,22 @@ def run_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict | None:
     pv = mod.pvalues["_x"]
     n  = int(mod.nobs)
     return dict(beta=round(b, 6), se=round(se, 6), pvalue=round(pv, 4), n_obs=n,
-                method="Within-transform TWFE (county+date FE)")
+                method="Within-transform TWFE (county+date FE+DoW)")
 
 
 def run_twfe_panelols(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict | None:
-    """PanelOLS TWFE — use only when panel is small enough (< 300k rows)."""
+    """PanelOLS TWFE + explicit DoW dummies — use only when panel is ≤300k rows."""
     sub2 = sub2.dropna(subset=[outcome_col]).copy()
     if len(sub2) < 100:
         return None
+    # Add DoW dummies (Mon=0 reference)
+    dow_dummies = pd.get_dummies(sub2["dow"], prefix="dow", drop_first=True).astype(float)
+    sub2 = pd.concat([sub2, dow_dummies], axis=1)
+    dow_cols = dow_dummies.columns.tolist()
+    regressors = ["night_alert"] + dow_cols
     try:
         sub_idx = sub2.set_index(["fips", "date"])
-        mod = PanelOLS(sub_idx[outcome_col], sub_idx[["night_alert"]],
+        mod = PanelOLS(sub_idx[outcome_col], sub_idx[regressors],
                        entity_effects=True, time_effects=True, drop_absorbed=True)
         res = mod.fit(cov_type="clustered", cluster_entity=True)
         b   = res.params["night_alert"]
@@ -493,7 +510,7 @@ def run_twfe_panelols(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict 
         pv  = res.pvalues["night_alert"]
         n   = int(res.nobs)
         return dict(beta=round(b, 6), se=round(se, 6), pvalue=round(pv, 4), n_obs=n,
-                    method="PanelOLS TWFE (linearmodels)")
+                    method="PanelOLS TWFE (linearmodels+DoW)")
     except Exception as exc:
         log.warning("  [%s] PanelOLS failed (%s) — falling back to within-transform", label, exc)
         return run_twfe(sub2, outcome_col, label)
