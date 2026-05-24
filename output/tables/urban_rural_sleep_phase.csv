@@ -1,0 +1,9 @@
+phase,phase_label,beta,se,pvalue,n_treated_phase,n_obs,method,group
+ph_2223,Still awake  (22–23h),-0.100861,0.097729,0.329,192,521446,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",Urban
+ph_0001,Light sleep  (0–1h),-0.195431,0.140226,0.1969,95,521446,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",Urban
+ph_0203,Deep sleep   (2–3h),-0.097141,0.116147,0.4246,71,521446,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",Urban
+ph_0405,Late/REM     (4–5h),0.102612,0.173717,0.5693,37,521446,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",Urban
+ph_2223,Still awake  (22–23h),0.033913,0.465385,0.9435,121,500377,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",Rural
+ph_0001,Light sleep  (0–1h),-0.510658,0.247159,0.0688,66,500377,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",Rural
+ph_0203,Deep sleep   (2–3h),-0.693516,0.502254,0.2007,26,500377,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",Rural
+ph_0405,Late/REM     (4–5h),0.574263,0.483228,0.2651,5,500377,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",Rural

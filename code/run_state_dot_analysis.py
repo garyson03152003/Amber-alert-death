@@ -847,3 +847,118 @@ if phase_rows:
                  r.phase_label, r.beta, r.se, r.pvalue, stars)
 else:
     log.warning("No sleep-phase results produced.")
+
+# ── 9. Urban / Rural heterogeneity ────────────────────────────────────────────
+log.info("\n=== Urban / Rural heterogeneity ===")
+log.info("Counties split at median population within each state × year cell.")
+log.info("Urban = above-median pop; Rural = below-median pop.")
+log.info("")
+
+# Classify counties as Urban / Rural using within-state-year median population.
+# This is time-varying (a county can cross median if pop grows), but the split
+# is stable in practice.  Using within-state median avoids classifying all
+# large-state counties as urban relative to small-state counties.
+med_pop = (panel.groupby(["state", "year"])["population"]
+           .transform("median"))
+panel["urban"] = (panel["population"] >= med_pop).astype(int)  # 1=urban, 0=rural
+
+log.info("Urban/Rural county-day counts:")
+g_ur = panel.groupby("urban").agg(
+    county_days=("night_alert", "count"),
+    n_treated=("night_alert", "sum"),
+    mean_pop=("population", "mean"),
+).reset_index()
+g_ur["label"] = g_ur["urban"].map({1: "Urban (above-median pop)", 0: "Rural (below-median pop)"})
+for _, r in g_ur.iterrows():
+    log.info("  %-30s  %7d county-days  %4d treated  mean_pop=%,.0f",
+             r["label"], r["county_days"], r["n_treated"], r["mean_pop"])
+log.info("")
+
+# Show what share of population and treated obs each group carries
+total_pop_wt = panel["population"].sum()
+for grp, label in [(1, "Urban"), (0, "Rural")]:
+    sub_g = panel[panel["urban"] == grp]
+    log.info("  %s carries %.1f%% of total pop-weight, %.1f%% of treated county-days",
+             label,
+             100 * sub_g["population"].sum() / total_pop_wt,
+             100 * sub_g["night_alert"].sum() / panel["night_alert"].sum())
+log.info("")
+
+# Run main TWFE (crashes_per_100k) + sleep-phase TWFE for each group
+ur_results = []
+ur_phase_results = []
+
+for grp_val, grp_label in [(1, "Urban"), (0, "Rural")]:
+    sub_ur = panel[panel["urban"] == grp_val].copy()
+    log.info("─── %s (pop %s median) ───", grp_label,
+             "≥" if grp_val == 1 else "<")
+
+    if sub_ur["night_alert"].sum() < 5:
+        log.warning("  Fewer than 5 treated obs — skipping %s", grp_label)
+        continue
+
+    # ── Main OLS TWFE ────────────────────────────────────────────────────────
+    for outcome_col, outcome_label, _ in OUTCOMES:
+        res = run_twfe(sub_ur, outcome_col, grp_label)
+        if res:
+            res.update({"group": grp_label, "outcome": outcome_label,
+                        "n_treated": int(sub_ur["night_alert"].sum()),
+                        "model": "OLS"})
+            ur_results.append(res)
+            stars = ("***" if res["pvalue"] < 0.01 else
+                     "**"  if res["pvalue"] < 0.05 else
+                     "*"   if res["pvalue"] < 0.10 else "")
+            log.info("  OLS  %-30s  β=%+.4f  SE=%.4f  p=%.3f %-3s  N_treated=%d",
+                     outcome_label, res["beta"], res["se"],
+                     res["pvalue"], stars, res["n_treated"])
+
+    # ── Sleep-phase joint TWFE ───────────────────────────────────────────────
+    log.info("  Sleep-phase (crashes / 100k):")
+    sub2_ur = sub_ur.dropna(subset=["crashes_per_100k"]).copy()
+    phase_res_ur = run_sleep_phase_twfe(sub2_ur, "crashes_per_100k", grp_label)
+    if phase_res_ur:
+        for row in phase_res_ur:
+            row["group"] = grp_label
+            ur_phase_results.append(row)
+            stars = ("***" if row["pvalue"] < 0.01 else
+                     "**"  if row["pvalue"] < 0.05 else
+                     "*"   if row["pvalue"] < 0.10 else "")
+            log.info("    %-28s  β=%+.4f  SE=%.4f  p=%.3f %-3s  N=%d",
+                     row["phase_label"], row["beta"], row["se"],
+                     row["pvalue"], stars, row["n_treated_phase"])
+    log.info("")
+
+# ── Summary comparison table ─────────────────────────────────────────────────
+if ur_results:
+    ur_df = pd.DataFrame(ur_results)
+    log.info("=== Urban vs Rural — ALL OUTCOMES SUMMARY ===")
+    log.info("  %-10s  %-30s  %-6s  %+7s  %7s  %6s",
+             "Group", "Outcome", "Model", "β", "SE", "p")
+    log.info("  " + "-"*75)
+    for _, r in ur_df.iterrows():
+        stars = ("***" if r.pvalue < 0.01 else
+                 "**"  if r.pvalue < 0.05 else
+                 "*"   if r.pvalue < 0.10 else "")
+        log.info("  %-10s  %-30s  %-6s  %+7.4f  %7.4f  %.3f %s",
+                 r["group"], r["outcome"], r["model"],
+                 r["beta"], r["se"], r["pvalue"], stars)
+
+    ur_df.to_csv(OUTPUT_TABS / "urban_rural_main.csv", index=False)
+    log.info("\nSaved → %s", OUTPUT_TABS / "urban_rural_main.csv")
+
+if ur_phase_results:
+    ur_ph_df = pd.DataFrame(ur_phase_results)
+    log.info("\n=== Urban vs Rural — SLEEP PHASE SUMMARY ===")
+    log.info("  %-10s  %-28s  %+7s  %7s  %6s",
+             "Group", "Phase", "β", "SE", "p")
+    log.info("  " + "-"*65)
+    for _, r in ur_ph_df.iterrows():
+        stars = ("***" if r.pvalue < 0.01 else
+                 "**"  if r.pvalue < 0.05 else
+                 "*"   if r.pvalue < 0.10 else "")
+        log.info("  %-10s  %-28s  %+7.4f  %7.4f  %.3f %s",
+                 r["group"], r["phase_label"],
+                 r["beta"], r["se"], r["pvalue"], stars)
+
+    ur_ph_df.to_csv(OUTPUT_TABS / "urban_rural_sleep_phase.csv", index=False)
+    log.info("\nSaved → %s", OUTPUT_TABS / "urban_rural_sleep_phase.csv")
