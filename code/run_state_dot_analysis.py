@@ -142,6 +142,30 @@ log.info("  Reading AMBER data from: %s", AMBER_CSV.name)
 alerts = pd.read_csv(AMBER_CSV, parse_dates=["sent_utc"])
 log.info("  Raw AMBER records: %d", len(alerts))
 
+# ── msgType accounting ────────────────────────────────────────────────────────
+# The IPAWS dataset includes Alert, Cancel, and Update message types.  All three
+# fire WEA phone notifications and can disrupt sleep.  Key findings:
+#  • Alert+Cancel pairs ALWAYS occur on the same calendar day (max gap observed:
+#    median 1.9 hrs, max < 24 hrs) → no cross-day contamination.
+#  • Binary night_alert is unaffected: county-date treated=1 whether Alert or
+#    Cancel fires in the night window.
+#  • alert_scope (continuous) is unaffected: max scope same for Alert+Cancel.
+#  • n_alerts count is inflated ~2× by Cancels — only affects descriptive stats.
+# Conclusion: including all msgTypes is scientifically defensible since WEA
+# broadcasts Cancels/Updates as phone alerts.  If msg_type column is present
+# (added by 02d_classify_alert_msgtypes.py), we log the breakdown.
+if "msg_type" in alerts.columns:
+    mt = alerts.groupby("msg_type")["alert_id"].nunique()
+    log.info("  msgType breakdown (unique alert_ids):\n%s", mt.to_string())
+    n_alert_only = (alerts["msg_type"] == "Alert")["alert_id"].nunique() if False else \
+                   alerts.loc[alerts["msg_type"] == "Alert", "alert_id"].nunique()
+    log.info("  Alert-only: %d of %d unique IDs (%.1f%%)",
+             n_alert_only, alerts["alert_id"].nunique(),
+             100 * n_alert_only / alerts["alert_id"].nunique())
+else:
+    log.info("  msg_type column not present — run 02d_classify_alert_msgtypes.py to add it")
+    log.info("  ~46%% of alert_ids are Cancel messages (all fire WEA; see documentation)")
+
 # Convert UTC → local time with proper DST handling (via pytz)
 # ─────────────────────────────────────────────────────────────────────────────
 # Primary timezone per state FIPS (2-digit).  America/Indiana/Indianapolis
@@ -318,55 +342,76 @@ log.info("  Early-night (22–23h): %d   Late-night (0–5h): %d",
          (alerts["is_night"] & (alerts["hour_local"] >= 22)).sum(),
          (alerts["is_night"] & (alerts["hour_local"] < 6)).sum())
 
-# ── Expand state-level FIPS alerts to all crash-panel counties in that state ──
-# Some alerts carry a state-level FIPS (e.g. 25000 = all of MA).  These should
-# be broadcast to every county in the crash panel for that state.
-alerts["fips"] = alerts["fips"].astype(str).str.zfill(5)
-alerts["state_fips2"] = alerts["fips"].str[:2]  # 2-digit state prefix
+# ── Classify alerts and keep only those with verified county-level FIPS ───────
+# State-level FIPS (e.g. 48000 = all of TX) have unknown true geographic scope:
+# they may represent 1 county, several nearby counties, or the whole state —
+# we cannot determine this from the FIPS code alone (no polygon data in IPAWS).
+# To avoid mis-assigning treatment, we use ONLY alerts with explicit county FIPS
+# (Type C: every row is a county FIPS; Type B county rows: already have county FIPS).
+# Type A (all rows are state-FIPS) are excluded from the main treatment variable
+# and reported separately as a sensitivity check.
+alerts["fips"]          = alerts["fips"].astype(str).str.zfill(5)
+alerts["state_fips2"]   = alerts["fips"].str[:2]
 alerts["is_state_fips"] = alerts["fips"].str[2:] == "000"
 
-# Build mapping: state_fips2 → list of county FIPS present in crash panel
-state_to_counties: dict[str, list[str]] = {}
-for sfips in crashes_all["fips"].str[:2].unique():
-    counties = crashes_all.loc[crashes_all["fips"].str[:2] == sfips, "fips"].unique().tolist()
-    state_to_counties[sfips] = [c.zfill(5) for c in counties]
+# Per alert_id: classify as A / B / C
+def _alert_type(g):
+    s = g["is_state_fips"].any(); c = (~g["is_state_fips"]).any()
+    return "A" if (s and not c) else ("B" if (s and c) else "C")
 
-state_level_rows = alerts[alerts["is_state_fips"]].copy()
-county_level_rows = alerts[~alerts["is_state_fips"]].copy()
+_atype = alerts.groupby("alert_id").apply(_alert_type).rename("alert_type")
+alerts  = alerts.join(_atype, on="alert_id")
 
-n_state_fips = len(state_level_rows)
-if n_state_fips > 0:
-    expanded_parts = []
-    for _, row in state_level_rows.iterrows():
-        counties = state_to_counties.get(row["state_fips2"], [])
-        if not counties:
-            continue
-        for county_fips in counties:
-            new_row = row.copy()
-            new_row["fips"] = county_fips
-            expanded_parts.append(new_row)
-    if expanded_parts:
-        expanded = pd.DataFrame(expanded_parts)
-        alerts = pd.concat([county_level_rows, expanded], ignore_index=True)
-        log.info("  Expanded %d state-level FIPS alerts → %d county-alert rows "
-                 "(%d unique counties affected)",
-                 n_state_fips, len(expanded),
-                 expanded["fips"].nunique())
-    else:
-        alerts = county_level_rows.copy()
+n_A = alerts.loc[alerts["alert_type"]=="A","alert_id"].nunique()
+n_B = alerts.loc[alerts["alert_type"]=="B","alert_id"].nunique()
+n_C = alerts.loc[alerts["alert_type"]=="C","alert_id"].nunique()
+log.info("  Alert types: A(state-FIPS only)=%d  B(mixed)=%d  C(county-FIPS)=%d",
+         n_A, n_B, n_C)
+log.info("  Using Type C + Type B county rows for treatment (Type A excluded from main spec)")
 
-log.info("  Alerts after state-FIPS expansion: %d rows", len(alerts))
+# Keep only county-level FIPS rows (drops state-level rows from Type B and all Type A)
+alerts_county = alerts[~alerts["is_state_fips"]].copy()
 
-# Collapse to county-crash_date: 1 if any night alert targets that county-day
+# ── Compute alert broadcast scope (% state pop covered) for Type C/B alerts ──
+# scope = covered_pop / state_pop.
+#   0.03 = narrow single-county alert in large state
+#   1.00 = all counties in state (or IA/MA which only issue statewide)
+# This is a CONTINUOUS treatment intensity that replaces the binary indicator.
+# We do NOT impute scope for Type A — they stay excluded.
+pop_ref = pd.read_parquet(DATA_PROC / "county_population.parquet")
+pop_ref = pop_ref[pop_ref["year"] == 2019][["fips", "population"]].copy()
+pop_ref["fips"] = pop_ref["fips"].astype(str).str.zfill(5)
+pop_ref = pop_ref.set_index("fips")
+state_pop_total = (pop_ref.assign(sf=pop_ref.index.str[:2])
+                          .groupby("sf")["population"].sum())
+
+log.info("Computing alert broadcast scope from county FIPS …")
+scope_map: dict[str, float] = {}
+for alert_id, grp in alerts_county.groupby("alert_id"):
+    sfips  = grp["state_fips2"].iloc[0]
+    fips_l = grp["fips"].tolist()
+    cov    = sum(pop_ref.loc[f,"population"] for f in fips_l if f in pop_ref.index)
+    st_pop = state_pop_total.get(sfips, np.nan)
+    scope_map[alert_id] = cov / st_pop if (st_pop and st_pop > 0) else np.nan
+
+alerts_county["alert_scope"] = alerts_county["alert_id"].map(scope_map)
+log.info("  Scope computed: median=%.3f  mean=%.3f  (N=%d alerts)",
+         pd.Series(scope_map).median(), pd.Series(scope_map).mean(), len(scope_map))
+
+# ── Collapse to county × effective_crash_date ─────────────────────────────────
+# night_alert = binary 0/1
+# alert_scope = max scope among all alerts hitting this county-night
+#               (continuous; 0 = untreated, >0 = treated with this intensity)
 night_alerts = (
-    alerts[alerts.is_night]
+    alerts_county[alerts_county["is_night"]]
     .groupby(["fips", "effective_crash_date"])
-    .size()
-    .reset_index(name="n_alerts")
+    .agg(n_alerts   =("alert_id",     "nunique"),
+         alert_scope=("alert_scope",  "max"))
+    .reset_index()
 )
-night_alerts["fips"] = night_alerts["fips"].astype(str).str.zfill(5)
+night_alerts["fips"]        = night_alerts["fips"].astype(str).str.zfill(5)
 night_alerts["night_alert"] = 1
-log.info("  County-crash_dates with ≥1 night AMBER alert: %d", len(night_alerts))
+log.info("  County-crash_dates with ≥1 verified-county night alert: %d", len(night_alerts))
 
 # ── Sleep-phase indicators ─────────────────────────────────────────────────────
 # Four mutually-exclusive bins keyed on alert's local hour.

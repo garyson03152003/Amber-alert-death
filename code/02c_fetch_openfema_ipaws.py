@@ -8,15 +8,26 @@ Strategy
   selects CAP messages with EAS event code "CAE" (Child Abduction Emergency).
 * Paginate month-by-month with $top=1000 to keep $skip values small and
   avoid server-side read timeouts that occur at skip ≥ 1000 on wide filters.
-* Extract sent timestamp (UTC) and county SAME codes from each record.
+* Extract sent timestamp (UTC), msgType, and county SAME codes from each record.
 * SAME codes are 6 digits (PSSCCC): P=0, SS=2-digit state FIPS, CCC=county.
   Strip leading zero to get 5-digit county FIPS.
 * Deduplicate on alert id + fips pair.
 
+msgType note
+------------
+Each child abduction event generates three CAP message types:
+  Alert  — new abduction notification (fires WEA to phones)
+  Update — revised information (fires WEA to phones)
+  Cancel — case resolved notification (fires WEA to phones)
+All three types broadcast via WEA and can disrupt sleep.  The `msg_type`
+column is preserved so researchers can filter to Alert-only or include all.
+The CAP <references> field in Cancel/Update records links back to the
+original Alert's identifier for matching.
+
 Output
 ------
-data/raw/amber/foia/openfema_ipaws_alerts_2013_2022.csv
-  Columns: alert_id, sent_utc, fips, state_fips
+data/raw/amber/foia/openfema_ipaws_alerts_2013_2024.csv
+  Columns: alert_id, sent_utc, fips, state_fips, msg_type
 
 Run
 ---
@@ -49,6 +60,10 @@ SAME_RE = re.compile(
     r"<valueName>SAME</valueName>\s*<value>(\d{6})</value>",
     re.IGNORECASE,
 )
+MSGTYPE_RE = re.compile(
+    r"<msgType>\s*(Alert|Update|Cancel)\s*</msgType>",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -77,8 +92,12 @@ def _get(session: requests.Session, params: dict, timeout: int = 40) -> dict:
 
 def _parse_record(rec: dict) -> list[dict]:
     """
-    Return a list of (alert_id, sent_utc, fips) rows — one per county in
-    the SAME geocode list.  Returns [] if no SAME codes found.
+    Return a list of (alert_id, sent_utc, fips, state_fips, msg_type) rows —
+    one per county in the SAME geocode list.  Returns [] if no SAME codes found.
+
+    msg_type is one of: 'Alert', 'Update', 'Cancel' (or '' if unknown).
+    All three fire WEA phone notifications and can disrupt sleep.
+    Use msg_type to filter to Alert-only for sensitivity analysis.
     """
     alert_id = rec.get("id") or rec.get("identifier", "")
     sent_raw = rec.get("sent", "")
@@ -91,6 +110,12 @@ def _parse_record(rec: dict) -> list[dict]:
 
     # Extract SAME codes from raw CAP XML in originalMessage
     orig = rec.get("originalMessage", "") or ""
+
+    # Extract msgType from CAP XML (Alert / Update / Cancel)
+    mt_match = MSGTYPE_RE.search(orig)
+    msg_type = mt_match.group(1).capitalize() if mt_match else (
+        rec.get("msgType", "")  # fallback to structured field if present
+    )
 
     # Also try the structured info array if present
     same_codes: set[str] = set(SAME_RE.findall(orig))
@@ -117,6 +142,7 @@ def _parse_record(rec: dict) -> list[dict]:
             "sent_utc":   sent_utc,
             "fips":       fips,
             "state_fips": state_fips,
+            "msg_type":   msg_type,
         })
     return rows
 
@@ -149,7 +175,7 @@ def fetch_month(year: int, month: int, session: requests.Session) -> pd.DataFram
             "$top":    TOP,
             "$skip":   skip,
             "$filter": combined,
-            "$select": "id,sent,originalMessage,info",
+            "$select": "id,sent,msgType,originalMessage,info",
             "$orderby": "sent asc",
         }
         try:
@@ -173,7 +199,7 @@ def fetch_month(year: int, month: int, session: requests.Session) -> pd.DataFram
 
     if all_rows:
         return pd.DataFrame(all_rows)
-    return pd.DataFrame(columns=["alert_id", "sent_utc", "fips", "state_fips"])
+    return pd.DataFrame(columns=["alert_id", "sent_utc", "fips", "state_fips", "msg_type"])
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +284,15 @@ def main() -> None:
     n_fips   = combined["fips"].nunique()
     log.info("Saved %s — %d records, %d unique alerts, %d counties",
              out_path, len(combined), n_alerts, n_fips)
+
+    # Report msgType breakdown if column is present
+    if "msg_type" in combined.columns:
+        mt_counts = combined.groupby("msg_type")["alert_id"].nunique()
+        log.info("Alert msgType breakdown (unique alert_ids):\n%s", mt_counts.to_string())
+        alert_pct = mt_counts.get("Alert", 0) / n_alerts * 100
+        log.info("  %.1f%% are new Alert messages; %.1f%% are Cancel/Update",
+                 alert_pct, 100 - alert_pct)
+
     log.info("Year breakdown:\n%s",
              combined.assign(year=pd.to_datetime(combined["sent_utc"], utc=True).dt.year)
                      .groupby("year")["alert_id"].nunique().to_string())
