@@ -318,6 +318,45 @@ log.info("  Early-night (22–23h): %d   Late-night (0–5h): %d",
          (alerts["is_night"] & (alerts["hour_local"] >= 22)).sum(),
          (alerts["is_night"] & (alerts["hour_local"] < 6)).sum())
 
+# ── Expand state-level FIPS alerts to all crash-panel counties in that state ──
+# Some alerts carry a state-level FIPS (e.g. 25000 = all of MA).  These should
+# be broadcast to every county in the crash panel for that state.
+alerts["fips"] = alerts["fips"].astype(str).str.zfill(5)
+alerts["state_fips2"] = alerts["fips"].str[:2]  # 2-digit state prefix
+alerts["is_state_fips"] = alerts["fips"].str[2:] == "000"
+
+# Build mapping: state_fips2 → list of county FIPS present in crash panel
+state_to_counties: dict[str, list[str]] = {}
+for sfips in crashes_all["fips"].str[:2].unique():
+    counties = crashes_all.loc[crashes_all["fips"].str[:2] == sfips, "fips"].unique().tolist()
+    state_to_counties[sfips] = [c.zfill(5) for c in counties]
+
+state_level_rows = alerts[alerts["is_state_fips"]].copy()
+county_level_rows = alerts[~alerts["is_state_fips"]].copy()
+
+n_state_fips = len(state_level_rows)
+if n_state_fips > 0:
+    expanded_parts = []
+    for _, row in state_level_rows.iterrows():
+        counties = state_to_counties.get(row["state_fips2"], [])
+        if not counties:
+            continue
+        for county_fips in counties:
+            new_row = row.copy()
+            new_row["fips"] = county_fips
+            expanded_parts.append(new_row)
+    if expanded_parts:
+        expanded = pd.DataFrame(expanded_parts)
+        alerts = pd.concat([county_level_rows, expanded], ignore_index=True)
+        log.info("  Expanded %d state-level FIPS alerts → %d county-alert rows "
+                 "(%d unique counties affected)",
+                 n_state_fips, len(expanded),
+                 expanded["fips"].nunique())
+    else:
+        alerts = county_level_rows.copy()
+
+log.info("  Alerts after state-FIPS expansion: %d rows", len(alerts))
+
 # Collapse to county-crash_date: 1 if any night alert targets that county-day
 night_alerts = (
     alerts[alerts.is_night]
