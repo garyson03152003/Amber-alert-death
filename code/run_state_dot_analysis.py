@@ -478,6 +478,15 @@ panel = panel.sort_values(["state", "fips", "date"])
 panel["dow"]   = panel["date"].dt.dayofweek   # 0=Mon
 panel["month"] = panel["date"].dt.month
 
+# State × year-month FE — weather and holiday proxy
+# Controls for seasonal weather patterns within each state-year:
+#   e.g. "unusually wet July 2018 in California" vs the national average captured
+#   by the date FE.  This is the standard econometric substitute for actual daily
+#   weather data when county-grid weather is unavailable.
+#   Identification: variation in whether a given county got a night alert,
+#   conditional on state-level seasonal patterns.
+panel["state_yearmon"] = panel["state"] + "_" + panel["date"].dt.to_period("M").astype(str)
+
 # Merge: match alert's effective_crash_date to the panel's crash date
 night_alerts["fips"] = night_alerts["fips"].astype(str).str.zfill(5)
 panel = panel.merge(
@@ -600,11 +609,13 @@ def run_twfe(sub2: pd.DataFrame, outcome_col: str, label: str) -> dict | None:
         return None
 
     if HAS_PYFIXEST:
-        sub2["_fips_str"] = sub2["fips"].astype(str)
-        sub2["_date_str"] = sub2["date"].astype(str)
-        sub2["_year_str"] = sub2["year"].astype(str)
-        sub2["_pop"]      = sub2["population"].astype(float)
-        # No C(dow_str): date FEs absorb DoW perfectly
+        sub2["_fips_str"]  = sub2["fips"].astype(str)
+        sub2["_date_str"]  = sub2["date"].astype(str)
+        sub2["_year_str"]  = sub2["year"].astype(str)
+        sub2["_pop"]       = sub2["population"].astype(float)
+        sub2["_stym_str"]  = sub2["state_yearmon"].astype(str)  # state×year-month FE
+        # Baseline: county + date FEs
+        # Robustness: county + date + state×year-month FEs (weather/holiday proxy)
         formula = f"{outcome_col} ~ night_alert | _fips_str + _date_str"
         for vcov_spec, method_tag in [
             ({"CRV1": "_fips_str + _year_str"}, "2-way SE: county×year"),
@@ -1255,9 +1266,158 @@ if not results.empty:
                  r["outcome"], r["model"],
                  r["beta"], r["se"], r["pvalue"], stars, irr_str)
 
+
+# ── E. Weather + Holiday robustness (state × year-month FE) ──────────────────
+log.info("\n─── E. Weather & holiday controls (state × year-month FE) ───")
+log.info("  Holidays: date FEs already absorb ALL holiday effects (each specific date,")
+log.info("  e.g. 2018-12-25, gets its own coefficient).")
+log.info("  Weather: adding state×year-month FE absorbs seasonal weather within state")
+log.info("  (standard econometric proxy when county-grid weather data unavailable).")
+log.info("  If results are stable → weather/holidays are not driving the findings.\n")
+
+weather_rows = []
+if HAS_PYFIXEST:
+    sub_w = panel.dropna(subset=["fatals_per_100k", "population"]).copy()
+    sub_w["_fips_str"] = sub_w["fips"].astype(str)
+    sub_w["_date_str"] = sub_w["date"].astype(str)
+    sub_w["_year_str"] = sub_w["year"].astype(str)
+    sub_w["_pop"]      = sub_w["population"].astype(float)
+    sub_w["_stym_str"] = sub_w["state_yearmon"].astype(str)
+
+    specs = [
+        ("County + Date FE (baseline)",
+         "fatals_per_100k ~ night_alert | _fips_str + _date_str"),
+        ("County + Date + State×YearMon FE",
+         "fatals_per_100k ~ night_alert | _fips_str + _date_str + _stym_str"),
+    ]
+    for spec_label, formula in specs:
+        for vcov_spec, mtag in [
+            ({"CRV1": "_fips_str + _year_str"}, "2-way SE"),
+            ({"CRV1": "_fips_str"}, "county SE"),
+        ]:
+            try:
+                fit = pf.feols(formula, data=sub_w, weights="_pop", vcov=vcov_spec)
+                vals = _pyfixest_coef(fit, "night_alert")
+                if vals and not np.isnan(vals[1]):
+                    b, se, pv, n = vals
+                    stars = ("***" if pv < 0.01 else "**" if pv < 0.05
+                             else "*" if pv < 0.10 else "")
+                    log.info("  %-42s  β=%+.4f  SE=%.4f  p=%.3f %s",
+                             spec_label, b, se, pv, stars)
+                    weather_rows.append(dict(spec=spec_label, beta=round(b,6),
+                                            se=round(se,6), pvalue=round(pv,4)))
+                    break
+            except Exception as exc:
+                log.debug("  weather FE [%s] failed: %s", mtag, exc)
+                continue
+
+if weather_rows:
+    pd.DataFrame(weather_rows).to_csv(OUTPUT_TABS / "weather_holiday_robustness.csv", index=False)
+    log.info("  Saved → output/tables/weather_holiday_robustness.csv")
+
 log.info("\n─── Interpretation guide ───")
 log.info("  If t=0 significant, t±1 and t±2 NS  → consistent with causal effect")
 log.info("  If hour-bin FE kills the result       → traffic-volume confound")
 log.info("  If hour-bin FE doesn't kill result    → not a traffic-timing artefact")
 log.info("  If only fatalities ↓, not all-crashes → consistent with law-enforcement")
 log.info("    confound (DUI/speeding enforcement), NOT sleep-disruption mechanism")
+
+
+# ── D. Late-night only (0–5am): sleep-disruption sensitivity check ────────────
+log.info("\n─── D. Late-night only (0–5am) vs. full night (22h–5am) ───")
+log.info("  Sleep disruption requires people to be asleep.")
+log.info("  22–23h alerts: most recipients still awake → minimal sleep disruption.")
+log.info("  0–5am alerts:  recipients in deep/REM sleep → maximum disruption.")
+log.info("  If mechanism is sleep disruption: 0–5am-only effect should be STRONGER.")
+log.info("  If mechanism is law enforcement:  both windows show similar effects.\n")
+
+# Build a late-night-only treatment variable (0–5am local time only)
+late_night_alerts = (
+    alerts[alerts["is_night"] & (alerts["hour_local"] < 6)]
+    .groupby(["fips", "effective_crash_date"])
+    .agg(n_alerts_late=("alert_id", "nunique"))
+    .reset_index()
+)
+late_night_alerts["fips"] = late_night_alerts["fips"].astype(str).str.zfill(5)
+late_night_alerts["late_night_alert"] = 1
+
+panel_ln = panel.copy()
+panel_ln = panel_ln.merge(
+    late_night_alerts[["fips", "effective_crash_date", "late_night_alert"]],
+    left_on=["fips", "date"],
+    right_on=["fips", "effective_crash_date"],
+    how="left"
+)
+panel_ln["late_night_alert"] = panel_ln["late_night_alert"].fillna(0).astype(int)
+
+n_late = panel_ln["late_night_alert"].sum()
+log.info("  Late-night (0–5am) treated county-days: %d  (full-night: %d)",
+         n_late, panel["night_alert"].sum())
+
+latenight_rows = []
+if HAS_PYFIXEST and n_late >= 10:
+    for outcome_col, outcome_label, _ in OUTCOMES:
+        sub_ln = panel_ln.dropna(subset=[outcome_col, "population"]).copy()
+        sub_ln["_fips_str"] = sub_ln["fips"].astype(str)
+        sub_ln["_date_str"] = sub_ln["date"].astype(str)
+        sub_ln["_year_str"] = sub_ln["year"].astype(str)
+        sub_ln["_pop"]      = sub_ln["population"].astype(float)
+
+        # Swap treatment to late_night_alert
+        sub_ln["night_alert_orig"] = sub_ln["night_alert"]
+        sub_ln["night_alert"]      = sub_ln["late_night_alert"]
+
+        formula = f"{outcome_col} ~ night_alert | _fips_str + _date_str"
+        res_ln = None
+        for vcov_spec, mtag in [
+            ({"CRV1": "_fips_str + _year_str"}, "2-way SE"),
+            ({"CRV1": "_fips_str"}, "county SE"),
+        ]:
+            try:
+                fit = pf.feols(formula, data=sub_ln, weights="_pop", vcov=vcov_spec)
+                vals = _pyfixest_coef(fit, "night_alert")
+                if vals and not np.isnan(vals[1]):
+                    b, se, pv, n = vals
+                    res_ln = dict(spec="Late-night (0–5am)", outcome=outcome_label,
+                                  beta=round(b,6), se=round(se,6), pvalue=round(pv,4),
+                                  n_treated=int(n_late), se_method=mtag)
+                    break
+            except Exception:
+                continue
+
+        # Also get the full-night result for direct comparison
+        sub_full = panel.dropna(subset=[outcome_col, "population"]).copy()
+        sub_full["_fips_str"] = sub_full["fips"].astype(str)
+        sub_full["_date_str"] = sub_full["date"].astype(str)
+        sub_full["_year_str"] = sub_full["year"].astype(str)
+        sub_full["_pop"]      = sub_full["population"].astype(float)
+        formula_f = f"{outcome_col} ~ night_alert | _fips_str + _date_str"
+        res_full = None
+        for vcov_spec, mtag in [
+            ({"CRV1": "_fips_str + _year_str"}, "2-way SE"),
+            ({"CRV1": "_fips_str"}, "county SE"),
+        ]:
+            try:
+                fit = pf.feols(formula_f, data=sub_full, weights="_pop", vcov=vcov_spec)
+                vals = _pyfixest_coef(fit, "night_alert")
+                if vals and not np.isnan(vals[1]):
+                    b, se, pv, n = vals
+                    res_full = dict(spec="Full night (22h–5am)", outcome=outcome_label,
+                                   beta=round(b,6), se=round(se,6), pvalue=round(pv,4),
+                                   n_treated=int(panel["night_alert"].sum()), se_method=mtag)
+                    break
+            except Exception:
+                continue
+
+        for res, lbl in [(res_full, "Full  22h–5am"), (res_ln, "Late  00h–5am")]:
+            if res:
+                stars = ("***" if res["pvalue"] < 0.01 else "**" if res["pvalue"] < 0.05
+                         else "*" if res["pvalue"] < 0.10 else "")
+                log.info("  %-18s  %-28s  β=%+.4f  SE=%.4f  p=%.3f %-3s  N=%d",
+                         lbl, outcome_label,
+                         res["beta"], res["se"], res["pvalue"], stars, res["n_treated"])
+                latenight_rows.append(res)
+
+if latenight_rows:
+    pd.DataFrame(latenight_rows).to_csv(OUTPUT_TABS / "latenight_sensitivity.csv", index=False)
+    log.info("  Saved → output/tables/latenight_sensitivity.csv")
