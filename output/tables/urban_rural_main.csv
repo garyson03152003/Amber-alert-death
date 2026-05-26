@@ -1,7 +1,7 @@
 beta,se,pvalue,n_obs,method,group,outcome,n_treated,model
--0.110564,0.067357,0.1351,521446,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Urban,All crashes / 100k,1093,OLS
--0.001943,0.001691,0.2801,521446,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Urban,Fatalities / 100k,1093,OLS
-0.041209,0.045331,0.387,521446,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Urban,Serious inj / 100k,1093,OLS
--0.022209,0.23245,0.926,500377,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Rural,All crashes / 100k,895,OLS
-0.005288,0.014678,0.727,500377,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Rural,Fatalities / 100k,895,OLS
-0.098674,0.05038,0.0818,500377,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Rural,Serious inj / 100k,895,OLS
+-0.09994,0.104604,0.3643,521446,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Urban,All crashes / 100k,248,OLS
+-0.00539,0.000757,0.0001,521446,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Urban,Fatalities / 100k,248,OLS
+-0.016333,0.055685,0.7759,521446,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Urban,Serious inj / 100k,248,OLS
+-0.163406,0.376884,0.6748,500377,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Rural,All crashes / 100k,135,OLS
+0.005656,0.037593,0.8837,500377,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Rural,Fatalities / 100k,135,OLS
+-0.127721,0.101078,0.2381,500377,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",Rural,Serious inj / 100k,135,OLS

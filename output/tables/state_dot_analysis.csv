@@ -1,50 +1,40 @@
 beta,se,pvalue,n_obs,method,state,outcome,n_treated,model,irr,pct_change
--0.105405,0.067512,0.1529,1021823,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,All crashes / 100k,1988,OLS,,
--0.015061,0.022813,0.5091,1021823,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,All crashes / 100k,1988,Poisson,0.985052,-1.495
--0.00131,0.001852,0.4972,1021823,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,Fatalities / 100k,1988,OLS,,
--0.057973,0.047751,0.2247,50119,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,Fatalities / 100k,1988,Poisson,0.943676,-5.632
-0.040314,0.04491,0.3927,1021823,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,Serious inj / 100k,1988,OLS,,
-3.3e-05,0.025139,0.999,251976,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,Serious inj / 100k,1988,Poisson,1.000033,0.003
-0.011778,0.066479,0.8652,128459,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,All crashes / 100k,126,OLS,,
--0.002388,0.018289,0.8961,128459,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,All crashes / 100k,126,Poisson,0.997615,-0.238
--0.00282,0.003316,0.4277,128459,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,Fatalities / 100k,126,OLS,,
--0.069853,0.095481,0.4644,19815,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,Fatalities / 100k,126,Poisson,0.932531,-6.747
--0.022557,0.059315,0.7168,128459,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,Serious inj / 100k,126,OLS,,
--0.016317,0.028527,0.5673,107953,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,Serious inj / 100k,126,Poisson,0.983815,-1.618
-0.351986,0.468622,0.5309,44757,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",FL,All crashes / 100k,73,OLS,,
--0.005563,0.094815,0.9532,44757,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",FL,All crashes / 100k,73,Poisson,0.994453,-0.555
--0.005709,0.002294,0.1306,44757,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",FL,Fatalities / 100k,73,OLS,,
--0.012547,0.032325,0.7353,44757,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",FL,Serious inj / 100k,73,OLS,,
--6.621275,16.392769,0.6863,142190,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",IA,All crashes / 100k,374,OLS,,
-0.223478,0.416571,0.5916,142190,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",IA,Fatalities / 100k,374,OLS,,
-0.997393,1.274679,0.4339,142190,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",IA,Serious inj / 100k,374,OLS,,
--0.97113,0.559252,0.1332,178138,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,All crashes / 100k,189,OLS,,
--0.162211,0.077236,0.0357,178138,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,All crashes / 100k,189,Poisson,0.850262,-14.974
--0.031478,0.034911,0.402,178138,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,Fatalities / 100k,189,OLS,,
--0.50893,0.087187,0.0,5891,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,Fatalities / 100k,189,Poisson,0.601138,-39.886
-0.02837,0.047742,0.5741,178138,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,Serious inj / 100k,189,OLS,,
-0.065711,0.141431,0.6422,31392,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,Serious inj / 100k,189,Poisson,1.067918,6.792
-48799928.171523,53034140.183631,0.3575,37318,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",MA,All crashes / 100k,66,OLS,,
-1032892.181302,1430118.768375,0.4701,37318,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",MA,Fatalities / 100k,66,OLS,,
-9969723.903515,16276690.25784,0.5402,37318,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",MA,Serious inj / 100k,66,OLS,,
--0.272453,0.798341,0.7373,22303,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",NV,All crashes / 100k,50,OLS,,
--0.022167,0.11172,0.8427,22303,"Poisson PPML (pyfixest, pop-wt, county+date FE, SE: county)",NV,All crashes / 100k,50,Poisson,0.978077,-2.192
-0.31024,0.392137,0.4404,22303,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",NV,Fatalities / 100k,50,OLS,,
--0.852447,0.091755,0.0,22303,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",NV,Serious inj / 100k,50,OLS,,
-0.756906,0.33545,0.0276,43492,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",NY,All crashes / 100k,37,OLS,,
-0.132904,0.059472,0.0254,43492,"Poisson PPML (pyfixest, pop-wt, county+date FE, SE: county)",NY,All crashes / 100k,37,Poisson,1.142141,14.214
--0.005099,0.004749,0.2873,43492,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",NY,Fatalities / 100k,37,OLS,,
-0.0,0.0,,43492,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",NY,Serious inj / 100k,37,OLS,,
--3.329989,0.552733,0.0,34636,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",OR,All crashes / 100k,24,OLS,,
--0.766245,0.152602,0.0,34636,"Poisson PPML (pyfixest, pop-wt, county+date FE, SE: county)",OR,All crashes / 100k,24,Poisson,0.464755,-53.525
--0.233085,0.006956,0.0001,34636,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",OR,Fatalities / 100k,24,OLS,,
--0.407895,0.004924,0.0,34636,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",OR,Serious inj / 100k,24,OLS,,
--6.26298,10.583663,0.554,182006,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",VA,All crashes / 100k,478,OLS,,
-0.238233,0.171687,0.1653,182006,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",VA,Fatalities / 100k,478,OLS,,
-1.980766,1.193423,0.097,182006,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",VA,Serious inj / 100k,478,OLS,,
-0.156722,0.181183,0.4095,208524,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",WI,All crashes / 100k,571,OLS,,
-0.029712,0.033999,0.3822,208524,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",WI,All crashes / 100k,571,Poisson,1.030158,3.016
-0.0522,0.062403,0.4057,208524,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",WI,Fatalities / 100k,571,OLS,,
--0.041484,0.037711,0.2713,3813,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",WI,Fatalities / 100k,571,Poisson,0.959365,-4.064
-0.143983,0.00798,0.0,208524,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",WI,Serious inj / 100k,571,OLS,,
-0.127961,0.040143,0.0014,23282,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",WI,Serious inj / 100k,571,Poisson,1.136509,13.651
+-0.109216,0.107412,0.3358,1021823,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,All crashes / 100k,383,OLS,,
+-0.028904,0.033744,0.3917,1021823,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,All crashes / 100k,383,Poisson,0.971509,-2.849
+-0.004361,0.001525,0.0188,1021823,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,Fatalities / 100k,383,OLS,,
+-0.162969,0.046969,0.0005,50119,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,Fatalities / 100k,383,Poisson,0.849617,-15.038
+-0.023925,0.05621,0.6804,1021823,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,Serious inj / 100k,383,OLS,,
+-0.025109,0.026219,0.3382,251976,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",ALL,Serious inj / 100k,383,Poisson,0.975204,-2.48
+0.014141,0.095095,0.8867,128459,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,All crashes / 100k,86,OLS,,
+-0.001137,0.027832,0.9674,128459,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,All crashes / 100k,86,Poisson,0.998864,-0.114
+-0.003662,0.00416,0.4125,128459,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,Fatalities / 100k,86,OLS,,
+-0.241665,0.082224,0.0033,19815,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,Fatalities / 100k,86,Poisson,0.78532,-21.468
+-0.04196,0.061024,0.5174,128459,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,Serious inj / 100k,86,OLS,,
+-0.026125,0.029466,0.3753,107953,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",CA,Serious inj / 100k,86,Poisson,0.974213,-2.579
+0.351986,0.468619,0.5309,44757,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",FL,All crashes / 100k,16,OLS,,
+-0.005563,0.094814,0.9532,44757,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",FL,All crashes / 100k,16,Poisson,0.994453,-0.555
+-0.005709,0.002294,0.1306,44757,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",FL,Fatalities / 100k,16,OLS,,
+-0.012547,0.032325,0.7353,44757,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",FL,Serious inj / 100k,16,OLS,,
+-61.561659,43.567824,0.1577,142190,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",IA,All crashes / 100k,44,OLS,,
+0.212812,1.077698,0.8435,142190,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",IA,Fatalities / 100k,44,OLS,,
+1.938375,2.987195,0.5164,142190,"Within-transform TWFE (county+date FE+DoW, unweighted fallback)",IA,Serious inj / 100k,44,OLS,,
+-0.554274,0.880567,0.5523,178138,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,All crashes / 100k,116,OLS,,
+-0.099423,0.125533,0.4284,178138,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,All crashes / 100k,116,Poisson,0.905359,-9.464
+-0.028824,0.051307,0.5946,178138,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,Fatalities / 100k,116,OLS,,
+-0.40905,0.056283,0.0,5891,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,Fatalities / 100k,116,Poisson,0.664281,-33.572
+-0.018203,0.065042,0.789,178138,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,Serious inj / 100k,116,OLS,,
+-0.001903,0.065217,0.9767,31392,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",IL,Serious inj / 100k,116,Poisson,0.998099,-0.19
+-0.272453,0.798341,0.7373,22303,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",NV,All crashes / 100k,14,OLS,,
+-0.022167,0.11172,0.8427,22303,"Poisson PPML (pyfixest, pop-wt, county+date FE, SE: county)",NV,All crashes / 100k,14,Poisson,0.978077,-2.192
+0.31024,0.392137,0.4404,22303,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",NV,Fatalities / 100k,14,OLS,,
+-0.852447,0.091755,0.0,22303,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",NV,Serious inj / 100k,14,OLS,,
+1.250603,0.713818,0.0848,43492,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",NY,All crashes / 100k,28,OLS,,
+0.185457,0.101344,0.0673,43492,"Poisson PPML (pyfixest, pop-wt, county+date FE, SE: county)",NY,All crashes / 100k,28,Poisson,1.203769,20.377
+-0.015197,0.001023,0.0428,43492,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",NY,Fatalities / 100k,28,OLS,,
+0.0,0.0,,43492,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",NY,Serious inj / 100k,28,OLS,,
+0.911569,0.261961,0.0069,208524,"WLS TWFE (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",WI,All crashes / 100k,78,OLS,,
+0.158241,0.039571,0.0001,208524,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",WI,All crashes / 100k,78,Poisson,1.171448,17.145
+-0.002462,0.033374,0.9414,208524,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",WI,Fatalities / 100k,78,OLS,,
+-0.041484,0.037712,0.2713,3813,"Poisson PPML (pyfixest, pop-wt, county+date FE, 2-way SE: county×year)",WI,Fatalities / 100k,78,Poisson,0.959365,-4.064
+0.131418,0.164423,0.4268,208524,"WLS TWFE (pyfixest, pop-wt, county+date FE, SE: county)",WI,Serious inj / 100k,78,OLS,,
+0.514126,0.291288,0.0776,23282,"Poisson PPML (pyfixest, pop-wt, county+date FE, SE: county)",WI,Serious inj / 100k,78,Poisson,1.672176,67.218

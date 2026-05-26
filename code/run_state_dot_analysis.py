@@ -142,29 +142,29 @@ log.info("  Reading AMBER data from: %s", AMBER_CSV.name)
 alerts = pd.read_csv(AMBER_CSV, parse_dates=["sent_utc"])
 log.info("  Raw AMBER records: %d", len(alerts))
 
-# ── msgType accounting ────────────────────────────────────────────────────────
-# The IPAWS dataset includes Alert, Cancel, and Update message types.  All three
-# fire WEA phone notifications and can disrupt sleep.  Key findings:
-#  • Alert+Cancel pairs ALWAYS occur on the same calendar day (max gap observed:
-#    median 1.9 hrs, max < 24 hrs) → no cross-day contamination.
-#  • Binary night_alert is unaffected: county-date treated=1 whether Alert or
-#    Cancel fires in the night window.
-#  • alert_scope (continuous) is unaffected: max scope same for Alert+Cancel.
-#  • n_alerts count is inflated ~2× by Cancels — only affects descriptive stats.
-# Conclusion: including all msgTypes is scientifically defensible since WEA
-# broadcasts Cancels/Updates as phone alerts.  If msg_type column is present
-# (added by 02d_classify_alert_msgtypes.py), we log the breakdown.
+# ── msgType filter ────────────────────────────────────────────────────────────
+# AMBER IPAWS records include three message types:
+#   Alert  — new abduction notification → triggers loud WEA tone + vibration
+#   Update — revised information        → triggers loud WEA tone + vibration
+#   Cancel — case resolved              → silently dismisses previous alert; NO ringing
+#
+# Only Alert and Update physically ring/buzz phones and can disrupt sleep.
+# Cancel messages in the night window are FALSE POSITIVES for sleep disruption.
+# Empirical counts (full dataset): Alert 64.9%, Cancel 31.8%, Update 3.3%.
+# False-positive treated county-dates (Cancel-only at night): ~25% of treated obs.
+# Excluding Cancels removes attenuation bias (estimated β biased toward zero).
 if "msg_type" in alerts.columns:
-    mt = alerts.groupby("msg_type")["alert_id"].nunique()
-    log.info("  msgType breakdown (unique alert_ids):\n%s", mt.to_string())
-    n_alert_only = (alerts["msg_type"] == "Alert")["alert_id"].nunique() if False else \
-                   alerts.loc[alerts["msg_type"] == "Alert", "alert_id"].nunique()
-    log.info("  Alert-only: %d of %d unique IDs (%.1f%%)",
-             n_alert_only, alerts["alert_id"].nunique(),
-             100 * n_alert_only / alerts["alert_id"].nunique())
+    before = len(alerts)
+    mt_counts = alerts.groupby("msg_type")["alert_id"].nunique()
+    log.info("  msgType breakdown (unique alert_ids):\n%s", mt_counts.to_string())
+    # Keep only phone-ringing message types
+    alerts = alerts[alerts["msg_type"].isin(["Alert", "Update"])].copy()
+    log.info("  Filtered to Alert+Update: %d → %d rows (%d unique alert_ids)",
+             before, len(alerts), alerts["alert_id"].nunique())
 else:
-    log.info("  msg_type column not present — run 02d_classify_alert_msgtypes.py to add it")
-    log.info("  ~46%% of alert_ids are Cancel messages (all fire WEA; see documentation)")
+    log.warning("  msg_type column missing — Cancel records NOT filtered.")
+    log.warning("  Run 02d_classify_alert_msgtypes.py then re-run analysis.")
+    log.warning("  ~25%% of treated county-dates are false positives (Cancel-only nights).")
 
 # Convert UTC → local time with proper DST handling (via pytz)
 # ─────────────────────────────────────────────────────────────────────────────

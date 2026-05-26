@@ -1,28 +1,16 @@
 phase,phase_label,beta,se,pvalue,n_treated_phase,n_obs,method,state
-ph_2223,Still awake  (22–23h),-0.247298,0.187344,0.2194,1008,1021823,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",ALL
-ph_0001,Light sleep  (0–1h),0.012077,0.18394,0.9491,650,1021823,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",ALL
-ph_0203,Deep sleep   (2–3h),0.009197,0.154001,0.9537,534,1021823,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",ALL
-ph_0405,Late/REM     (4–5h),-0.053398,0.143799,0.719,428,1021823,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",ALL
-ph_2223,Still awake  (22–23h),-0.062355,0.058425,0.3269,54,128459,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",CA
-ph_0001,Light sleep  (0–1h),-0.05373,0.061005,0.4123,33,128459,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",CA
-ph_0203,Deep sleep   (2–3h),0.10266,0.068152,0.1827,45,128459,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",CA
-ph_0405,Late/REM     (4–5h),0.02726,0.142787,0.8549,13,128459,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",CA
+ph_2223,Still awake  (22–23h),-0.192944,0.185629,0.3257,234,1021823,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",ALL
+ph_0001,Light sleep  (0–1h),-0.036747,0.171572,0.8352,78,1021823,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",ALL
+ph_0203,Deep sleep   (2–3h),-0.12938,0.188649,0.5101,45,1021823,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",ALL
+ph_0405,Late/REM     (4–5h),0.222648,0.154947,0.1846,31,1021823,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",ALL
+ph_2223,Still awake  (22–23h),-0.12616,0.170128,0.4864,25,128459,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",CA
+ph_0001,Light sleep  (0–1h),0.046815,0.085058,0.6019,15,128459,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",CA
+ph_0203,Deep sleep   (2–3h),0.073891,0.11263,0.5361,38,128459,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",CA
+ph_0405,Late/REM     (4–5h),0.218064,0.191334,0.2979,8,128459,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",CA
 ph_2223,Still awake  (22–23h),0.351986,0.468619,0.5309,16,44757,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",FL
-ph_2223,Still awake  (22–23h),-70.28748,29.299279,0.0164,88,142190,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",IA
-ph_0001,Light sleep  (0–1h),17.463822,29.585017,0.555,135,142190,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",IA
-ph_0203,Deep sleep   (2–3h),37.57829,37.882187,0.3212,57,142190,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",IA
-ph_0405,Late/REM     (4–5h),8.949026,28.384602,0.7526,151,142190,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",IA
-ph_2223,Still awake  (22–23h),-1.087218,0.915985,0.2801,166,178138,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",IL
-ph_0001,Light sleep  (0–1h),-0.152732,1.838863,0.9365,49,178138,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",IL
-ph_0203,Deep sleep   (2–3h),1.293802,1.017113,0.2504,24,178138,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",IL
-ph_2223,Still awake  (22–23h),52814644.347591,56453041.235657,0.3495,52,37318,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",MA
-ph_0001,Light sleep  (0–1h),18400153.739141,19634299.393707,0.3487,27,37318,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",MA
-ph_0203,Deep sleep   (2–3h),25218019.57673,26904854.904006,0.3486,13,37318,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",MA
-ph_0203,Deep sleep   (2–3h),-0.272453,0.798341,0.7373,36,22303,"Sleep-phase WLS TWFE (pop-wt, county+date FE, SE: county, joint)",NV
-ph_2223,Still awake  (22–23h),1.837983,1.662404,0.2732,9,43492,"Sleep-phase WLS TWFE (pop-wt, county+date FE, SE: county, joint)",NY
-ph_0001,Light sleep  (0–1h),0.589344,0.277418,0.0377,28,43492,"Sleep-phase WLS TWFE (pop-wt, county+date FE, SE: county, joint)",NY
-ph_2223,Still awake  (22–23h),-3.329989,0.552733,0.0,24,34636,"Sleep-phase WLS TWFE (pop-wt, county+date FE, SE: county, joint)",OR
-ph_2223,Still awake  (22–23h),-42.099755,16.121934,0.009,245,182006,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",VA
-ph_0001,Light sleep  (0–1h),22.189204,17.872685,0.2144,147,182006,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",VA
-ph_0203,Deep sleep   (2–3h),42.513559,22.471766,0.0585,86,182006,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",VA
-ph_0405,Late/REM     (4–5h),-0.113079,0.169273,0.5209,250,208524,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",WI
+ph_0001,Light sleep  (0–1h),-61.561659,43.567824,0.1577,44,142190,"Sleep-phase TWFE (county+date FE+DoW, joint, unweighted fallback)",IA
+ph_2223,Still awake  (22–23h),-0.554274,0.880567,0.5523,116,178138,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",IL
+ph_0203,Deep sleep   (2–3h),-0.272453,0.798341,0.7373,5,22303,"Sleep-phase WLS TWFE (pop-wt, county+date FE, SE: county, joint)",NV
+ph_2223,Still awake  (22–23h),1.839029,1.662761,0.2731,9,43492,"Sleep-phase WLS TWFE (pop-wt, county+date FE, SE: county, joint)",NY
+ph_0001,Light sleep  (0–1h),0.992189,0.567055,0.0852,19,43492,"Sleep-phase WLS TWFE (pop-wt, county+date FE, SE: county, joint)",NY
+ph_0405,Late/REM     (4–5h),0.517932,0.222325,0.0448,18,208524,"Sleep-phase WLS TWFE (pop-wt, county+date FE, 2-way SE: county×year, joint)",WI
