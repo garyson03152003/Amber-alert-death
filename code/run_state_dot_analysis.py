@@ -1323,6 +1323,97 @@ log.info("  If only fatalities ↓, not all-crashes → consistent with law-enfo
 log.info("    confound (DUI/speeding enforcement), NOT sleep-disruption mechanism")
 
 
+# ── F. Drunk-driving deterrence channel test ──────────────────────────────────
+log.info("\n─── F. Drunk-driving deterrence channel (fatalities, ALL states) ───")
+log.info("  Mechanism: WEA alert at 10-11pm reaches people in bars deciding to drive.")
+log.info("  They perceive increased police presence → choose rideshare → fewer DUI fatals.")
+log.info("  Key predictions:")
+log.info("    1. Weekend effect >> weekday  (more people out drinking Fri/Sat/Sun)")
+log.info("    2. 22h (pre-bar-close) effect >> 02h+ (bars already closed, deterrence window gone)")
+log.info("  Prediction 2 already confirmed (check D). Now testing prediction 1.\n")
+
+# Add weekend flag and interaction
+panel["is_weekend"] = panel["dow"].isin([4, 5, 6]).astype(int)  # Fri=4, Sat=5, Sun=6
+
+dui_rows = []
+if HAS_PYFIXEST:
+    sub_d = panel.dropna(subset=["fatals_per_100k", "population"]).copy()
+    sub_d["_fips_str"] = sub_d["fips"].astype(str)
+    sub_d["_date_str"] = sub_d["date"].astype(str)
+    sub_d["_year_str"] = sub_d["year"].astype(str)
+    sub_d["_pop"]      = sub_d["population"].astype(float)
+
+    # Weekday vs weekend split
+    for grp_label, mask in [
+        ("Weekday (Mon–Thu)", sub_d["is_weekend"] == 0),
+        ("Weekend (Fri–Sun)", sub_d["is_weekend"] == 1),
+    ]:
+        sub_g = sub_d[mask].copy()
+        n_treat = int(sub_g["night_alert"].sum())
+        if n_treat < 10:
+            log.info("  %s: N_treated=%d — skip", grp_label, n_treat)
+            continue
+        formula = "fatals_per_100k ~ night_alert | _fips_str + _date_str"
+        res = None
+        for vcov_spec, mtag in [
+            ({"CRV1": "_fips_str + _year_str"}, "2-way SE"),
+            ({"CRV1": "_fips_str"}, "county SE"),
+        ]:
+            try:
+                fit = pf.feols(formula, data=sub_g, weights="_pop", vcov=vcov_spec)
+                vals = _pyfixest_coef(fit, "night_alert")
+                if vals and not np.isnan(vals[1]):
+                    b, se, pv, n = vals
+                    res = dict(group=grp_label, beta=round(b,6), se=round(se,6),
+                               pvalue=round(pv,4), n_treated=n_treat)
+                    break
+            except Exception:
+                continue
+        if res:
+            stars = ("***" if res["pvalue"] < 0.01 else "**" if res["pvalue"] < 0.05
+                     else "*" if res["pvalue"] < 0.10 else "")
+            log.info("  %-22s  β=%+.4f  SE=%.4f  p=%.3f %-3s  N_treated=%d",
+                     res["group"], res["beta"], res["se"], res["pvalue"], stars, res["n_treated"])
+            dui_rows.append(res)
+
+    # Also run interaction model: night_alert × is_weekend
+    log.info("")
+    log.info("  Interaction model: night_alert + night_alert × is_weekend")
+    sub_d["alert_x_wknd"] = sub_d["night_alert"] * sub_d["is_weekend"]
+    for vcov_spec, mtag in [
+        ({"CRV1": "_fips_str + _year_str"}, "2-way SE"),
+        ({"CRV1": "_fips_str"}, "county SE"),
+    ]:
+        try:
+            formula_ix = "fatals_per_100k ~ night_alert + alert_x_wknd | _fips_str + _date_str"
+            fit = pf.feols(formula_ix, data=sub_d, weights="_pop", vcov=vcov_spec)
+            tbl = fit.tidy()
+            for coef in ["night_alert", "alert_x_wknd"]:
+                if coef in tbl.index:
+                    b  = float(tbl.loc[coef, "Estimate"])
+                    se = float(tbl.loc[coef, "Std. Error"])
+                    pv = float(tbl.loc[coef, "Pr(>|t|)"])
+                    stars = "***" if pv < 0.01 else "**" if pv < 0.05 else "*" if pv < 0.10 else ""
+                    lbl = "Weekday baseline" if coef == "night_alert" else "Weekend add-on  "
+                    log.info("    %-20s  β=%+.4f  SE=%.4f  p=%.3f %s",
+                             lbl, b, se, pv, stars)
+                    dui_rows.append(dict(group=f"interaction:{coef}", beta=round(b,6),
+                                        se=round(se,6), pvalue=round(pv,4), n_treated=None))
+            break
+        except Exception as exc:
+            log.debug("  interaction model [%s] failed: %s", mtag, exc)
+            continue
+
+    log.info("")
+    log.info("  Interpretation:")
+    log.info("    Weekend β >> Weekday β → drunk-driving deterrence channel")
+    log.info("    Weekend β ≈ Weekday β  → mechanism is NOT drinking-related")
+
+if dui_rows:
+    pd.DataFrame(dui_rows).to_csv(OUTPUT_TABS / "dui_deterrence_test.csv", index=False)
+    log.info("  Saved → output/tables/dui_deterrence_test.csv")
+
+
 # ── D. Late-night only (0–5am): sleep-disruption sensitivity check ────────────
 log.info("\n─── D. Late-night only (0–5am) vs. full night (22h–5am) ───")
 log.info("  Sleep disruption requires people to be asleep.")
