@@ -1046,3 +1046,218 @@ if ur_phase_results:
 
     ur_ph_df.to_csv(OUTPUT_TABS / "urban_rural_sleep_phase.csv", index=False)
     log.info("\nSaved → %s", OUTPUT_TABS / "urban_rural_sleep_phase.csv")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10. Confounding Checks
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Three tests to diagnose whether the negative fatality result is causal or
+# an artefact of confounders (mainly law-enforcement mobilisation):
+#
+#   A. Placebo lead/lag test  (±1, ±2 days)
+#      If the result is causal, only the contemporaneous (t=0) coefficient
+#      should be negative and significant.  Law-enforcement mobilisation would
+#      also only operate on t=0, so this test does NOT rule it out — but it
+#      rules out general confounders like weather or day-of-week selection.
+#      Pre-trends (t=-1, t=-2 significant) would indicate selection bias.
+#
+#   B. Alert-hour-of-night FE
+#      Alerts issued at 22-23h arrive when traffic is still relatively high;
+#      those at 2-4h arrive in the low-traffic dead of night.  If negative
+#      results are purely from traffic-volume confounding, adding hour-of-alert
+#      dummies (within the night window) should eliminate the effect.
+#
+#   C. Severity gradient
+#      Sleep disruption → impaired driving → more crashes across ALL severity
+#      levels.  Law-enforcement mobilisation specifically reduces FATAL crashes
+#      (DUI, speeding) but leaves minor crashes untouched.  If we see
+#      fatalities ↓ but all-crashes and serious-injury NS, that pattern is
+#      more consistent with confounding than with the sleep channel.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+log.info("\n" + "═"*70)
+log.info("=== Confounding Checks ===")
+log.info("═"*70)
+
+# ── A. Placebo lead / lag test ────────────────────────────────────────────────
+log.info("\n─── A. Placebo leads & lags (fatalities / 100k, ALL states) ───")
+log.info("  H0: only t=0 coefficient should be non-zero if effect is causal.")
+log.info("  Pre-trend at t=-1 or t=-2 → selection bias.\n")
+
+# Build a date-indexed set of treated (fips, date) pairs
+treated_dates = set(
+    zip(night_alerts["fips"].astype(str).str.zfill(5),
+        pd.to_datetime(night_alerts["effective_crash_date"]).dt.date)
+)
+
+placebo_rows = []
+for lag in [-2, -1, 0, 1, 2]:
+    col = f"alert_t{lag:+d}".replace("+", "p").replace("-", "m")
+    if lag == 0:
+        panel[col] = panel["night_alert"]
+    else:
+        # Efficient merge-based shift: shift effective_crash_date by lag days
+        shifted_alerts = night_alerts[["fips", "effective_crash_date"]].copy()
+        shifted_alerts["fips"] = shifted_alerts["fips"].astype(str).str.zfill(5)
+        shifted_alerts["shifted_date"] = (
+            pd.to_datetime(shifted_alerts["effective_crash_date"]) +
+            pd.Timedelta(days=lag)
+        ).dt.date
+        shifted_alerts["_treated"] = 1
+        panel["_date_d"] = panel["date"].dt.date
+        merged = panel[["fips", "_date_d"]].merge(
+            shifted_alerts[["fips", "shifted_date", "_treated"]],
+            left_on=["fips", "_date_d"],
+            right_on=["fips", "shifted_date"],
+            how="left"
+        )
+        panel[col] = merged["_treated"].fillna(0).astype(int).values
+        panel.drop(columns=["_date_d"], inplace=True, errors="ignore")
+
+    sub2 = panel.dropna(subset=["fatals_per_100k", "population"]).copy()
+    n_treated_lag = int(sub2[col].sum())
+    if n_treated_lag < 10:
+        log.warning("  t=%+d: fewer than 10 treated obs (%d) — skip", lag, n_treated_lag)
+        continue
+
+    if HAS_PYFIXEST:
+        sub2["_fips_str"] = sub2["fips"].astype(str)
+        sub2["_date_str"] = sub2["date"].astype(str)
+        sub2["_year_str"] = sub2["year"].astype(str)
+        sub2["_pop"]      = sub2["population"].astype(float)
+        formula = f"fatals_per_100k ~ {col} | _fips_str + _date_str"
+        res = None
+        for vcov_spec, mtag in [
+            ({"CRV1": "_fips_str + _year_str"}, "2-way SE"),
+            ({"CRV1": "_fips_str"}, "county SE"),
+        ]:
+            try:
+                fit = pf.feols(formula, data=sub2, weights="_pop", vcov=vcov_spec)
+                vals = _pyfixest_coef(fit, col)
+                if vals and not np.isnan(vals[1]):
+                    b, se, pv, n = vals
+                    res = dict(lag=lag, beta=round(b,6), se=round(se,6),
+                               pvalue=round(pv,4), n_treated=n_treated_lag,
+                               se_method=mtag)
+                    break
+            except Exception as exc:
+                log.debug("  t=%+d feols[%s] failed: %s", lag, mtag, exc)
+                continue
+        if res:
+            stars = ("***" if res["pvalue"] < 0.01 else
+                     "**"  if res["pvalue"] < 0.05 else
+                     "*"   if res["pvalue"] < 0.10 else "")
+            log.info("  t=%+d  β=%+.4f  SE=%.4f  p=%.3f %-3s  (N_treated=%d)",
+                     lag, res["beta"], res["se"], res["pvalue"], stars,
+                     res["n_treated"])
+            placebo_rows.append(res)
+        else:
+            log.warning("  t=%+d: all feols specs failed", lag)
+
+if placebo_rows:
+    pd.DataFrame(placebo_rows).to_csv(OUTPUT_TABS / "placebo_lags.csv", index=False)
+    log.info("  Saved → output/tables/placebo_lags.csv")
+
+# ── B. Hour-of-alert FE within night window ───────────────────────────────────
+log.info("\n─── B. Hour-of-alert FE (fatalities / 100k, ALL states) ───")
+log.info("  Adds 2-hour bin FE for when within the night the alert was issued.")
+log.info("  If traffic-volume timing drives results, effect should vanish.\n")
+
+# Compute 2-hour bin of the FIRST alert in each county-night.
+# alerts has hour_local from the local-time conversion block earlier in the script.
+if "hour_local" in alerts.columns:
+    _abin = alerts[alerts["is_night"]].copy()
+    _abin["fips"] = _abin["fips"].astype(str).str.zfill(5)
+    _abin["hour_bin"] = (_abin["hour_local"] // 2 * 2).astype(int).astype(str).str.zfill(2) + "h"
+
+    # Collapse to the first alert per (fips, effective_crash_date)
+    first_alert_hour = (
+        _abin.sort_values("sent_utc")
+        .groupby(["fips", "effective_crash_date"])["hour_bin"]
+        .first()
+        .reset_index()
+    )
+    first_alert_hour["fips"] = first_alert_hour["fips"].astype(str).str.zfill(5)
+    first_alert_hour["effective_crash_date"] = pd.to_datetime(
+        first_alert_hour["effective_crash_date"]
+    ).dt.date
+
+    sub2 = panel.copy()
+    sub2["_date_d"] = sub2["date"].dt.date
+    sub2 = sub2.merge(
+        first_alert_hour.rename(columns={"effective_crash_date": "_ecd"}),
+        left_on=["fips", "_date_d"], right_on=["fips", "_ecd"], how="left"
+    ).drop(columns=["_date_d", "_ecd"], errors="ignore")
+    sub2 = sub2.dropna(subset=["fatals_per_100k", "population"])
+    sub2["hour_bin"] = sub2["hour_bin"].fillna("none")
+    sub2["_fips_str"] = sub2["fips"].astype(str)
+    sub2["_date_str"] = sub2["date"].astype(str)
+    sub2["_year_str"] = sub2["year"].astype(str)
+    sub2["_hbin_str"] = sub2["hour_bin"]
+    sub2["_pop"]      = sub2["population"].astype(float)
+
+    log.info("  Alert-hour bins in treated nights: %s",
+             sub2.loc[sub2["night_alert"]==1, "hour_bin"].value_counts().to_dict())
+
+    if HAS_PYFIXEST and sub2["night_alert"].sum() >= 10:
+        hbin_rows = []
+        formula_base = "fatals_per_100k ~ night_alert | _fips_str + _date_str"
+        formula_hrfe = "fatals_per_100k ~ night_alert | _fips_str + _date_str + _hbin_str"
+        for fname, flabel in [(formula_base, "Baseline (no hour-bin FE)"),
+                               (formula_hrfe, "With 2h alert-hour FE")]:
+            for vcov_spec, mtag in [
+                ({"CRV1": "_fips_str + _year_str"}, "2-way SE"),
+                ({"CRV1": "_fips_str"}, "county SE"),
+            ]:
+                try:
+                    fit = pf.feols(fname, data=sub2, weights="_pop", vcov=vcov_spec)
+                    vals = _pyfixest_coef(fit, "night_alert")
+                    if vals and not np.isnan(vals[1]):
+                        b, se, pv, n = vals
+                        stars = ("***" if pv < 0.01 else "**" if pv < 0.05
+                                 else "*" if pv < 0.10 else "")
+                        log.info("  %-35s  β=%+.4f  SE=%.4f  p=%.3f %s",
+                                 flabel, b, se, pv, stars)
+                        hbin_rows.append(dict(spec=flabel, beta=round(b,6),
+                                              se=round(se,6), pvalue=round(pv,4)))
+                        break
+                except Exception as exc:
+                    log.debug("  hour-bin FE feols[%s] failed: %s", mtag, exc)
+                    continue
+        if hbin_rows:
+            pd.DataFrame(hbin_rows).to_csv(OUTPUT_TABS / "hour_bin_fe.csv", index=False)
+            log.info("  Saved → output/tables/hour_bin_fe.csv")
+else:
+    log.info("  (hour_local column not present in alerts — skipping hour-bin FE check)")
+
+# ── C. Severity gradient ──────────────────────────────────────────────────────
+log.info("\n─── C. Severity gradient (ALL states, OLS + PPML) ───")
+log.info("  Sleep disruption → impaired driving → crashes at ALL severity levels.")
+log.info("  Law-enforcement mobilisation → specifically fewer FATAL crashes.")
+log.info("  Pattern to distinguish: fatalities ↓ but all-crashes/serious-injury NS")
+log.info("  is consistent with law-enforcement confounding, not sleep disruption.\n")
+
+if not results.empty:
+    all_ols = results[(results["state"] == "ALL") & (results["model"] == "OLS")]
+    all_pml = results[(results["state"] == "ALL") & (results["model"] == "Poisson")]
+
+    log.info("  %-30s  %-8s  %+8s  %8s  %7s",
+             "Outcome", "Model", "β / log-β", "SE", "p-value")
+    log.info("  " + "-"*68)
+    for _, r in pd.concat([all_ols, all_pml]).sort_values("outcome").iterrows():
+        stars = ("***" if r.pvalue < 0.01 else "**" if r.pvalue < 0.05
+                 else "*" if r.pvalue < 0.10 else "")
+        irr_str = (f" [IRR={r.get('irr',float('nan')):.3f}]"
+                   if r["model"] == "Poisson" else "")
+        log.info("  %-30s  %-8s  %+8.4f  %8.4f  %.3f %-3s%s",
+                 r["outcome"], r["model"],
+                 r["beta"], r["se"], r["pvalue"], stars, irr_str)
+
+log.info("\n─── Interpretation guide ───")
+log.info("  If t=0 significant, t±1 and t±2 NS  → consistent with causal effect")
+log.info("  If hour-bin FE kills the result       → traffic-volume confound")
+log.info("  If hour-bin FE doesn't kill result    → not a traffic-timing artefact")
+log.info("  If only fatalities ↓, not all-crashes → consistent with law-enforcement")
+log.info("    confound (DUI/speeding enforcement), NOT sleep-disruption mechanism")
