@@ -71,6 +71,8 @@ STATE_FILES = {
     "MA": ("massachusetts_massdot_county_day.parquet","ma_crashes","ma_fatals","ma_serious_inj"),
     "NV": ("nevada_ndot_county_day.parquet",        "nv_crashes", "nv_fatals", "nv_serious_inj"),
     "OR": ("oregon_odot_county_day.parquet",        "or_crashes", "or_fatals", "or_serious_inj"),
+    "TN": ("tennessee_tdot_county_day.parquet",     "tn_crashes", "tn_fatals", "tn_serious_inj"),
+    "TX": ("texas_txdot_county_day.parquet",        "tx_crashes", "tx_fatals", "tx_serious_inj"),
     "VA": ("virginia_vdot_county_day.parquet",      "va_crashes", "va_fatals", "va_serious_inj"),
     "WI": ("wisconsin_dot_county_day.parquet",      "wi_crashes", "wi_fatals", "wi_serious_inj"),
     # NY: crash counts only; ny_fatal_crashes = fatal crashes (not fatalities); no serious_inj
@@ -510,7 +512,8 @@ for ph_name, collapsed in phase_alert_frames.items():
         panel = panel.drop(columns=[dup_col])
 
 # Restrict to study years that overlap between crash data and alert data
-panel = panel[panel["year"].between(2013, 2022)]
+# AMBER alert CSV covers 2013–2024; state crash panels extend through 2024.
+panel = panel[panel["year"].between(2013, 2024)]
 panel = panel.dropna(subset=["crashes_per_100k"])
 
 log.info("  Panel rows after merge: %d", len(panel))
