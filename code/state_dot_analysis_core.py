@@ -118,54 +118,86 @@ def build_commuter_spillover(
 ) -> pd.DataFrame:
     """Predict destination-county exposure from commuters in alerted counties.
 
-    For every alerted home county j on date t, sum workers commuting from j to a
-    different work county i. Own-county exposure is intentionally excluded so
-    ``night_alert`` represents direct phone exposure and this variable represents
-    cross-county interference.
+    Main spillover intensity is the share of all commuters working in county i
+    whose home county j received the alert. This is bounded in [0, 1] and is
+    invariant to the arbitrary units of the raw commuter count. Own-county flows
+    are excluded because ``night_alert`` captures direct phone exposure.
+
+    ``spillover_commuters`` is retained as a descriptive quantity only. The
+    legacy log-count column is kept for backwards compatibility with the earlier
+    exploratory runner; the share-based runner does not use it as a regressor.
     """
     empty = pd.DataFrame(
         columns=["fips", "effective_crash_date", "spillover_commuters",
-                 "log_spillover_commuters"]
+                 "spillover_share", "log_spillover_commuters"]
     )
     if night_alerts.empty or flows.empty:
         return empty
 
     alerts = night_alerts[["fips", "effective_crash_date"]].drop_duplicates().copy()
     alerts["fips_home"] = alerts["fips"].astype(str).str.zfill(5)
-    alerts["effective_crash_date"] = pd.to_datetime(alerts["effective_crash_date"]).dt.normalize()
+    alerts["effective_crash_date"] = pd.to_datetime(
+        alerts["effective_crash_date"]
+    ).dt.normalize()
 
-    fl = flows[["fips_home", "fips_work", "workers"]].copy()
+    needed = ["fips_home", "fips_work", "workers"]
+    missing = [c for c in needed if c not in flows.columns]
+    if missing:
+        raise ValueError(f"commuting-flow data missing required columns: {missing}")
+
+    keep = needed + (["weight"] if "weight" in flows.columns else [])
+    fl = flows[keep].copy()
     fl["fips_home"] = fl["fips_home"].astype(str).str.zfill(5)
     fl["fips_work"] = fl["fips_work"].astype(str).str.zfill(5)
     fl["workers"] = pd.to_numeric(fl["workers"], errors="coerce").fillna(0.0)
-    fl = fl[(fl["workers"] > 0) & (fl["fips_home"] != fl["fips_work"])].copy()
+    fl = fl[fl["workers"] > 0].copy()
 
+    # The existing commuting-weight builder defines weight as the fraction of
+    # all workers in the destination/work county coming from each home county.
+    # Recompute it if an older flow file lacks the column.
+    if "weight" not in fl.columns:
+        totals = fl.groupby("fips_work")["workers"].transform("sum")
+        fl["weight"] = fl["workers"] / totals
+    else:
+        fl["weight"] = pd.to_numeric(fl["weight"], errors="coerce").fillna(0.0)
+
+    fl = fl[fl["fips_home"] != fl["fips_work"]].copy()
     exposed = alerts.merge(fl, on="fips_home", how="inner")
     if exposed.empty:
         return empty
 
     out = (
-        exposed.groupby(["fips_work", "effective_crash_date"], as_index=False)["workers"]
-        .sum()
-        .rename(columns={"fips_work": "fips", "workers": "spillover_commuters"})
+        exposed.groupby(["fips_work", "effective_crash_date"], as_index=False)
+        .agg(
+            spillover_commuters=("workers", "sum"),
+            spillover_share=("weight", "sum"),
+        )
+        .rename(columns={"fips_work": "fips"})
     )
+    out["spillover_share"] = out["spillover_share"].clip(lower=0.0, upper=1.0)
     out["log_spillover_commuters"] = np.log1p(out["spillover_commuters"])
     return out
 
 
 def add_spillover_classes(panel: pd.DataFrame) -> pd.DataFrame:
-    """Label direct, spillover-only, and low-contamination control observations."""
+    """Label direct, spillover-only, and uncontaminated control observations."""
     out = panel.copy()
+    if "spillover_share" not in out.columns:
+        out["spillover_share"] = 0.0
+    out["spillover_share"] = out["spillover_share"].fillna(0.0).clip(0.0, 1.0)
+
     if "spillover_commuters" not in out.columns:
         out["spillover_commuters"] = 0.0
     out["spillover_commuters"] = out["spillover_commuters"].fillna(0.0)
+
+    # Backwards compatibility only; new specifications use spillover_share.
     if "log_spillover_commuters" not in out.columns:
         out["log_spillover_commuters"] = np.log1p(out["spillover_commuters"])
     else:
         out["log_spillover_commuters"] = out["log_spillover_commuters"].fillna(0.0)
 
     direct = out["night_alert"].fillna(0).astype(int).eq(1)
-    spill = (~direct) & out["spillover_commuters"].gt(0)
+    spill = (~direct) & out["spillover_share"].gt(0)
     out["exposure_class"] = np.select(
         [direct, spill], ["direct", "spillover"], default="clean_control"
     )
