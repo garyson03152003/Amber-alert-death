@@ -70,27 +70,46 @@ def test_ppml_spec_is_explicit_when_offset_not_supported():
     assert "_log_population" in spec["formula"]
 
 
-def test_build_commuter_spillover_marks_non_targeted_destination_exposure():
+def test_build_commuter_spillover_uses_destination_commuter_share():
     alerts = pd.DataFrame({
         "fips": ["01001"],
         "effective_crash_date": [pd.Timestamp("2024-01-02")],
         "night_alert": [1],
     })
     flows = pd.DataFrame({
-        "fips_home": [1001, 1001, 1003],
-        "fips_work": [1001, 1003, 1001],
-        "workers": [100.0, 40.0, 25.0],
+        "fips_home": [1001, 1001, 1003, 1005],
+        "fips_work": [1001, 1003, 1003, 1003],
+        "workers": [100.0, 40.0, 120.0, 40.0],
+        "weight": [1.0, 0.20, 0.60, 0.20],
     })
     spill = build_commuter_spillover(alerts, flows)
     row = spill.loc[spill["fips"] == "01003"].iloc[0]
     assert row["spillover_commuters"] == 40.0
-    assert np.isclose(row["log_spillover_commuters"], np.log1p(40.0))
+    assert np.isclose(row["spillover_share"], 0.20)
+
+
+def test_multiple_alerted_origins_sum_commuter_shares():
+    alerts = pd.DataFrame({
+        "fips": ["01001", "01005"],
+        "effective_crash_date": [pd.Timestamp("2024-01-02")] * 2,
+        "night_alert": [1, 1],
+    })
+    flows = pd.DataFrame({
+        "fips_home": [1001, 1003, 1005],
+        "fips_work": [1003, 1003, 1003],
+        "workers": [40.0, 120.0, 40.0],
+        "weight": [0.20, 0.60, 0.20],
+    })
+    spill = build_commuter_spillover(alerts, flows)
+    row = spill.loc[spill["fips"] == "01003"].iloc[0]
+    assert row["spillover_commuters"] == 80.0
+    assert np.isclose(row["spillover_share"], 0.40)
 
 
 def test_exposed_neighbor_is_not_clean_control():
     panel = pd.DataFrame({
         "night_alert": [1, 0, 0],
-        "spillover_commuters": [0.0, 40.0, 0.0],
+        "spillover_share": [0.0, 0.20, 0.0],
     })
     out = add_spillover_classes(panel)
     assert out["exposure_class"].tolist() == ["direct", "spillover", "clean_control"]
