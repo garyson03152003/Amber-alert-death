@@ -8,6 +8,7 @@ function, never at import time.
 from __future__ import annotations
 
 import io
+import hashlib
 import sys
 import time
 import zipfile
@@ -56,7 +57,7 @@ CANONICAL_COLUMNS = [
 ]
 
 
-def fetch_zip(year: int, session: requests.Session) -> zipfile.ZipFile:
+def fetch_zip(year: int, session: requests.Session) -> tuple[zipfile.ZipFile, str]:
     """Fetch one FARS national archive with bounded retries."""
     url = FARS_URL_TEMPLATE.format(year=year)
     last_error: Exception | None = None
@@ -66,7 +67,8 @@ def fetch_zip(year: int, session: requests.Session) -> zipfile.ZipFile:
         try:
             response = session.get(url, timeout=120)
             response.raise_for_status()
-            return zipfile.ZipFile(io.BytesIO(response.content))
+            payload = response.content
+            return zipfile.ZipFile(io.BytesIO(payload)), hashlib.sha256(payload).hexdigest()
         except Exception as exc:  # downloaded archive errors are retryable
             last_error = exc
     raise RuntimeError(f"Could not download FARS {year}: {last_error}")
@@ -129,11 +131,49 @@ def _empty_events() -> pd.DataFrame:
     })
 
 
+def _population_counties(population: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the Census-derived county universe without hiding rows."""
+    required = {"fips", "year", "population"}
+    missing = required - set(population.columns)
+    if missing:
+        raise ValueError(f"population missing columns: {sorted(missing)}")
+    pop = population.loc[:, ["fips", "year", "population"]].copy()
+    pop["fips"] = pop["fips"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(5)
+    pop["year"] = pd.to_numeric(pop["year"], errors="coerce")
+    pop["population"] = pd.to_numeric(pop["population"], errors="coerce")
+    pop = pop.loc[
+        pop["year"].notna() & pop["population"].notna() & pop["population"].ge(0)
+        & pop["fips"].str[:2].isin(US_STATE_FIPS)
+        & ~pop["fips"].str.endswith(("000", "999"))
+    ].copy()
+    if pop.empty:
+        raise ValueError("population has no valid 50-state-plus-DC counties")
+    pop["year"] = pop["year"].astype(int)
+    return pop[["fips", "year"]].drop_duplicates()
+
+
+def permitted_fips_for_year(year: int, population: pd.DataFrame | None = None) -> set[str]:
+    """Return the actual Census county-equivalent FIPS set for one FARS year.
+
+    This local population-derived check is deterministic and intentionally has
+    no network dependency.  For 2024, whose bundled PEP extract is 2023-vintage,
+    use the last available county list as a geography reference.  Connecticut
+    is retained here because sparse FARS events are still published for it;
+    only the balanced longitudinal panel excludes Connecticut.
+    """
+    pop = _population_counties(
+        pd.read_parquet(POPULATION_PATH) if population is None else population
+    )
+    candidates = pop.loc[pop["year"].le(int(year)), "year"]
+    source_year = int(candidates.max()) if not candidates.empty else int(pop["year"].min())
+    return set(pop.loc[pop["year"].eq(source_year), "fips"])
+
+
 def build_fars_year(year: int, session: requests.Session) -> tuple[pd.DataFrame, CoverageResult]:
     """Download, validate, and aggregate one complete FARS national archive."""
     if int(year) not in YEARS:
         raise ValueError(f"FARS canonical build requires a year in {YEARS[0]}-{YEARS[-1]}")
-    archive = fetch_zip(int(year), session)
+    archive, source_checksum = fetch_zip(int(year), session)
     accidents = clean_cols(read_file(archive, "accident"))
     _required_columns(
         accidents,
@@ -149,28 +189,34 @@ def build_fars_year(year: int, session: requests.Session) -> tuple[pd.DataFrame,
 
     state = _numeric(accidents, "STATE")
     county = _numeric(accidents, "COUNTY")
+    state_code = state.astype("Int64").astype(str).str.zfill(2)
+    county_code = county.astype("Int64").astype(str).str.zfill(3)
+    fips = state_code + county_code
+    # Validate against actual Census geography, not merely a numeric range:
+    # syntactically plausible but nonexistent codes (for example 01997) are
+    # source-quality failures, not counties with zero crashes.
     geography_valid = (
         state.notna() & county.notna()
-        & state.astype("Int64").astype(str).str.zfill(2).isin(US_STATE_FIPS)
+        & state_code.isin(US_STATE_FIPS)
         & county.between(1, 998)
+        & fips.isin(permitted_fips_for_year(int(year)))
     )
     invalid_geography_count = int((~geography_valid).sum())
+    archive_year = _numeric(accidents, "YEAR")
     date = pd.to_datetime(
-        {"year": _numeric(accidents, "YEAR"), "month": _numeric(accidents, "MONTH"),
+        {"year": archive_year, "month": _numeric(accidents, "MONTH"),
          "day": _numeric(accidents, "DAY")},
         errors="coerce",
     )
-    invalid_date_count = int(date.isna().sum())
+    date_valid = date.notna() & archive_year.eq(int(year)) & date.dt.year.eq(int(year))
+    invalid_date_count = int((~date_valid).sum())
     fatalities = _numeric(accidents, "FATALS")
-    fatality_valid = fatalities.notna() & fatalities.ge(0)
-    invalid_date_count += int((~fatality_valid & date.notna()).sum())
-    retained = accidents.loc[geography_valid & date.notna() & fatality_valid].copy()
+    fatality_valid = fatalities.notna() & fatalities.ge(1)
+    invalid_date_count += int((~fatality_valid & date_valid).sum())
+    retained = accidents.loc[geography_valid & date_valid & fatality_valid].copy()
     retained["date"] = date.loc[retained.index].dt.normalize()
     retained["person_fatals"] = fatalities.loc[retained.index].astype(int)
-    retained["fips"] = (
-        state.loc[retained.index].astype(int).astype(str).str.zfill(2)
-        + county.loc[retained.index].astype(int).astype(str).str.zfill(3)
-    )
+    retained["fips"] = fips.loc[retained.index]
     retained["weather_adverse"] = (
         _numeric(accidents, "WEATHER").loc[retained.index].isin(ADVERSE_WEATHER).astype(int)
         if "WEATHER" in accidents.columns else 0
@@ -198,6 +244,7 @@ def build_fars_year(year: int, session: requests.Session) -> tuple[pd.DataFrame,
         observed_min_date=observed.min() if not observed.empty else None,
         observed_max_date=observed.max() if not observed.empty else None,
         source_url=FARS_URL_TEMPLATE.format(year=int(year)),
+        source_checksum=source_checksum,
     )
     return events, coverage
 
@@ -209,26 +256,11 @@ def fars_county_universe(population: pd.DataFrame, years: Iterable[int]) -> pd.D
     latest available county list forward as geography only, not a population
     estimate; this permits a complete 2024 FARS balancing universe.
     """
-    required = {"fips", "year", "population"}
-    missing = required - set(population.columns)
-    if missing:
-        raise ValueError(f"population missing columns: {sorted(missing)}")
     wanted = sorted({int(year) for year in years})
     if not wanted:
         return pd.DataFrame(columns=["fips", "year"])
-    pop = population.loc[:, ["fips", "year", "population"]].copy()
-    pop["fips"] = pop["fips"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(5)
-    pop["year"] = pd.to_numeric(pop["year"], errors="coerce")
-    pop["population"] = pd.to_numeric(pop["population"], errors="coerce")
-    pop = pop.loc[
-        pop["year"].notna() & pop["population"].notna() & pop["population"].ge(0)
-        & pop["fips"].str[:2].isin(US_STATE_FIPS)
-        & ~pop["fips"].str.startswith(CONNECTICUT_FIPS)
-        & ~pop["fips"].str.endswith(("000", "999"))
-    ].copy()
-    if pop.empty:
-        raise ValueError("population has no valid 50-state-plus-DC counties")
-    pop["year"] = pop["year"].astype(int)
+    pop = _population_counties(population)
+    pop = pop.loc[~pop["fips"].str.startswith(CONNECTICUT_FIPS)].copy()
     rows: list[pd.DataFrame] = []
     for target_year in wanted:
         candidates = pop.loc[pop["year"].le(target_year), "year"]
@@ -267,6 +299,15 @@ def _balance_fars_events(events: pd.DataFrame, universe: pd.DataFrame, manifest:
     if not pieces:
         return pd.DataFrame(columns=[*CANONICAL_COLUMNS, "year", "coverage_valid", "coverage_unit", "structural_zero", "source"])
     return pd.concat(pieces, ignore_index=True)
+
+
+class FarsValidationError(RuntimeError):
+    """A complete FARS download failed validation, carrying its diagnostics."""
+
+    def __init__(self, manifest: pd.DataFrame, failed_years: list[int]) -> None:
+        self.manifest = manifest
+        self.failed_years = failed_years
+        super().__init__(f"FARS validation failed for years: {failed_years}")
 
 
 def build_fars(years: Iterable[int] = YEARS) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -312,14 +353,20 @@ def build_fars(years: Iterable[int] = YEARS) -> tuple[pd.DataFrame, pd.DataFrame
     manifest = pd.concat([national_manifest, policy_manifest], ignore_index=True)
     if not national_manifest["coverage_valid"].all():
         failed = national_manifest.loc[~national_manifest["coverage_valid"], "year"].tolist()
-        raise RuntimeError(f"FARS validation failed for years: {failed}")
+        raise FarsValidationError(manifest, failed)
     events = pd.concat(frames, ignore_index=True).sort_values(["fips", "date"]).reset_index(drop=True)
     return events, manifest
 
 
 def main() -> None:
     """Write canonical sparse events, exact coverage, and balanced panel."""
-    events, manifest = build_fars()
+    try:
+        events, manifest = build_fars()
+    except FarsValidationError as exc:
+        # Preserve exact diagnostics even though no canonical panel may be
+        # written.  A strict validation failure must remain inspectable.
+        write_manifest(exc.manifest, DATA_PROC / "coverage", filename="fars_coverage")
+        raise
     universe = fars_county_universe(pd.read_parquet(POPULATION_PATH), YEARS)
     balanced = _balance_fars_events(events, universe, manifest)
     DATA_PROC.mkdir(parents=True, exist_ok=True)

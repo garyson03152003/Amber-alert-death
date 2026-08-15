@@ -1,5 +1,8 @@
 import importlib
+import hashlib
+import io
 import sys
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -29,7 +32,8 @@ def _vehicles():
 
 def _builder(monkeypatch):
     module = importlib.import_module("build_fars_county_day")
-    monkeypatch.setattr(module, "fetch_zip", lambda year, session: object())
+    monkeypatch.setattr(module, "fetch_zip", lambda year, session: (object(), "a" * 64))
+    monkeypatch.setattr(module, "permitted_fips_for_year", lambda year: {"01001", "01003", "01005"})
     monkeypatch.setattr(
         module,
         "read_file",
@@ -62,10 +66,91 @@ def test_build_fars_year_rejects_invalid_rows_and_reconciles_2024(monkeypatch):
     assert coverage.invalid_geography_count == 3  # county 000, 999, Puerto Rico
     assert coverage.invalid_date_count == 1  # duplicate ST_CASE is removed before cleaning
     assert coverage.retained_records == 2
+    assert coverage.source_checksum == "a" * 64
     assert coverage.coverage_valid is False
     assert {"duplicate_records", "invalid_dates", "invalid_geography"}.issubset(
         coverage.failure_reasons
     )
+
+
+def test_build_fars_year_rejects_non_census_fips(monkeypatch):
+    builder = _builder(monkeypatch)
+    accidents = pd.concat([_accidents().iloc[[0]], pd.DataFrame({
+        "ST_CASE": [99], "STATE": [1], "COUNTY": [997], "YEAR": [2024],
+        "MONTH": [1], "DAY": [3], "FATALS": [1], "WEATHER": [1],
+    })], ignore_index=True)
+    monkeypatch.setattr(
+        builder,
+        "read_file",
+        lambda _zip, keyword: accidents if keyword == "accident" else _vehicles(),
+    )
+
+    events, coverage = builder.build_fars_year(2024, session=object())
+
+    assert events["fips"].tolist() == ["01001"]
+    assert coverage.invalid_geography_count == 1
+    assert coverage.coverage_valid is False
+
+
+def test_build_fars_year_rejects_rows_from_another_archive_year(monkeypatch):
+    builder = _builder(monkeypatch)
+    accidents = pd.DataFrame({
+        "ST_CASE": [1], "STATE": [1], "COUNTY": [1], "YEAR": [2023],
+        "MONTH": [1], "DAY": [3], "FATALS": [1], "WEATHER": [1],
+    })
+    monkeypatch.setattr(
+        builder,
+        "read_file",
+        lambda _zip, keyword: accidents if keyword == "accident" else _vehicles(),
+    )
+
+    events, coverage = builder.build_fars_year(2024, session=object())
+
+    assert events.empty
+    assert coverage.invalid_date_count == 1
+    assert coverage.coverage_valid is False
+    assert "invalid_dates" in coverage.failure_reasons
+
+
+def test_build_fars_year_rejects_nonfatal_accident_rows(monkeypatch):
+    builder = _builder(monkeypatch)
+    accidents = pd.DataFrame({
+        "ST_CASE": [1], "STATE": [1], "COUNTY": [1], "YEAR": [2024],
+        "MONTH": [1], "DAY": [3], "FATALS": [0], "WEATHER": [1],
+    })
+    monkeypatch.setattr(
+        builder,
+        "read_file",
+        lambda _zip, keyword: accidents if keyword == "accident" else _vehicles(),
+    )
+
+    events, coverage = builder.build_fars_year(2024, session=object())
+
+    assert events.empty
+    assert coverage.invalid_date_count == 1
+    assert coverage.coverage_valid is False
+
+
+def test_fetch_zip_records_sha256(monkeypatch):
+    builder = importlib.import_module("build_fars_county_day")
+    payload_buffer = io.BytesIO()
+    with zipfile.ZipFile(payload_buffer, "w") as archive:
+        archive.writestr("accident.csv", "ST_CASE\n1\n")
+    payload = payload_buffer.getvalue()
+
+    class Response:
+        content = payload
+
+        def raise_for_status(self):
+            return None
+
+    class Session:
+        def get(self, *_args, **_kwargs):
+            return Response()
+
+    _archive, checksum = builder.fetch_zip(2024, Session())
+
+    assert checksum == hashlib.sha256(payload).hexdigest()
 
 
 def test_fars_county_universe_is_contiguous_us_only_and_excludes_connecticut():
