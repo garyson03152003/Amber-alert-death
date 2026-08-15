@@ -204,6 +204,7 @@ def fetch_arcgis_pages(
     seen_ids: set[object] = set()
     offset = 0
     while len(rows) < expected:
+        required_page_length = min(size, expected - len(rows))
         params: dict[str, object] = {
             "f": "json",
             "where": where if where is not None else "1=1",
@@ -228,6 +229,13 @@ def fetch_arcgis_pages(
                 expected_count=expected,
                 fetched_count=len(rows),
                 terminal_error="empty_page",
+            )
+        if len(page) != required_page_length:
+            raise _failure(
+                f"page length mismatch: expected {required_page_length} records, received {len(page)}",
+                expected_count=expected,
+                fetched_count=len(rows),
+                terminal_error="page_length_mismatch",
             )
         _check_records(page, id_field=id_field, seen_ids=seen_ids, expected_count=expected)
         rows.extend(dict(record) for record in page)
@@ -256,16 +264,6 @@ def _socrata_count(payload: object) -> int:
     return _validate_count(value, "Socrata count")
 
 
-def _candidate_socrata_id(records: list[Mapping[str, object]]) -> str | None:
-    if not records:
-        return None
-    candidates = (":id", "id", "objectid", "OBJECTID", "crash_id", "case_id", "st_case")
-    for candidate in candidates:
-        if all(candidate in record for record in records):
-            return candidate
-    return None
-
-
 def fetch_socrata_pages(
     session: Any,
     *,
@@ -279,10 +277,9 @@ def fetch_socrata_pages(
 ) -> list[dict[str, object]]:
     """Count, then strictly page a Socrata dataset.
 
-    ``id_field`` (or its descriptive alias ``stable_id_field``) should be
-    supplied when the dataset has a stable source identifier.  If omitted, a
-    conventional identifier is detected in returned rows for duplicate
-    checking, but no unsupported ``$order`` expression is sent to Socrata.
+    ``id_field`` (or its descriptive alias ``stable_id_field``) is required
+    for non-empty datasets so that every page is stably ordered and every row
+    is checked for a unique identifier.
     """
     size = _validate_count(page_size, "page_size")
     if size == 0:
@@ -321,20 +318,23 @@ def fetch_socrata_pages(
     expected = counted
     if expected == 0:
         return []
+    if not requested_id:
+        raise ValueError(
+            "id_field or stable_id_field is required for Socrata pagination"
+        )
 
     rows: list[dict[str, object]] = []
     seen_ids: set[object] = set()
-    discovered_id = requested_id
     offset = 0
     while len(rows) < expected:
+        required_page_length = min(size, expected - len(rows))
         params: dict[str, object] = {
             "$limit": size,
             "$offset": offset,
         }
         if where is not None:
             params["$where"] = where
-        if requested_id:
-            params["$order"] = f"{requested_id} ASC"
+        params["$order"] = f"{requested_id} ASC"
         payload = _response_json(
             session,
             url,
@@ -358,6 +358,13 @@ def fetch_socrata_pages(
                 fetched_count=len(rows),
                 terminal_error="empty_page",
             )
+        if len(page) != required_page_length:
+            raise _failure(
+                f"page length mismatch: expected {required_page_length} records, received {len(page)}",
+                expected_count=expected,
+                fetched_count=len(rows),
+                terminal_error="page_length_mismatch",
+            )
         if any(not isinstance(record, Mapping) for record in page):
             raise _failure(
                 "Socrata page contains a non-object row",
@@ -365,15 +372,12 @@ def fetch_socrata_pages(
                 fetched_count=len(rows),
                 terminal_error="invalid_record",
             )
-        if discovered_id is None:
-            discovered_id = _candidate_socrata_id(page) or _candidate_socrata_id(rows)
-        if discovered_id:
-            _check_records(
-                page,
-                id_field=discovered_id,
-                seen_ids=seen_ids,
-                expected_count=expected,
-            )
+        _check_records(
+            page,
+            id_field=requested_id,
+            seen_ids=seen_ids,
+            expected_count=expected,
+        )
         rows.extend(dict(record) for record in page)
         offset += len(page)
 
@@ -396,6 +400,7 @@ def sha256_file(path: str | os.PathLike[str], *, chunk_size: int = 1 << 20) -> s
         for chunk in iter(lambda: handle.read(chunk_size), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
 
 def download_bulk_file(
     session: Any,

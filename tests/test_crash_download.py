@@ -104,6 +104,24 @@ def test_arcgis_empty_page_before_expected_count_is_incomplete():
     assert caught.value.terminal_error == "empty_page"
 
 
+def test_arcgis_rejects_premature_nonempty_short_page():
+    session = FakeSession([
+        FakeResponse({"features": [{"attributes": {"OBJECTID": 1}}]}),
+    ])
+
+    with pytest.raises(IncompleteDownloadError, match="page length mismatch: expected 2 records.*expected 5, fetched 0") as caught:
+        fetch_arcgis_pages(
+            session,
+            url="https://example.test/query",
+            expected_count=5,
+            page_size=2,
+            id_field="OBJECTID",
+        )
+
+    assert caught.value.terminal_error == "page_length_mismatch"
+    assert caught.value.fetched_count == 0
+
+
 def test_arcgis_rejects_duplicate_ids_and_embedded_api_errors():
     duplicate_session = FakeSession([
         FakeResponse({"features": [
@@ -193,6 +211,50 @@ def test_socrata_rejects_duplicate_ids_and_early_empty_page():
             id_field="id",
         )
     assert caught.value.terminal_error == "empty_page"
+
+
+def test_socrata_rejects_premature_nonempty_short_page():
+    session = FakeSession([
+        FakeResponse([{"count": "5"}]),
+        FakeResponse([{"id": "a"}]),
+    ])
+
+    with pytest.raises(IncompleteDownloadError, match="page length mismatch: expected 2 records.*expected 5, fetched 0") as caught:
+        fetch_socrata_pages(
+            session,
+            url="https://example.test/resource/abcd.json",
+            page_size=2,
+            id_field="id",
+        )
+
+    assert caught.value.terminal_error == "page_length_mismatch"
+    assert caught.value.fetched_count == 0
+
+
+def test_socrata_requires_stable_id_for_ordered_pagination():
+    session = FakeSession([FakeResponse([{"count": "1"}])])
+
+    with pytest.raises(ValueError, match="id_field|stable_id_field|stable ID"):
+        fetch_socrata_pages(
+            session,
+            url="https://example.test/resource/abcd.json",
+            page_size=2,
+        )
+
+
+def test_socrata_rejects_rows_missing_required_stable_id():
+    session = FakeSession([
+        FakeResponse([{"count": "1"}]),
+        FakeResponse([{"other": "a"}]),
+    ])
+
+    with pytest.raises(IncompleteDownloadError, match="missing unique ID field"):
+        fetch_socrata_pages(
+            session,
+            url="https://example.test/resource/abcd.json",
+            page_size=2,
+            id_field="id",
+        )
 
 
 def test_bulk_download_is_atomic_and_returns_sha256(tmp_path):

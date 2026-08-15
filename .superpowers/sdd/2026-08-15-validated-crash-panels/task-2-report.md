@@ -70,3 +70,50 @@ after a failed download.
   `$order` expression is sent.
 - Bulk-download callers receive the SHA-256 string; the destination path is
   the path they supplied and can be recorded alongside the digest.
+
+## Fix round 1
+
+### RED evidence
+
+Added regressions for premature non-empty short pages from both APIs, missing
+Socrata stable-ID configuration, and rows missing the configured Socrata ID.
+Before changing production code, ran:
+
+```text
+/tmp/amber-alert-analysis-venv/bin/pytest tests/test_crash_download.py -v
+```
+
+The new tests failed as intended: both short-page tests exhausted the fake
+responses and reported a terminal request failure, while the missing stable-ID
+test attempted unordered pagination instead of rejecting the request. The
+existing explicit missing-row-ID test already remained green.
+
+### Fix and GREEN evidence
+
+ArcGIS and Socrata now require each non-empty page to contain exactly
+`min(page_size, expected_count - fetched_count)` records before any records
+are extended or the offset advances. Socrata now requires `id_field` or
+`stable_id_field` for non-empty extracts, always sends `$order=<id> ASC`, and
+always validates every returned row against that ID field.
+
+After the fixes:
+
+```text
+/tmp/amber-alert-analysis-venv/bin/pytest tests/test_crash_download.py -v
+11 passed in 0.06s
+
+/tmp/amber-alert-analysis-venv/bin/python -m py_compile \
+  code/crash_download.py tests/test_crash_download.py
+/tmp/amber-alert-analysis-venv/bin/pytest \
+  tests/test_crash_download.py tests/test_crash_coverage.py \
+  tests/test_state_dot_analysis_core.py tests/test_state_dot_analysis_runner.py -q
+30 passed in 32.51s
+```
+
+### Fix-round concerns
+
+- A non-empty page shorter or longer than the exact requested remainder now
+  invalidates the download immediately; only an exactly sized final page may
+  be shorter than `page_size`.
+- A Socrata count of zero returns an empty extract without a data-page request,
+  so no stable identifier is needed when there is no pagination.
