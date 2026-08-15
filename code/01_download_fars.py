@@ -1,7 +1,7 @@
 """
 01_download_fars.py — Download and clean NHTSA FARS accident data (2013–2022).
 
-Output: data/processed/fars_county_day.parquet
+Output: data/processed/fars_legacy_fatalities_county_day.parquet
     Columns: fips, date, fatals
 
 Run: python code/01_download_fars.py
@@ -138,7 +138,11 @@ def main() -> None:
         .reset_index(drop=True)
     )
 
-    out_path = DATA_PROC / "fars_county_day.parquet"
+    log.warning(
+        "DEPRECATED: this legacy downloader does not produce the canonical "
+        "validated FARS panel. Use build_fars_county_day.py instead."
+    )
+    out_path = DATA_PROC / "fars_legacy_fatalities_county_day.parquet"
     panel.to_parquet(out_path, index=False)
     log.info(
         "Saved %s — %d county-day observations across %d counties and %d years",
