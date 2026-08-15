@@ -283,21 +283,35 @@ def balance_validated_panel(
     sparse_frame["fips"] = _normalize_fips(sparse_frame["fips"])
     sparse_frame["date"] = pd.to_datetime(sparse_frame["date"], errors="coerce").dt.normalize()
     sparse_frame = sparse_frame.dropna(subset=["date"])
+    sparse_has_source = "source" in sparse_frame.columns
+    if sparse_has_source:
+        sparse_frame["source"] = sparse_frame["source"].where(
+            sparse_frame["source"].notna(), ""
+        ).astype(str)
     outcomes = list(outcome_availability)
     for column in outcomes:
         if column not in sparse_frame.columns:
             sparse_frame[column] = pd.NA
         sparse_frame[column] = pd.to_numeric(sparse_frame[column], errors="coerce")
-    sparse_frame = (
-        sparse_frame.groupby(["fips", "date"], as_index=False, dropna=False)[outcomes]
-        .sum(min_count=1)
-    )
+    sparse_group_keys = (["source"] if sparse_has_source else []) + ["fips", "date"]
+    sparse_frame = sparse_frame.groupby(
+        sparse_group_keys, as_index=False, dropna=False
+    )[outcomes].sum(min_count=1)
     universe = county_universe.copy()
     valid_manifest = _manifest_frame(manifest)
     if valid_manifest.empty:
         return pd.DataFrame(columns=["fips", "date", "year", *outcomes,
                                      "coverage_valid", "coverage_unit",
                                      "structural_zero", "source"])
+
+    # A source-less sparse frame is safe only when the manifest names one
+    # source. Otherwise there is no identity with which to exclude events from
+    # failed sources, so fail closed rather than silently leaking them.
+    manifest_sources = valid_manifest["source"].dropna().astype(str).unique()
+    if not sparse_has_source and len(manifest_sources) > 1:
+        raise ValueError(
+            "sparse must contain source when manifest has multiple sources"
+        )
 
     chunks: list[pd.DataFrame] = []
     for _, unit in valid_manifest.loc[valid_manifest["coverage_valid"]].iterrows():
@@ -310,7 +324,15 @@ def balance_validated_panel(
             [counties["fips"].tolist(), dates], names=["fips", "date"]
         ).to_frame(index=False)
         grid["year"] = int(unit["year"])
-        grid = grid.merge(sparse_frame, on=["fips", "date"], how="left", indicator=True)
+        source = str(unit["source"])
+        if sparse_has_source:
+            unit_sparse = sparse_frame.loc[sparse_frame["source"].eq(source)]
+            grid["source"] = source
+            merge_keys = ["source", "fips", "date"]
+        else:
+            unit_sparse = sparse_frame
+            merge_keys = ["fips", "date"]
+        grid = grid.merge(unit_sparse, on=merge_keys, how="left", indicator=True)
         grid["structural_zero"] = ~grid["_merge"].eq("both")
         grid = grid.drop(columns="_merge")
         for column, available in outcome_availability.items():
@@ -322,7 +344,7 @@ def balance_validated_panel(
                 grid[column] = float("nan")
         grid["coverage_valid"] = True
         grid["coverage_unit"] = reporting_unit
-        grid["source"] = unit["source"]
+        grid["source"] = source
         chunks.append(grid)
 
     if not chunks:
@@ -333,6 +355,22 @@ def balance_validated_panel(
     result["date"] = pd.to_datetime(result["date"]).dt.normalize()
     return result[["fips", "date", "year", *outcomes, "coverage_valid",
                    "coverage_unit", "structural_zero", "source"]]
+
+
+def _serialize_failure_reasons(value: object) -> str:
+    """Serialize tuple/list diagnostics while normalizing missing values."""
+    if value is None or value is pd.NA:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return "|".join(str(item) for item in value if item is not None)
+    try:
+        if bool(pd.isna(value)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value)
 
 
 def write_manifest(
@@ -352,8 +390,7 @@ def write_manifest(
     else:
         if "failure_reasons" in frame.columns:
             frame["failure_reasons"] = frame["failure_reasons"].map(
-                lambda value: "|".join(value) if not isinstance(value, str)
-                else value
+                _serialize_failure_reasons
             )
         columns = [field.name for field in CoverageResult.__dataclass_fields__.values()]
         for column in columns:

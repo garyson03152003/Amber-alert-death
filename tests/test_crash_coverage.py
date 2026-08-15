@@ -97,6 +97,13 @@ def test_manifest_is_serializable_and_deterministic(tmp_path):
     assert pd.read_parquet(parquet_path)["source"].tolist() == ["AA", "ZZ"]
 
 
+def test_manifest_normalizes_missing_failure_reasons(tmp_path):
+    manifest = pd.DataFrame([_unit().to_mapping(), _unit(source="ZZ").to_mapping()])
+    manifest["failure_reasons"] = [None, float("nan")]
+    csv_path, _ = write_manifest(manifest, output_dir=tmp_path, filename="missing")
+    assert pd.read_csv(csv_path, keep_default_na=False)["failure_reasons"].tolist() == ["", ""]
+
+
 def test_balance_fills_only_valid_units_and_available_outcomes():
     sparse = pd.DataFrame({
         "fips": ["01001"],
@@ -132,3 +139,29 @@ def test_balance_fills_only_valid_units_and_available_outcomes():
     assert row["coverage_unit"] == "state_year"
     assert bool(row["structural_zero"]) is True
     assert balanced["source"].eq("AL_DOT").all()
+
+
+def test_balance_excludes_events_from_invalid_source_sharing_county_date():
+    sparse = pd.DataFrame({
+        "source": ["VALID_DOT", "INVALID_DOT"],
+        "fips": ["01001", "01001"],
+        "date": ["2024-01-01", "2024-01-01"],
+        "crashes": [1, 99],
+    })
+    valid = _unit(source="VALID_DOT", state="AL")
+    invalid = _unit(source="INVALID_DOT", state="AL")
+    manifest = pd.DataFrame([
+        valid.to_mapping(),
+        {**invalid.to_mapping(), "coverage_valid": False,
+         "failure_reasons": ("terminal_page_error",)},
+    ])
+    balanced = balance_validated_panel(
+        sparse=sparse,
+        manifest=manifest,
+        county_universe=pd.DataFrame({"fips": ["01001"], "state": ["AL"]}),
+        outcome_availability={"crashes": True},
+        reporting_unit="state_year",
+    )
+    row = balanced.loc[balanced["date"].eq(pd.Timestamp("2024-01-01"))].iloc[0]
+    assert row["source"] == "VALID_DOT"
+    assert row["crashes"] == 1
