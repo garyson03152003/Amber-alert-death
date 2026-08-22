@@ -1,0 +1,8 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+CT_UCONN,09,2015,,111169,111169,111134,0,0,0,2015-01-01,2015-12-31,True,True,,UConn CTDOT ConnecticutCrash FeatureServer,,0,35,0
+CT_UCONN,09,2016,,115935,115935,115888,0,0,0,2016-01-01,2016-12-31,True,True,,UConn CTDOT ConnecticutCrash FeatureServer,,0,47,0
+CT_UCONN,09,2017,,115648,115648,115595,0,0,0,2017-01-01,2017-12-31,True,True,,UConn CTDOT ConnecticutCrash FeatureServer,,0,53,0
+CT_UCONN,09,2018,,114156,114156,114077,0,0,0,2018-01-01,2018-12-31,True,True,,UConn CTDOT ConnecticutCrash FeatureServer,,0,79,0
+CT_UCONN,09,2019,,112611,112611,112560,0,0,0,2019-01-01,2019-12-31,True,True,,UConn CTDOT ConnecticutCrash FeatureServer,,0,51,0
+CT_UCONN,09,2020,,83791,83791,83751,0,0,0,2020-01-01,2020-12-31,True,True,,UConn CTDOT ConnecticutCrash FeatureServer,,0,40,0
+CT_UCONN,09,2021,,101159,101159,101118,0,0,0,2021-01-01,2021-12-31,True,True,,UConn CTDOT ConnecticutCrash FeatureServer,,0,41,0

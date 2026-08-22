@@ -34,6 +34,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("texas_txdot")
@@ -49,6 +50,7 @@ PAGE_SIZE = 2000                      # maxRecordCount
 OUT_FIELDS = "crash_id,cnty_id,crash_date,death_cnt,sus_serious_injry_cnt,crash_fatal_fl"
 SLEEP_PAGE = 0.25   # seconds between pages
 SLEEP_YEAR = 3.0    # seconds between years
+FETCH_FAILURES: dict[int, BaseException] = {}
 
 
 def cris_to_fips(cris_id: int) -> str:
@@ -67,11 +69,29 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
         total = r.json().get("count", 0)
         log.info("  [%d] total records: %d", year, total)
     except Exception as e:
+        FETCH_FAILURES[year] = e
         log.warning("  [%d] count query failed: %s", year, e)
         return None
 
     if total == 0:
         log.warning("  [%d] 0 records — skip", year)
+        return None
+
+    try:
+        return strict_arcgis_dataframe(session, url=FS_URL, where=where,
+                                       expected_count=total, id_field="crash_id",
+                                       # This service rejects ORDER BY <field> ...
+                                       # OFFSET n past the first page when ordered
+                                       # by the Double-typed crash_id (a bare
+                                       # "Invalid query parameters" 400); ordering
+                                       # by the service's own indexed object-ID
+                                       # field pages correctly. crash_id is still
+                                       # verified for uniqueness.
+                                       order_by_field="ESRI_OID",
+                                       out_fields=OUT_FIELDS, page_size=PAGE_SIZE)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict pagination failed: %s", year, exc)
         return None
 
     # Paginate
@@ -165,10 +185,16 @@ log.info("Downloading TxDOT statewide crash data (2020–2024) …")
 session = requests.Session()
 session.headers.update(HEADERS)
 parts = []
+coverage_rows = []
 
 for yr in YEARS:
     log.info("Year %d …", yr)
     raw = fetch_year(session, yr)
+    coverage_rows.append(validate_source_frame("TX", yr, raw,
+        required_columns={"crash_id", "crash_date", "cnty_id", "death_cnt", "sus_serious_injry_cnt"},
+        date_column="crash_date", outcome_columns={"death_cnt", "sus_serious_injry_cnt"},
+        geography_column="cnty_id", geography_mapper=lambda value: cris_to_fips(int(value)) if pd.notna(value) and 1 <= int(value) <= 254 else None,
+        terminal_error=FETCH_FAILURES.get(yr)))
     agg = process_year(raw, yr)
     if agg is not None:
         parts.append(agg)
@@ -177,6 +203,7 @@ for yr in YEARS:
     time.sleep(SLEEP_YEAR)
 
 session.close()
+write_state_manifest_or_raise("TX", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not parts:
     log.error("No Texas data downloaded.")

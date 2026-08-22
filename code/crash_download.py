@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -187,16 +188,27 @@ def fetch_arcgis_pages(
     expected_count: int,
     page_size: int = 2_000,
     id_field: str,
+    order_by_field: str | None = None,
     timeout: float = 120,
     out_fields: str = "*",
 ) -> list[dict[str, object]]:
-    """Fetch all ArcGIS features, reconciling count and unique IDs."""
+    """Fetch all ArcGIS features, reconciling count and unique IDs.
+
+    ``order_by_field`` defaults to ``id_field`` but can be set separately:
+    some ArcGIS Server instances reject ``ORDER BY <field> ... OFFSET n`` for
+    a non-indexed business field (observed for TxDOT CRIS ordering by a
+    Double-typed ``crash_id``, which fails past the first page with a bare
+    "Invalid query parameters" error) while the same paging works fine
+    ordered by the service's own indexed object-ID field. Uniqueness is
+    still verified against ``id_field`` either way.
+    """
     expected = _validate_count(expected_count, "expected_count")
     size = _validate_count(page_size, "page_size")
     if size == 0:
         raise ValueError("page_size must be positive")
     if not id_field:
         raise ValueError("id_field is required for strict ArcGIS paging")
+    order_field = order_by_field or id_field
     if expected == 0:
         return []
 
@@ -210,18 +222,37 @@ def fetch_arcgis_pages(
             "where": where if where is not None else "1=1",
             "outFields": out_fields,
             "returnGeometry": "false",
-            "orderByFields": f"{id_field} ASC",
+            "orderByFields": f"{order_field} ASC",
             "resultOffset": offset,
             "resultRecordCount": size,
         }
-        payload = _response_json(
-            session,
-            url,
-            params=params,
-            timeout=timeout,
-            expected_count=expected,
-            fetched_count=len(rows),
-        )
+        # A single page can fail transiently under server load (observed:
+        # TxDOT's CRIS FeatureServer returning a bare "Invalid query
+        # parameters" 400 at growing, inconsistent deep offsets on a
+        # 600k+ row extract) even though the same request succeeds moments
+        # later. Retry the individual page before giving up on the whole
+        # reporting unit -- unlike a page-length or duplicate-ID mismatch,
+        # which indicates a real data problem and must still fail fast.
+        last_error: IncompleteDownloadError | None = None
+        payload = None
+        for delay in (0, 2, 8, 20):
+            if delay:
+                time.sleep(delay)
+            try:
+                payload = _response_json(
+                    session,
+                    url,
+                    params=params,
+                    timeout=timeout,
+                    expected_count=expected,
+                    fetched_count=len(rows),
+                )
+                last_error = None
+                break
+            except IncompleteDownloadError as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
         page = _arcgis_records(payload, expected_count=expected, fetched_count=len(rows))
         if not page:
             raise _failure(
@@ -335,6 +366,11 @@ def fetch_socrata_pages(
         if where is not None:
             params["$where"] = where
         params["$order"] = f"{requested_id} ASC"
+        if requested_id.startswith(":"):
+            # Socrata system fields (``:id``, ``:created_at``, ...) are not
+            # included in the default column set and must be requested
+            # explicitly; ``*`` must come first in the select list.
+            params["$select"] = f"*,{requested_id}"
         payload = _response_json(
             session,
             url,

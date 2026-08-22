@@ -1,0 +1,11 @@
+# Pinned analysis environment verified on 2026-08-15.
+numpy==2.5.2
+pandas==3.0.5
+pyarrow==25.0.1
+requests==2.34.2
+pyfixest==0.60.0
+pytest==9.1.1
+scipy==1.18.0
+openpyxl==3.1.5
+formulaic==1.2.2
+matplotlib==3.11.1

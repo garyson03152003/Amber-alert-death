@@ -1,0 +1,10 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count
+IL_IDOT,17,2016,,324496,324496,324486,0,0,0,2016-01-01,2016-12-31,True,True,,IDOT annual Open Data item,b4107d523d0ec26a39b59e8971a739b4d63e61fcefac4c3141ac3cb72295845b,10,0
+IL_IDOT,17,2017,,311930,311930,311930,0,0,0,2017-01-01,2017-12-31,True,True,,IDOT annual Open Data item,79e8708f677e6155f73967e16a3f06701127587d006e4e6d85ac524fc42aac0e,0,0
+IL_IDOT,17,2018,,319213,319213,319213,0,0,0,2018-01-01,2018-12-31,True,True,,IDOT annual Open Data item,881c270ef59533a5997c8b6d7cffedf6ad2fe7f445c4880d15cbd4034a0ccb7c,0,0
+IL_IDOT,17,2019,,313185,313185,313185,0,0,0,2019-01-01,2019-12-31,True,True,,IDOT annual Open Data item,1bd0a6ef4807a2e8ddef46c407afdf8943e35c93747d070147b874632de0979f,0,0
+IL_IDOT,17,2020,,246868,246868,246868,0,0,0,2020-01-01,2020-12-31,True,True,,IDOT annual Open Data item,7566b5b4dff71483bfa30477e46a647297557c9ba65ce62ae563efa8fcbe250c,0,0
+IL_IDOT,17,2021,,295634,295634,295634,0,0,0,2021-01-01,2021-12-31,True,True,,IDOT annual Open Data item,51d2efe101e9024f92e6d262de7af3f9de5e7dea316896e15db02c8a731aaa55,0,0
+IL_IDOT,17,2022,,298431,298431,298431,0,0,0,2022-01-01,2022-12-31,True,True,,IDOT annual Open Data item,bf7f4fa694c0baa493d08fd35c83f4ecdb674206fe757868e4730ddf28a77cdb,0,0
+IL_IDOT,17,2023,,300144,300144,300144,0,0,0,2023-01-01,2023-12-31,True,True,,IDOT annual Open Data item,c39b5ec0e55a78c05da0c72bb1589d004d6711da90c83a73b69e8b001c10a550,0,0
+IL_IDOT,17,2024,,303927,303927,303927,0,0,0,2024-01-01,2024-12-31,True,True,,IDOT annual Open Data item,fe9695b446c2928ec59662ed9e38f2939aa2debd9aaed7ecb2143715e8a66037,0,0

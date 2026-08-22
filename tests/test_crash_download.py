@@ -6,6 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 
+import crash_download  # noqa: E402
 from crash_download import (  # noqa: E402
     IncompleteDownloadError,
     download_bulk_file,
@@ -122,7 +123,8 @@ def test_arcgis_rejects_premature_nonempty_short_page():
     assert caught.value.fetched_count == 0
 
 
-def test_arcgis_rejects_duplicate_ids_and_embedded_api_errors():
+def test_arcgis_rejects_duplicate_ids_and_embedded_api_errors(monkeypatch):
+    monkeypatch.setattr(crash_download.time, "sleep", lambda _seconds: None)
     duplicate_session = FakeSession([
         FakeResponse({"features": [
             {"attributes": {"OBJECTID": 1}},
@@ -138,8 +140,11 @@ def test_arcgis_rejects_duplicate_ids_and_embedded_api_errors():
             id_field="OBJECTID",
         )
 
+    # A single page is retried (4 attempts total) before giving up, since the
+    # same "invalid query" text can also mean transient server overload; a
+    # persistent error must still surface as IncompleteDownloadError.
     api_error_session = FakeSession([
-        FakeResponse({"error": {"code": 400, "message": "bad where"}}),
+        FakeResponse({"error": {"code": 400, "message": "bad where"}}) for _ in range(4)
     ])
     with pytest.raises(IncompleteDownloadError, match="bad where") as caught:
         fetch_arcgis_pages(
@@ -151,6 +156,7 @@ def test_arcgis_rejects_duplicate_ids_and_embedded_api_errors():
         )
     assert caught.value.fetched_count == 0
     assert caught.value.terminal_error is not None
+    assert len(api_error_session.calls) == 4
 
 
 def test_socrata_count_query_precedes_ordered_pages_and_reconciles_count():

@@ -35,6 +35,9 @@ class CoverageResult:
     failure_reasons: tuple[str, ...]
     source_url: str
     source_checksum: str | None
+    unresolvable_geography_count: int = 0
+    unresolvable_date_count: int = 0
+    unresolvable_outcome_count: int = 0
 
     def to_mapping(self) -> dict:
         """Return a deterministic, serialization-friendly mapping."""
@@ -64,7 +67,8 @@ class CoverageResult:
             values["county_fips"] = None
         for field in ("expected_records", "fetched_records", "retained_records",
                       "duplicate_records", "invalid_date_count",
-                      "invalid_geography_count"):
+                      "invalid_geography_count", "unresolvable_geography_count",
+                      "unresolvable_date_count", "unresolvable_outcome_count"):
             value = values.get(field)
             if value is None or (isinstance(value, float) and pd.isna(value)):
                 values[field] = None if field == "expected_records" else 0
@@ -91,6 +95,9 @@ def validate_reporting_unit(
     duplicate_records: int = 0,
     invalid_date_count: int = 0,
     invalid_geography_count: int = 0,
+    unresolvable_geography_count: int = 0,
+    unresolvable_date_count: int = 0,
+    unresolvable_outcome_count: int = 0,
     request_complete: bool = False,
     terminal_error: object | None = None,
     required_columns_ok: bool = True,
@@ -105,6 +112,22 @@ def validate_reporting_unit(
     All applicable failures are collected so a manifest row explains the full
     reason a unit was rejected.  An expected count of zero is a valid genuine
     empty response when the request itself completed without diagnostics.
+    ``unresolvable_geography_count`` is a distinct, non-failing diagnostic: it
+    counts source rows whose county truly cannot be resolved to any Census
+    geography in the entire crosswalk window (explicit "unknown/not
+    applicable" placeholders, or codes that never matched any Census county in
+    any covered year). These rows are still excluded from the retained panel
+    -- never coded as a real county -- but a small, evidence-bounded residual
+    of them does not by itself invalidate an otherwise-complete reporting
+    unit, unlike ``invalid_geography_count``, which remains a hard failure.
+    ``unresolvable_date_count`` is the same idea applied to dates: a row whose
+    source date field is genuinely null/absent (not merely unparseable text)
+    is excluded from the retained panel without failing the reporting unit by
+    itself. ``unresolvable_outcome_count`` is the same idea for a row whose
+    outcome value is structurally impossible (a negative crash/fatality/
+    injury count): the value can never be a legitimate observation, so the
+    row is excluded rather than summed or zero-filled, without failing the
+    unit over a small residual.
     """
     failures: list[str] = []
 
@@ -118,7 +141,12 @@ def validate_reporting_unit(
         failures.append("invalid_record_count")
     if retained_records > fetched_records:
         failures.append("retained_exceeds_fetched")
-    if retained_records != fetched_records:
+    # ``unresolvable_geography_count`` rows are deliberately excluded from
+    # ``retained_records`` (never coded as a real county) without being a
+    # reconciliation failure by themselves; every other kind of drop
+    # (duplicates, invalid dates, invalid geography) still must show up here.
+    if retained_records != (fetched_records - unresolvable_geography_count
+                             - unresolvable_date_count - unresolvable_outcome_count):
         failures.append("retained_count_mismatch")
     if duplicate_records > 0:
         failures.append("duplicate_records")
@@ -166,6 +194,9 @@ def validate_reporting_unit(
         duplicate_records=int(duplicate_records),
         invalid_date_count=int(invalid_date_count),
         invalid_geography_count=int(invalid_geography_count),
+        unresolvable_geography_count=int(unresolvable_geography_count),
+        unresolvable_date_count=int(unresolvable_date_count),
+        unresolvable_outcome_count=int(unresolvable_outcome_count),
         observed_min_date=normalized_min,
         observed_max_date=normalized_max,
         request_complete=bool(request_complete),
@@ -188,6 +219,20 @@ _STATE_FIPS = {
     "SC": "45", "SD": "46", "TN": "47", "TX": "48", "UT": "49",
     "VT": "50", "VA": "51", "WA": "53", "WV": "54", "WI": "55",
     "WY": "56",
+    # Sub-state (single-county) source contracts use their own county FIPS as
+    # their "state" identifier -- there is no real 2-letter postal code for a
+    # county-only source, and its expected_county_fips/state_fips are both
+    # this same 5-digit code, so every codepath that resolves "state" to a
+    # FIPS prefix (here, and in StateSourceSpec.state_fips) agrees.
+    "MOCO": "24031",  # Montgomery County, MD
+    # 8-county Indianapolis MPO region source: uses Indiana's real 2-digit
+    # FIPS since it spans multiple counties within one real state (unlike
+    # the single-county sources above, which use their own county FIPS).
+    # Safe only because no full-Indiana source is registered as "IN"; the
+    # source-name check in _load_coverage_manifests (run_state_dot_analysis_fixed.py)
+    # would still separate the two if one were added later.
+    "INMPO": "18",  # Indianapolis MPO 8-county region, IN
+    "IDCOMPASS": "16",  # COMPASS/ITD 2-county (Ada, Canyon) region, ID
 }
 
 
@@ -232,7 +277,11 @@ def _manifest_frame(manifest: pd.DataFrame | Iterable[CoverageResult]) -> pd.Dat
     frame["coverage_valid"] = frame["coverage_valid"].map(_as_bool)
     if "county_fips" not in frame.columns:
         frame["county_fips"] = None
-    frame["county_fips"] = frame["county_fips"].where(frame["county_fips"].notna(), None)
+    # An all-missing numeric county_fips column (state_year reporting units)
+    # keeps a float64 dtype from CSV/parquet loading; assigning a string back
+    # into it -- even into an empty selection -- raises under pandas's strict
+    # dtype coercion, so force a string-friendly dtype first.
+    frame["county_fips"] = frame["county_fips"].astype(object).where(frame["county_fips"].notna(), None)
     frame.loc[frame["county_fips"].notna(), "county_fips"] = _normalize_fips(
         frame.loc[frame["county_fips"].notna(), "county_fips"]
     )

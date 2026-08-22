@@ -10,6 +10,12 @@ import numpy as np
 import pandas as pd
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y"}
+    return bool(value) if value is not None and not pd.isna(value) else False
+
+
 def _sum_preserve_missing(series: pd.Series) -> float:
     """Sum observed values while returning NaN when the outcome is unavailable."""
     return series.sum(min_count=1)
@@ -177,6 +183,191 @@ def build_commuter_spillover(
     out["spillover_share"] = out["spillover_share"].clip(lower=0.0, upper=1.0)
     out["log_spillover_commuters"] = np.log1p(out["spillover_commuters"])
     return out
+
+
+def validate_analysis_inputs(
+    panel: pd.DataFrame,
+    manifest: pd.DataFrame,
+    review: pd.DataFrame | None,
+    *,
+    flows: pd.DataFrame | None,
+    direct_only: bool = False,
+    require_review: bool = True,
+) -> None:
+    """Fail closed before a validated panel reaches an estimator.
+
+    A legacy sparse source file cannot establish that an absent county-day is a
+    true zero.  The runner therefore requires the balanced-panel provenance,
+    its coverage manifest, a reviewed state-year decision, and (unless the
+    caller explicitly requests a direct-only model) commuter weights.
+    """
+    required_panel = {"fips", "date", "year", "coverage_valid", "structural_zero", "source"}
+    missing_panel = required_panel - set(panel.columns)
+    if missing_panel:
+        raise ValueError(f"validated panel missing required columns: {sorted(missing_panel)}")
+    if panel.empty:
+        raise ValueError("validated panel is empty")
+    if not panel["coverage_valid"].map(_as_bool).all():
+        raise ValueError("validated panel contains invalid coverage units")
+
+    required_manifest = {"year", "coverage_valid", "source"}
+    missing_manifest = required_manifest - set(manifest.columns)
+    if missing_manifest:
+        raise ValueError(f"coverage manifest missing required columns: {sorted(missing_manifest)}")
+    if manifest.empty:
+        raise ValueError("coverage manifest is empty")
+    if not manifest["coverage_valid"].map(_as_bool).all():
+        raise ValueError("coverage manifest contains invalid reporting units")
+    _validate_panel_manifest_binding(panel, manifest)
+
+    if not direct_only:
+        if flows is None:
+            raise ValueError("commuting weights are required for spillover_joint analysis")
+        required_flows = {"fips_home", "fips_work", "workers", "weight"}
+        missing_flows = required_flows - set(flows.columns)
+        if missing_flows or flows.empty:
+            rendered = sorted(missing_flows) if missing_flows else ["no rows"]
+            raise ValueError(f"commuting weights are missing or incomplete: {rendered}")
+
+    if not require_review:
+        return
+    if review is None or review.empty:
+        raise ValueError("reviewed accepted state-years are required")
+    required_review = {"state", "year", "review_status"}
+    missing_review = required_review - set(review.columns)
+    if missing_review:
+        raise ValueError(f"review table missing required columns: {sorted(missing_review)}")
+    accepted = review.loc[
+        review["review_status"].astype(str).str.lower().eq("accepted"), ["state", "year"]
+    ].copy()
+    accepted["state"] = accepted["state"].astype(str).str.upper()
+    accepted["year"] = pd.to_numeric(accepted["year"], errors="coerce")
+    if accepted["year"].isna().any():
+        raise ValueError("reviewed accepted state-years contain invalid years")
+    if "state" not in panel.columns:
+        raise ValueError("validated state panel is missing state labels for review")
+    observed = panel.loc[:, ["state", "year"]].drop_duplicates().copy()
+    observed["state"] = observed["state"].astype(str).str.upper()
+    observed["year"] = pd.to_numeric(observed["year"], errors="coerce")
+    required_keys = set(map(tuple, observed.to_records(index=False)))
+    accepted_keys = set(map(tuple, accepted.to_records(index=False)))
+    missing = sorted(required_keys - accepted_keys)
+    if missing:
+        rendered = ", ".join(f"{state} {int(year)}" for state, year in missing)
+        raise ValueError(f"validated panel includes state-years not reviewed accepted: {rendered}")
+
+
+def _validate_panel_manifest_binding(panel: pd.DataFrame, manifest: pd.DataFrame) -> None:
+    """Require every balanced panel reporting key to originate in its manifest.
+
+    State/year matching alone is not provenance: a panel row must also carry a
+    source that the corresponding manifest authorizes.  County-year sources
+    (Wisconsin) additionally require a matching county reporting unit.
+    """
+    panel_keys = panel.loc[:, ["year", "source"]].copy()
+    panel_keys["year"] = pd.to_numeric(panel_keys["year"], errors="coerce")
+    panel_keys["source"] = panel_keys["source"].astype(str)
+    manifest_keys = manifest.loc[:, ["year", "source"]].copy()
+    manifest_keys["year"] = pd.to_numeric(manifest_keys["year"], errors="coerce")
+    manifest_keys["source"] = manifest_keys["source"].astype(str)
+    if "state" in panel.columns and "state" in manifest.columns:
+        panel_keys["state"] = panel["state"].astype(str).str.upper()
+        manifest_keys["state"] = manifest["state"].astype(str).str.upper()
+    join_keys = list(panel_keys.columns)
+    allowed = manifest_keys.drop_duplicates()
+    unmatched = panel_keys.drop_duplicates().merge(allowed, on=join_keys, how="left", indicator=True)
+    if unmatched["_merge"].ne("both").any():
+        bad = unmatched.loc[unmatched["_merge"].ne("both"), join_keys].to_dict("records")
+        raise ValueError(f"validated panel source/reporting keys are absent from coverage manifest: {bad}")
+
+    if "county_fips" not in manifest.columns or not manifest["county_fips"].notna().any():
+        return
+    county_manifest = manifest.loc[manifest["county_fips"].notna()].copy()
+    county_sources = set(county_manifest["source"].astype(str))
+    county_panel = panel.loc[panel["source"].astype(str).isin(county_sources)].copy()
+    if county_panel.empty:
+        return
+    county_panel["fips"] = county_panel["fips"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(5)
+    county_manifest["county_fips"] = county_manifest["county_fips"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(5)
+    county_panel["year"] = pd.to_numeric(county_panel["year"], errors="coerce")
+    county_manifest["year"] = pd.to_numeric(county_manifest["year"], errors="coerce")
+    county_panel["source"] = county_panel["source"].astype(str)
+    county_manifest["source"] = county_manifest["source"].astype(str)
+    keys = ["source", "year"]
+    if "state" in county_panel.columns and "state" in county_manifest.columns:
+        county_panel["state"] = county_panel["state"].astype(str).str.upper()
+        county_manifest["state"] = county_manifest["state"].astype(str).str.upper()
+        keys.append("state")
+    observed = county_panel.loc[:, [*keys, "fips"]].drop_duplicates()
+    expected = county_manifest.loc[:, [*keys, "county_fips"]].drop_duplicates()
+    unmatched_counties = observed.merge(expected, left_on=[*keys, "fips"], right_on=[*keys, "county_fips"], how="left", indicator=True)
+    if unmatched_counties["_merge"].ne("both").any():
+        bad = unmatched_counties.loc[unmatched_counties["_merge"].ne("both"), [*keys, "fips"]].to_dict("records")
+        raise ValueError(f"validated county-year panel keys are absent from coverage manifest: {bad}")
+
+
+def extract_finite_coefficients(
+    fit,
+    terms: tuple[str, ...],
+) -> tuple[list[dict[str, float | str]], tuple[str, ...], dict[str, str]]:
+    """Extract only interpretable estimates from a pyfixest fit.
+
+    Nonfinite estimates, standard errors, and p-values are model failures, not
+    values to render as an apparently valid result.
+    """
+    table = fit.tidy()
+    rows: list[dict[str, float | str]] = []
+    errors: dict[str, str] = {}
+    for term in terms:
+        if term not in table.index:
+            errors[term] = "missing_coefficient"
+            continue
+        try:
+            beta = float(table.loc[term, "Estimate"])
+            se = float(table.loc[term, "Std. Error"])
+            pvalue = float(table.loc[term, "Pr(>|t|)"])
+        except (KeyError, TypeError, ValueError):
+            errors[term] = "invalid_coefficient_schema"
+            continue
+        if not np.isfinite([beta, se, pvalue]).all():
+            errors[term] = "nonfinite_coefficient"
+            continue
+        rows.append({"term": term, "beta": beta, "se": se, "pvalue": pvalue})
+    return rows, tuple(row["term"] for row in rows), errors
+
+
+def fit_status_row(
+    *,
+    status: str,
+    input_n: int,
+    fitted_n: int,
+    zero_share: float | None,
+    terms_requested: tuple[str, ...],
+    terms_produced: tuple[str, ...] = (),
+    error_reason: str | None = None,
+) -> dict[str, object]:
+    """Return a machine-readable diagnostic for one expected model fit."""
+    return {
+        "record_type": "fit_status",
+        "status": status,
+        "input_n": int(input_n),
+        "fitted_n": int(fitted_n),
+        "zero_share_input": zero_share,
+        "terms_requested": "|".join(terms_requested),
+        "terms_produced": "|".join(terms_produced),
+        "error_reason": error_reason or "",
+    }
+
+
+def summarize_fit_statuses(rows: list[dict[str, object]]) -> dict[str, int]:
+    """Report expected and successful fit/term counts from status diagnostics."""
+    statuses = [row for row in rows if row.get("record_type", "fit_status") == "fit_status"]
+    return {
+        "expected_fits": len(statuses),
+        "produced_fits": sum(row.get("status") in {"ok", "partial"} for row in statuses),
+        "expected_terms": sum(bool(term) for row in statuses for term in str(row.get("terms_requested", "")).split("|")),
+        "produced_terms": sum(bool(term) for row in statuses for term in str(row.get("terms_produced", "")).split("|")),
+    }
 
 
 def add_spillover_classes(panel: pd.DataFrame) -> pd.DataFrame:

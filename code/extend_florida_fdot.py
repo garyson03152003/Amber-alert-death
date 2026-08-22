@@ -19,6 +19,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("fl_extend")
@@ -32,6 +33,7 @@ FEATURE_SERVER = (
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; research)"}
 
 NEW_YEARS = [2017, 2018]  # 2019 is very incomplete (38K vs 440K for 2018)
+FETCH_FAILURES = {}
 
 OUT_FIELDS = (
     "CRASH_DATE,COUNTY_TXT,DOT_CNTY_CD,"
@@ -78,6 +80,15 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
 
     if total == 0:
         log.warning("  [%d] 0 records — skipping", year)
+        return None
+
+    try:
+        return strict_arcgis_dataframe(session, url=FEATURE_SERVER, where=where,
+                                       expected_count=total, id_field="OBJECTID",
+                                       out_fields=OUT_FIELDS, page_size=PAGE_SIZE)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict pagination failed: %s", year, exc)
         return None
 
     parts, offset = [], 0
@@ -148,10 +159,16 @@ log.info("  Existing: %d rows  date range %s – %s  counties %d",
 session = requests.Session()
 session.headers.update(HEADERS)
 new_parts = []
+coverage_rows = []
 
 for yr in NEW_YEARS:
     log.info("Year %d …", yr)
     raw = fetch_year(session, yr)
+    coverage_rows.append(validate_source_frame("FL", yr, raw,
+        required_columns={"CRASH_DATE", "COUNTY_TXT", "NUMBER_OF_KILLED", "NUMBER_OF_SERIOUS_INJURIES"},
+        date_column="CRASH_DATE", outcome_columns={"NUMBER_OF_KILLED", "NUMBER_OF_SERIOUS_INJURIES"},
+        date_unit="ms", geography_column="COUNTY_TXT", geography_mapper=FL_COUNTY_FIPS,
+        terminal_error=FETCH_FAILURES.get(yr)))
     agg = process_year(raw, yr)
     if agg is not None:
         new_parts.append(agg)
@@ -160,6 +177,7 @@ for yr in NEW_YEARS:
     time.sleep(SLEEP_YEAR)
 
 session.close()
+write_state_manifest_or_raise("FL", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not new_parts:
     log.error("No new data downloaded.")

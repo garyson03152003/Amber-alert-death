@@ -46,6 +46,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("massachusetts_massdot")
@@ -73,6 +74,7 @@ def out_fields(year: int) -> str:
     return f"{YEAR_DATE_FIELD[year]},{COMMON_FIELDS}"
 
 PAGE_SIZE = 2000   # server maxRecordCount
+FETCH_FAILURES: dict[int, BaseException] = {}
 
 # ── Massachusetts county FIPS mapping ────────────────────────────────────────
 MA_COUNTY_FIPS = {
@@ -109,11 +111,21 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
         total = r.json().get("count", 0)
         log.info("  [%d] %d records  (%s, date_field=%s)", year, total, svc_type, date_field)
     except Exception as exc:
+        FETCH_FAILURES[year] = exc
         log.warning("  [%d] count failed: %s", year, exc)
         return None
 
     if total == 0:
         log.warning("  [%d] 0 records — skipping", year)
+        return None
+
+    try:
+        return strict_arcgis_dataframe(session, url=query_url, where="1=1",
+                                       expected_count=total, id_field="OBJECTID",
+                                       out_fields=fields, page_size=PAGE_SIZE)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict pagination failed: %s", year, exc)
         return None
 
     # Paginate
@@ -205,14 +217,14 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
         df.groupby(["fips", "crash_date"])
           .agg(
               ma_fatals     =("fatals",      "sum"),
-              ma_serious_inj=("serious_inj", "sum"),
+              ma_injury_proxy=("serious_inj", "sum"),
               ma_crashes    =("fatals",      "count"),
           )
           .reset_index()
           .rename(columns={"crash_date": "date"})
     )
     log.info("  [%d] → %d county-days  ma_fatals=%.0f  ma_serious_inj=%.0f",
-             year, len(agg), agg["ma_fatals"].sum(), agg["ma_serious_inj"].sum())
+             year, len(agg), agg["ma_fatals"].sum(), agg["ma_injury_proxy"].sum())
     return agg
 
 
@@ -222,10 +234,16 @@ log.info("Downloading Massachusetts MassDOT crash data (2013–2020) …")
 session = requests.Session()
 session.headers.update(HEADERS)
 parts = []
+coverage_rows = []
 
 for yr in YEARS:
     log.info("Year %d …", yr)
     raw = fetch_year(session, yr)
+    coverage_rows.append(validate_source_frame("MA", yr, raw,
+        required_columns={YEAR_DATE_FIELD[yr], "CNTY_NAME", "NUMB_FATAL_INJR", "NUMB_NONFATAL_INJR", "MAX_INJR_SVRTY_CL"},
+        date_column=YEAR_DATE_FIELD[yr], outcome_columns={"NUMB_FATAL_INJR", "NUMB_NONFATAL_INJR"}, date_unit="ms",
+        geography_column="CNTY_NAME", geography_mapper=lambda value: MA_COUNTY_FIPS.get(str(value).strip().upper()),
+        terminal_error=FETCH_FAILURES.get(yr)))
     agg = process_year(raw, yr)
     if agg is not None:
         parts.append(agg)
@@ -234,6 +252,7 @@ for yr in YEARS:
     gc.collect()
 
 session.close()
+write_state_manifest_or_raise("MA", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not parts:
     log.error("No Massachusetts data downloaded.")
@@ -246,7 +265,7 @@ ma_panel = (
     ma_panel.groupby(["fips", "date"])
       .agg(
           ma_fatals     =("ma_fatals",      "sum"),
-          ma_serious_inj=("ma_serious_inj", "sum"),
+          ma_injury_proxy=("ma_injury_proxy", "sum"),
           ma_crashes    =("ma_crashes",     "sum"),
       )
       .reset_index()
@@ -256,8 +275,9 @@ log.info("\nFinal Massachusetts panel:")
 log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
          len(ma_panel), ma_panel["fips"].nunique(),
          ma_panel["date"].min().date(), ma_panel["date"].max().date())
-log.info("  Total ma_fatals: %.0f  Total ma_serious_inj: %.0f",
-         ma_panel["ma_fatals"].sum(), ma_panel["ma_serious_inj"].sum())
+ma_panel["ma_serious_inj"] = np.nan
+log.info("  Total ma_fatals: %.0f  Total ma_injury_proxy: %.0f",
+         ma_panel["ma_fatals"].sum(), ma_panel["ma_injury_proxy"].sum())
 
 ma_panel.to_parquet(OUT_PATH, index=False)
 log.info("Saved → %s", OUT_PATH)

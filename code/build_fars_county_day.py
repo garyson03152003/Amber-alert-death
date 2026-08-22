@@ -26,6 +26,7 @@ DATA_PROC = ROOT / "data" / "processed"
 EVENTS_OUT = DATA_PROC / "fars_events_county_day.parquet"
 BALANCED_OUT = DATA_PROC / "fars_balanced_county_day.parquet"
 POPULATION_PATH = DATA_PROC / "county_population.parquet"
+FIPS_CROSSWALK_PATH = DATA_PROC / "county_fips_crosswalk.parquet"
 YEARS = tuple(range(2013, 2025))
 FARS_SOURCE = "FARS_NHTSA"
 FARS_URL_TEMPLATE = (
@@ -41,6 +42,24 @@ ADVERSE_WEATHER = {2, 3, 4, 5, 6, 11, 12}
 CONNECTICUT_LONGITUDINAL_POLICY = "exclude_until_crosswalk"
 CONNECTICUT_FIPS = "09"
 CONNECTICUT_MANIFEST_WARNING = "connecticut_excluded_from_longitudinal_panel"
+# Connecticut's former counties remain valid sparse-event geography during the
+# Census transition to planning regions.  This is event validation only: the
+# balanced longitudinal panel still excludes every Connecticut FIPS.
+LEGACY_CONNECTICUT_COUNTY_FIPS = frozenset({
+    "09001", "09003", "09005", "09007", "09009", "09011", "09013", "09015",
+})
+
+CONNECTICUT_TRANSITION_YEARS = frozenset(range(2021, 2025))
+
+# FARS's own accident-level source files do not always adopt a Census county
+# rename or boundary change the same year Census does -- for example South
+# Dakota's Shannon County (46113, renamed Oglala Lakota County 46102 in 2015)
+# and a handful of Alaska borough codes appear in FARS archives for several
+# years after Census retired them. ``permitted_fips_for_year`` therefore
+# treats a FIPS code as permitted in every year if the Census Gazetteer
+# recognized it in *any* year of the 2013-2024 crosswalk window, rather than
+# only the single processing year.
+UNKNOWN_COUNTY_CODES = frozenset({0, 997, 998, 999})
 
 # 50 states plus the District of Columbia.  This intentionally excludes PR and
 # other territories even though some use numeric state-like FIPS codes.
@@ -153,20 +172,42 @@ def _population_counties(population: pd.DataFrame) -> pd.DataFrame:
 
 
 def permitted_fips_for_year(year: int, population: pd.DataFrame | None = None) -> set[str]:
-    """Return the actual Census county-equivalent FIPS set for one FARS year.
+    """Return the Census county-equivalent FIPS set FARS may use for one year.
 
-    This local population-derived check is deterministic and intentionally has
-    no network dependency.  For 2024, whose bundled PEP extract is 2023-vintage,
-    use the last available county list as a geography reference.  Connecticut
-    is retained here because sparse FARS events are still published for it;
-    only the balanced longitudinal panel excludes Connecticut.
+    The Population Estimates Program backcasts historical rows onto *current*
+    county boundaries, so it cannot distinguish a genuinely-in-effect legacy
+    code from a source-quality error. When no explicit ``population`` frame is
+    supplied, prefer the year-accurate Census Gazetteer crosswalk built by
+    ``build_county_fips_crosswalk.py``, unioned across every crosswalk year
+    (2013-2024) rather than restricted to ``year`` alone, because FARS's own
+    source files lag Census renames and boundary changes by several years.
+    Callers that pass ``population`` directly (unit tests, callers without
+    network access) keep the deterministic population-derived behavior
+    unchanged. Connecticut is retained here because sparse FARS events are
+    still published for it; only the balanced longitudinal panel excludes
+    Connecticut.
     """
+    if population is None and FIPS_CROSSWALK_PATH.is_file():
+        crosswalk = pd.read_parquet(FIPS_CROSSWALK_PATH)
+        crosswalk["fips"] = crosswalk["fips"].astype(str).str.zfill(5)
+        if not crosswalk.empty:
+            permitted = set(crosswalk["fips"])
+            if int(year) in CONNECTICUT_TRANSITION_YEARS:
+                permitted.update(LEGACY_CONNECTICUT_COUNTY_FIPS)
+            return permitted
+
     pop = _population_counties(
         pd.read_parquet(POPULATION_PATH) if population is None else population
     )
     candidates = pop.loc[pop["year"].le(int(year)), "year"]
     source_year = int(candidates.max()) if not candidates.empty else int(pop["year"].min())
-    return set(pop.loc[pop["year"].eq(source_year), "fips"])
+    permitted = set(pop.loc[pop["year"].eq(source_year), "fips"])
+    if int(year) in CONNECTICUT_TRANSITION_YEARS:
+        # Keep current Census planning-region codes from ``permitted`` and
+        # union the legacy county codes so transition-era FARS rows are not
+        # discarded merely because the population reference changed geography.
+        permitted.update(LEGACY_CONNECTICUT_COUNTY_FIPS)
+    return permitted
 
 
 def build_fars_year(year: int, session: requests.Session) -> tuple[pd.DataFrame, CoverageResult]:
@@ -189,19 +230,34 @@ def build_fars_year(year: int, session: requests.Session) -> tuple[pd.DataFrame,
 
     state = _numeric(accidents, "STATE")
     county = _numeric(accidents, "COUNTY")
-    state_code = state.astype("Int64").astype(str).str.zfill(2)
-    county_code = county.astype("Int64").astype(str).str.zfill(3)
+    state_integral = state.notna() & state.eq(state.round())
+    county_integral = county.notna() & county.eq(county.round())
+    state_code = state.where(state_integral).astype("Int64").astype(str).str.zfill(2)
+    county_code = county.where(county_integral).astype("Int64").astype(str).str.zfill(3)
     fips = state_code + county_code
     # Validate against actual Census geography, not merely a numeric range:
     # syntactically plausible but nonexistent codes (for example 01997) are
     # source-quality failures, not counties with zero crashes.
     geography_valid = (
-        state.notna() & county.notna()
+        state_integral & county_integral
         & state_code.isin(US_STATE_FIPS)
         & county.between(1, 998)
         & fips.isin(permitted_fips_for_year(int(year)))
     )
-    invalid_geography_count = int((~geography_valid).sum())
+    # A row with a well-formed, real-US-state FIPS that still cannot be
+    # resolved to any Census county in the 2013-2024 crosswalk (explicit
+    # "unknown/not applicable" placeholders such as county 0/997/998/999, or
+    # a code Census never recognized in any covered year) is a genuinely
+    # unresolvable source record, not a structurally malformed one. It is
+    # still excluded from the retained panel below, but a small, bounded
+    # residual of these does not by itself invalidate the reporting unit.
+    # Malformed rows (non-integral geography, non-US-state territories such
+    # as Puerto Rico) remain a hard invalid_geography failure.
+    unresolvable_mask = (
+        ~geography_valid & state_integral & county_integral & state_code.isin(US_STATE_FIPS)
+    )
+    unresolvable_geography_count = int(unresolvable_mask.sum())
+    invalid_geography_count = int((~geography_valid & ~unresolvable_mask).sum())
     archive_year = _numeric(accidents, "YEAR")
     date = pd.to_datetime(
         {"year": archive_year, "month": _numeric(accidents, "MONTH"),
@@ -240,6 +296,7 @@ def build_fars_year(year: int, session: requests.Session) -> tuple[pd.DataFrame,
         source=FARS_SOURCE, state="US", year=int(year), expected_records=raw_count,
         fetched_records=raw_count, retained_records=len(retained), duplicate_records=duplicate_count,
         invalid_date_count=invalid_date_count, invalid_geography_count=invalid_geography_count,
+        unresolvable_geography_count=unresolvable_geography_count,
         request_complete=True, required_columns_ok=True,
         observed_min_date=observed.min() if not observed.empty else None,
         observed_max_date=observed.max() if not observed.empty else None,
@@ -320,8 +377,22 @@ def build_fars(years: Iterable[int] = YEARS) -> tuple[pd.DataFrame, pd.DataFrame
     frames: list[pd.DataFrame] = []
     results: list[CoverageResult] = []
     for year in requested:
-        events, result = build_fars_year(year, session)
-        frames.append(events)
+        try:
+            events, result = build_fars_year(year, session)
+        except Exception as exc:
+            # Retrieval failures are coverage failures too.  Preserve them as
+            # a reporting-unit manifest row instead of letting a network
+            # exception make the requested year disappear from diagnostics.
+            result = validate_reporting_unit(
+                source=FARS_SOURCE,
+                state="US",
+                year=year,
+                request_complete=False,
+                terminal_error=exc,
+                source_url=FARS_URL_TEMPLATE.format(year=year),
+            )
+        else:
+            frames.append(events)
         results.append(result)
     national_manifest = pd.DataFrame([result.to_mapping() for result in results])
     # This is intentionally a separate invalid coverage row: it records a

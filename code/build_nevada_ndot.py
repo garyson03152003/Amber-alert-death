@@ -37,6 +37,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("nevada_ndot")
@@ -52,6 +53,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; research)"}
 YEARS      = list(range(2016, 2025))   # 2016–2024 (2013-2015 have 0 records)
 OUT_FIELDS = "Crash_Date,County,Crash_Year,Fatalities,Injured,Crash_Severity,Injury_Type"
 PAGE_SIZE  = 100_000   # well under server's 300k max
+FETCH_FAILURES: dict[int, BaseException] = {}
 
 # ── Nevada county FIPS mapping ────────────────────────────────────────────────
 NV_COUNTY_FIPS = {
@@ -90,11 +92,21 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
         total = r.json().get("count", 0)
         log.info("  [%d] %d records", year, total)
     except Exception as exc:
+        FETCH_FAILURES[year] = exc
         log.warning("  [%d] count query failed: %s", year, exc)
         return None
 
     if total == 0:
         log.warning("  [%d] 0 records — skipping", year)
+        return None
+
+    try:
+        return strict_arcgis_dataframe(session, url=FEATURE_SERVER, where=where_clause,
+                                       expected_count=total, id_field="OBJECTID",
+                                       out_fields=OUT_FIELDS, page_size=PAGE_SIZE)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict pagination failed: %s", year, exc)
         return None
 
     # Paginate
@@ -165,7 +177,7 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
         df.groupby(["fips", "crash_date"])
           .agg(
               nv_fatals     =("fatals",      "sum"),
-              nv_serious_inj=("serious_inj", "sum"),
+              nv_injury_proxy=("serious_inj", "sum"),
               nv_all_injured=("all_injured", "sum"),
               nv_crashes    =("fatals",      "count"),
           )
@@ -173,7 +185,7 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
           .rename(columns={"crash_date": "date"})
     )
     log.info("  [%d] → %d county-days  nv_fatals=%.0f  nv_serious_inj=%.0f",
-             year, len(agg), agg["nv_fatals"].sum(), agg["nv_serious_inj"].sum())
+             year, len(agg), agg["nv_fatals"].sum(), agg["nv_injury_proxy"].sum())
     return agg
 
 
@@ -183,10 +195,16 @@ log.info("Downloading Nevada NDOT crash data (2016–2024) …")
 session = requests.Session()
 session.headers.update(HEADERS)
 parts = []
+coverage_rows = []
 
 for yr in YEARS:
     log.info("Year %d …", yr)
     raw = fetch_year(session, yr)
+    coverage_rows.append(validate_source_frame("NV", yr, raw,
+        required_columns={"Crash_Date", "County", "Fatalities", "Injured", "Injury_Type"},
+        date_column="Crash_Date", outcome_columns={"Fatalities", "Injured"}, date_unit="ms",
+        geography_column="County", geography_mapper=NV_COUNTY_FIPS,
+        terminal_error=FETCH_FAILURES.get(yr)))
     agg = process_year(raw, yr)
     if agg is not None:
         parts.append(agg)
@@ -195,6 +213,7 @@ for yr in YEARS:
     gc.collect()
 
 session.close()
+write_state_manifest_or_raise("NV", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not parts:
     log.error("No Nevada data downloaded.")
@@ -207,7 +226,7 @@ nv_panel = (
     nv_panel.groupby(["fips", "date"])
       .agg(
           nv_fatals     =("nv_fatals",      "sum"),
-          nv_serious_inj=("nv_serious_inj", "sum"),
+          nv_injury_proxy=("nv_injury_proxy", "sum"),
           nv_all_injured=("nv_all_injured", "sum"),
           nv_crashes    =("nv_crashes",     "sum"),
       )
@@ -218,8 +237,9 @@ log.info("\nFinal Nevada NDOT panel:")
 log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
          len(nv_panel), nv_panel["fips"].nunique(),
          nv_panel["date"].min().date(), nv_panel["date"].max().date())
-log.info("  Total nv_fatals: %.0f  Total nv_serious_inj: %.0f",
-         nv_panel["nv_fatals"].sum(), nv_panel["nv_serious_inj"].sum())
+nv_panel["nv_serious_inj"] = np.nan
+log.info("  Total nv_fatals: %.0f  Total nv_injury_proxy: %.0f",
+         nv_panel["nv_fatals"].sum(), nv_panel["nv_injury_proxy"].sum())
 
 nv_panel.to_parquet(OUT_PATH, index=False)
 log.info("Saved → %s", OUT_PATH)

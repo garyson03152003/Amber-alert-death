@@ -1,0 +1,9 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count
+MA_MASSDOT,25,2013,,125285,125285,125285,0,0,0,2013-01-01,2013-12-31,True,True,,MassDOT annual ArcGIS services,,0,0
+MA_MASSDOT,25,2014,,130233,130233,130233,0,0,0,2014-01-01,2014-12-31,True,True,,MassDOT annual ArcGIS services,,0,0
+MA_MASSDOT,25,2015,,139050,139050,139050,0,0,0,2015-01-01,2015-12-31,True,True,,MassDOT annual ArcGIS services,,0,0
+MA_MASSDOT,25,2016,,143474,143474,143474,0,0,0,2016-01-01,2016-12-31,True,True,,MassDOT annual ArcGIS services,,0,0
+MA_MASSDOT,25,2017,,145068,145068,145068,0,0,0,2017-01-01,2017-12-31,True,True,,MassDOT annual ArcGIS services,,0,0
+MA_MASSDOT,25,2018,,142272,142272,142272,0,0,0,2018-01-01,2018-12-31,True,True,,MassDOT annual ArcGIS services,,0,0
+MA_MASSDOT,25,2019,,140939,140939,140880,0,0,0,2019-01-01,2019-12-31,True,True,,MassDOT annual ArcGIS services,,0,59
+MA_MASSDOT,25,2020,,100516,100516,100487,0,0,0,2020-01-01,2020-12-31,True,True,,MassDOT annual ArcGIS services,,0,29

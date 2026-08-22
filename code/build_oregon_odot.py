@@ -32,6 +32,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("oregon_odot")
@@ -46,6 +47,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; research)"}
 
 YEARS      = list(range(2019, 2025))   # 2019–2024 (data starts 2019)
 PAGE_SIZE  = 10_000                    # server maxRecordCount = 10,000
+FETCH_FAILURES: dict[int, BaseException] = {}
 OUT_FIELDS = "CRASH_DT,CNTY_NM,CRASH_YR_NO,KABCO,TOT_FATAL_CNT,TOT_INJ_LVL_A_CNT"
 
 # ── Oregon county FIPS mapping (title-case as returned by server) ─────────────
@@ -122,11 +124,21 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
         total = resp.get("count", 0)
         log.info("  [%d] %d records to fetch", year, total)
     except Exception as exc:
+        FETCH_FAILURES[year] = exc
         log.warning("  [%d] count query failed: %s", year, exc)
         return None
 
     if total == 0:
         log.warning("  [%d] 0 records — skipping", year)
+        return None
+
+    try:
+        return strict_arcgis_dataframe(session, url=MAP_SERVER, where=where_clause,
+                                       expected_count=total, id_field="OBJECTID",
+                                       out_fields=OUT_FIELDS, page_size=PAGE_SIZE)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict pagination failed: %s", year, exc)
         return None
 
     # ── Paginate ──────────────────────────────────────────────────────────────
@@ -224,10 +236,16 @@ log.info("Source: %s", MAP_SERVER)
 session = requests.Session()
 session.headers.update(HEADERS)
 parts = []
+coverage_rows = []
 
 for yr in YEARS:
     log.info("=== Year %d ===", yr)
     raw = fetch_year(session, yr)
+    coverage_rows.append(validate_source_frame("OR", yr, raw,
+        required_columns={"CRASH_DT", "CNTY_NM", "TOT_FATAL_CNT", "TOT_INJ_LVL_A_CNT"},
+        date_column="CRASH_DT", outcome_columns={"TOT_FATAL_CNT", "TOT_INJ_LVL_A_CNT"}, date_unit="ms",
+        geography_column="CNTY_NM", geography_mapper=county_to_fips,
+        terminal_error=FETCH_FAILURES.get(yr)))
     agg = process_year(raw, yr)
     if agg is not None:
         parts.append(agg)
@@ -236,6 +254,7 @@ for yr in YEARS:
     time.sleep(1.0)   # be polite between years
 
 session.close()
+write_state_manifest_or_raise("OR", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not parts:
     log.error("No Oregon data downloaded — aborting.")

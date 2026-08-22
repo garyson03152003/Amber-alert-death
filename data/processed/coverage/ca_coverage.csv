@@ -1,0 +1,10 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+CA_CCRS,06,2016,,498681,498681,498681,0,0,0,2016-01-01,2016-12-31,True,True,,data.ca.gov CCRS annual crashes CSV,dedbdadb004265b345b9b3a8f9e2adf9ca4ec47d4821d1ff99e1d6677fbec583,0,0,0
+CA_CCRS,06,2017,,493388,493388,493388,0,0,0,2017-01-01,2017-12-31,True,True,,data.ca.gov CCRS annual crashes CSV,009a9e86be7c5de8e233360052e8e3c22e7b3bcff636081a77fca60a588af61f,0,0,0
+CA_CCRS,06,2018,,489743,489743,489743,0,0,0,2018-01-01,2018-12-31,True,True,,data.ca.gov CCRS annual crashes CSV,20776cdda11d487863a1529484ddb07fae2cb6d4187365674182c7ef4ba87140,0,0,0
+CA_CCRS,06,2019,,478189,478189,478189,0,0,0,2019-01-01,2019-12-31,True,True,,data.ca.gov CCRS annual crashes CSV,434a130d3fe02ff774a5f76ee3c7f6cce1c9e1992523f39c77a828f48abfb57c,0,0,0
+CA_CCRS,06,2020,,374759,374759,374759,0,0,0,2020-01-01,2020-12-31,True,True,,data.ca.gov CCRS annual crashes CSV,8583ba45cc0f42cfcad0553f8ee0365ea20240abf523379ad59ac4735eac9618,0,0,0
+CA_CCRS,06,2021,,422980,422980,422980,0,0,0,2021-01-01,2021-12-31,True,True,,data.ca.gov CCRS annual crashes CSV,bbc2fcfe0e6e2cf0810b3dc9c5b0c16496c67608287a1a1daa36a0615728fbf1,0,0,0
+CA_CCRS,06,2022,,405251,405251,405251,0,0,0,2022-01-01,2022-12-31,True,True,,data.ca.gov CCRS annual crashes CSV,091957951848beadf6538a86f238d32bf510af4a8bd00f92cc17ba0b897b93e1,0,0,0
+CA_CCRS,06,2023,,409821,409821,409819,0,0,0,2023-01-01,2023-12-31,True,True,,data.ca.gov CCRS annual crashes CSV,bc0853097fcc12c337433e6100a8858834e0b07e758c04a544963d65d2eac7ef,2,0,0
+CA_CCRS,06,2024,,417144,417144,417125,0,0,0,2024-01-01,2024-12-31,True,True,,data.ca.gov CCRS annual crashes CSV,7cb6641f94bcbd802d3452c519aa1f69efb951026293aa46efc794d85ee7aa57,18,0,1

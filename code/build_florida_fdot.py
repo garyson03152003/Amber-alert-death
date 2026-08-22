@@ -27,6 +27,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("florida_fdot")
@@ -39,7 +40,7 @@ FEATURE_SERVER = (
 )
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; research)"}
 
-YEARS = list(range(2013, 2020))   # 2013–2019 inclusive; 2020+ returns 0 records
+YEARS = list(range(2013, 2019))   # 2019 is documented incomplete and excluded
 
 OUT_FIELDS = (
     "CRASH_DATE,COUNTY_TXT,DOT_CNTY_CD,"
@@ -49,6 +50,7 @@ OUT_FIELDS = (
 PAGE_SIZE = 1000   # gis.fdot.gov maxRecordCount is 1000
 SLEEP_PAGE = 0.3   # seconds between pages within a year
 SLEEP_YEAR = 2.0   # seconds between years
+FETCH_FAILURES: dict[int, BaseException] = {}
 
 # ── Florida county FIPS mapping ───────────────────────────────────────────────
 FL_COUNTY_FIPS = {
@@ -100,11 +102,21 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
         total = info.get("count", 0)
         log.info("  [%d] total records: %d", year, total)
     except Exception as exc:
+        FETCH_FAILURES[year] = exc
         log.warning("  [%d] count query failed: %s", year, exc)
         return None
 
     if total == 0:
         log.warning("  [%d] service returned 0 records — skipping", year)
+        return None
+
+    try:
+        return strict_arcgis_dataframe(session, url=FEATURE_SERVER, where=where_clause,
+                                       expected_count=total, id_field="OBJECTID",
+                                       out_fields=OUT_FIELDS, page_size=PAGE_SIZE)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict pagination failed: %s", year, exc)
         return None
 
     # ── 2. Paginate ────────────────────────────────────────────────────────
@@ -236,11 +248,17 @@ session = requests.Session()
 session.headers.update(HEADERS)
 
 parts = []
+coverage_rows = []
 
 for yr in YEARS:
     log.info("Year %d …", yr)
 
     raw = fetch_year(session, yr)
+    coverage_rows.append(validate_source_frame("FL", yr, raw,
+        required_columns={"CRASH_DATE", "COUNTY_TXT", "NUMBER_OF_KILLED", "NUMBER_OF_SERIOUS_INJURIES"},
+        date_column="CRASH_DATE", outcome_columns={"NUMBER_OF_KILLED", "NUMBER_OF_SERIOUS_INJURIES"}, date_unit="ms",
+        geography_column="COUNTY_TXT", geography_mapper=FL_COUNTY_FIPS,
+        terminal_error=FETCH_FAILURES.get(yr)))
     agg = process_year(raw, yr)
 
     if agg is not None:
@@ -253,6 +271,7 @@ for yr in YEARS:
     gc.collect()
 
 session.close()
+write_state_manifest_or_raise("FL", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not parts:
     log.error("No Florida data downloaded. Check network access or FDOT service availability.")

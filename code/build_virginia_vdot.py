@@ -42,6 +42,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("virginia_vdot")
@@ -58,6 +59,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; research)"}
 YEARS      = list(range(2017, 2025))   # 2017–2024
 OUT_FIELDS = "CRASH_DT,CRASH_YEAR,CRASH_SEVERITY,K_PEOPLE,PERSONS_INJURED,PHYSICAL_JURIS"
 PAGE_SIZE  = 2000   # server maxRecordCount
+FETCH_FAILURES: dict[int, BaseException] = {}
 
 # ── Virginia FIPS mapping ──────────────────────────────────────────────────────
 # Key: 3-digit VDOT jurisdiction code (zero-padded string)
@@ -349,6 +351,52 @@ VA_VDOT_FIPS: dict[str, str] = {
     "330": "51171",   # Town of Woodstock → Shenandoah County
     "331": "51031",   # Town of Hurt → Campbell County
     "339": "51051",   # Town of Clinchco → Dickenson County
+    # ── Additional towns (Census TIGERweb spatial join to containing county) ──
+    "175": "51175",   # Town of Branchville -> Southampton County
+    "178": "51025",   # Town of Brodnax -> Brunswick County
+    "181": "51135",   # Town of Burkeville -> Nottoway County
+    "182": "51131",   # Town of Cape Charles -> Northampton County
+    "183": "51175",   # Town of Capron -> Southampton County
+    "185": "51037",   # Town of Charlotte C.H. -> Charlotte County
+    "191": "51181",   # Town of Claremont -> Surry County
+    "194": "51059",   # Town of Clifton -> Fairfax County
+    "200": "51065",   # Town of Columbia -> Fluvanna County
+    "201": "51175",   # Town of Courtland -> Southampton County
+    "205": "51191",   # Town of Damascus -> Washington County
+    "207": "51181",   # Town of Dendron -> Surry County
+    "208": "51029",   # Town of Dillwyn -> Buckingham County
+    "209": "51037",   # Town of Drakes Branch -> Charlotte County
+    "213": "51169",   # Town of Dungannon -> Scott County
+    "214": "51131",   # Town of Eastville -> Northampton County
+    "222": "51191",   # Town of Glade Spring -> Washington County
+    "224": "51071",   # Town of Glen Lyn -> Giles County
+    "227": "51143",   # Town of Gretna -> Pittsylvania County
+    "228": "51165",   # Town of Grottoes -> Rockingham County
+    "234": "51051",   # Town of Haysi -> Dickenson County
+    "241": "51005",   # Town of Iron Gate -> Alleghany County
+    "250": "51117",   # Town of LaCrosse -> Mecklenburg County
+    "256": "51113",   # Town of Madison -> Madison County
+    "266": "51071",   # Town of Narrows -> Giles County
+    "268": "51045",   # Town of New Castle -> Craig County
+    "270": "51175",   # Town of Newsoms -> Southampton County
+    "271": "51169",   # Town of Nickelsville -> Scott County
+    "277": "51011",   # Town of Pamplin City -> Appomattox County
+    "278": "51001",   # Town of Parksley -> Accomack County
+    "282": "51037",   # Town of Phenix -> Charlotte County
+    "283": "51185",   # Town of Pocahontas -> Tazewell County
+    "284": "51033",   # Town of Port Royal -> Caroline County
+    "287": "51153",   # Town of Quantico -> Prince William County
+    "293": "51105",   # Town of St. Charles -> Lee County
+    "295": "51173",   # Town of Saltville -> Smyth County
+    "296": "51001",   # Town of Saxis -> Accomack County
+    "297": "51083",   # Town of Scottsburg -> Halifax County
+    "308": "51181",   # Town of Surry -> Surry County
+    "309": "51001",   # Town of Tangier -> Accomack County
+    "316": "51119",   # Town of Urbanna -> Middlesex County
+    "318": "51083",   # Town of Virgilina -> Halifax County
+    "319": "51001",   # Town of Wachapreague -> Accomack County
+    "322": "51157",   # Town of Washington -> Rappahannock County
+    "327": "51103",   # Town of White Stone -> Lancaster County
 }
 
 
@@ -386,11 +434,21 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
         total = resp.get("count", 0)
         log.info("  [%d] %d records", year, total)
     except Exception as exc:
+        FETCH_FAILURES[year] = exc
         log.warning("  [%d] count query failed: %s", year, exc)
         return None
 
     if total == 0:
         log.warning("  [%d] 0 records — skipping", year)
+        return None
+
+    try:
+        return strict_arcgis_dataframe(session, url=FEATURE_SERVER, where=where_clause,
+                                       expected_count=total, id_field="OBJECTID",
+                                       out_fields=OUT_FIELDS, page_size=PAGE_SIZE)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict pagination failed: %s", year, exc)
         return None
 
     # Paginate with resultOffset
@@ -481,14 +539,14 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
         df.groupby(["fips", "crash_date"])
           .agg(
               va_fatals     =("fatals",      "sum"),
-              va_serious_inj=("serious_inj", "sum"),
+              va_injury_proxy=("serious_inj", "sum"),
               va_crashes    =("fatals",      "count"),
           )
           .reset_index()
           .rename(columns={"crash_date": "date"})
     )
     log.info("  [%d] → %d county-days  va_fatals=%.0f  va_serious_inj=%.0f",
-             year, len(agg), agg["va_fatals"].sum(), agg["va_serious_inj"].sum())
+             year, len(agg), agg["va_fatals"].sum(), agg["va_injury_proxy"].sum())
     return agg
 
 
@@ -498,10 +556,16 @@ log.info("Downloading Virginia VDOT crash data (2017–2024) …")
 session = requests.Session()
 session.headers.update(HEADERS)
 parts = []
+coverage_rows = []
 
 for yr in YEARS:
     log.info("Year %d …", yr)
     raw = fetch_year(session, yr)
+    coverage_rows.append(validate_source_frame("VA", yr, raw,
+        required_columns={"CRASH_DT", "PHYSICAL_JURIS", "K_PEOPLE", "PERSONS_INJURED", "CRASH_SEVERITY"},
+        date_column="CRASH_DT", outcome_columns={"K_PEOPLE", "PERSONS_INJURED"}, date_unit="ms",
+        geography_column="PHYSICAL_JURIS", geography_mapper=lambda value: VA_VDOT_FIPS.get(extract_vdot_code(value)),
+        terminal_error=FETCH_FAILURES.get(yr)))
     agg = process_year(raw, yr)
     if agg is not None:
         parts.append(agg)
@@ -510,6 +574,7 @@ for yr in YEARS:
     gc.collect()
 
 session.close()
+write_state_manifest_or_raise("VA", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not parts:
     log.error("No Virginia data downloaded.")
@@ -523,7 +588,7 @@ va_panel = (
     va_panel.groupby(["fips", "date"])
       .agg(
           va_fatals     =("va_fatals",      "sum"),
-          va_serious_inj=("va_serious_inj", "sum"),
+          va_injury_proxy=("va_injury_proxy", "sum"),
           va_crashes    =("va_crashes",     "sum"),
       )
       .reset_index()
@@ -535,7 +600,8 @@ log.info("  Counties:   %d", va_panel["fips"].nunique())
 log.info("  Date range: %s – %s",
          va_panel["date"].min().date(), va_panel["date"].max().date())
 log.info("  Total va_fatals:      %.0f", va_panel["va_fatals"].sum())
-log.info("  Total va_serious_inj: %.0f", va_panel["va_serious_inj"].sum())
+va_panel["va_serious_inj"] = np.nan
+log.info("  Total va_injury_proxy: %.0f", va_panel["va_injury_proxy"].sum())
 log.info("  Total va_crashes:     %.0f", va_panel["va_crashes"].sum())
 
 va_panel.to_parquet(OUT_PATH, index=False)

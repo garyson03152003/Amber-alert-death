@@ -16,6 +16,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("tx_extend")
@@ -25,6 +26,7 @@ FS_URL   = ("https://services.arcgis.com/KTcxiTD9dsQw4r7Z/arcgis/rest/services/"
              "TXDOT_Statewide_Bicyclist_Involved_Crashes/FeatureServer/0/query")
 HEADERS  = {"User-Agent": "amber-research/1.0 (academic)"}
 YEARS    = [2023, 2024]
+FETCH_FAILURES = {}
 PAGE_SIZE = 2000
 OUT_FIELDS = "crash_id,cnty_id,crash_date,death_cnt,sus_serious_injry_cnt,crash_fatal_fl"
 SLEEP_PAGE = 0.25
@@ -47,6 +49,15 @@ def fetch_year(session, year):
         return None
 
     if total == 0:
+        return None
+
+    try:
+        return strict_arcgis_dataframe(session, url=FS_URL, where=where,
+                                       expected_count=total, id_field="crash_id",
+                                       out_fields=OUT_FIELDS, page_size=PAGE_SIZE)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict pagination failed: %s", year, exc)
         return None
 
     parts, offset = [], 0
@@ -122,10 +133,16 @@ existing = existing[pd.to_datetime(existing["date"]).dt.year < 2023].copy()
 session = requests.Session()
 session.headers.update(HEADERS)
 new_parts = []
+coverage_rows = []
 
 for yr in YEARS:
     log.info("Year %d …", yr)
     raw = fetch_year(session, yr)
+    coverage_rows.append(validate_source_frame("TX", yr, raw,
+        required_columns={"crash_id", "crash_date", "cnty_id", "death_cnt", "sus_serious_injry_cnt"},
+        date_column="crash_date", outcome_columns={"death_cnt", "sus_serious_injry_cnt"},
+        geography_column="cnty_id", geography_mapper=lambda value: cris_to_fips(int(value)) if pd.notna(value) and 1 <= int(value) <= 254 else None,
+        terminal_error=FETCH_FAILURES.get(yr)))
     agg = process_year(raw, yr)
     if agg is not None:
         new_parts.append(agg)
@@ -134,10 +151,11 @@ for yr in YEARS:
     time.sleep(SLEEP_YEAR)
 
 session.close()
+write_state_manifest_or_raise("TX", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not new_parts:
-    log.error("No new years downloaded — keeping existing 2020-2022 parquet.")
-    sys.exit(0)
+    log.error("No new years downloaded; strict extension failed.")
+    sys.exit(1)
 
 # ── Combine and save ──────────────────────────────────────────────────────────
 new_data = pd.concat(new_parts, ignore_index=True)

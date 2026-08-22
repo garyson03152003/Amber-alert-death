@@ -24,16 +24,18 @@ Fallback: services2.arcgis.com FeatureServer pagination.
 
 Output: data/processed/illinois_idot_county_day.parquet
 """
-import sys, warnings, io, gc, time, json
+import sys, warnings, io, gc, time, json, hashlib
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import urllib.request, urllib.parse
+import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("illinois_idot")
@@ -95,6 +97,44 @@ IL_COUNTY_FIPS_BY_NAME = {
     "WILL": "17197", "WILLIAMSON": "17199", "WINNEBAGO": "17201", "WOODFORD": "17203",
 }
 VALID_IL_FIPS = set(IL_COUNTY_FIPS_BY_NAME.values())
+FETCH_FAILURES: dict[int, BaseException] = {}
+
+# Each spelling below is accepted by ``process_idot_df``.  The source
+# validation call uses this explicit contract rather than a fuzzy schema match.
+IDOT_COLUMN_ALIASES = {
+    "CRASH_DATE": ("CrashDate", "Crash Date", "CRASH_DATE", "CrashDateTime"),
+    "CRASH_YEAR": ("CrashYr", "Crash Year"),
+    "CRASH_MONTH": ("CrashMonth", "Crash Month"),
+    "CRASH_DAY": ("CrashDay", "Crash Day"),
+    "COUNTY_CODE": ("CountyCode", "County Code", "COUNTY", "County"),
+    "TOTALFATALS": ("TotalFatals", "Total Fatals", "INJURIES_FATAL", "FATAL"),
+    "AINJURIES": ("AInjuries", "Incapacitating Injuries", "INJURIES_INCAPACITATING"),
+}
+
+
+def idot_county_to_fips(value: object) -> str | None:
+    """Map the documented one-based IDOT county code, failing closed."""
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric) or int(numeric) != numeric or not 1 <= int(numeric) <= 102:
+        return None
+    fips = f"17{2 * int(numeric) - 1:03d}"
+    return fips if fips in VALID_IL_FIPS else None
+
+
+def idot_validation_frame(raw: pd.DataFrame) -> pd.DataFrame:
+    """Expose the alternate split-date schema to the raw-source validator."""
+    validation = raw.copy()
+    if not any(name in validation.columns for name in IDOT_COLUMN_ALIASES["CRASH_DATE"]):
+        year_col = next((name for name in IDOT_COLUMN_ALIASES["CRASH_YEAR"] if name in validation.columns), None)
+        month_col = next((name for name in IDOT_COLUMN_ALIASES["CRASH_MONTH"] if name in validation.columns), None)
+        day_col = next((name for name in IDOT_COLUMN_ALIASES["CRASH_DAY"] if name in validation.columns), None)
+        if year_col and month_col and day_col:
+            years = pd.to_numeric(validation[year_col], errors="coerce")
+            years = years.where(years >= 100, years + 2000)
+            validation["CRASH_DATE"] = pd.to_datetime(
+                {"year": years, "month": pd.to_numeric(validation[month_col], errors="coerce"),
+                 "day": pd.to_numeric(validation[day_col], errors="coerce")}, errors="coerce")
+    return validation
 
 
 def fetch_via_download_api(item_id: str, year: int, retries: int = 2) -> pd.DataFrame | None:
@@ -114,6 +154,7 @@ def fetch_via_download_api(item_id: str, year: int, retries: int = 2) -> pd.Data
                 content = content[3:]
             df = pd.read_csv(io.StringIO(content.decode("utf-8", errors="replace")),
                              low_memory=False)
+            df.attrs["source_checksum"] = hashlib.sha256(content).hexdigest()
             if not df.empty:
                 log.info("  [download-API] %d rows for %d", len(df), year)
                 return df
@@ -144,11 +185,25 @@ def fetch_via_featureserver(fs_url: str, year: int) -> pd.DataFrame | None:
         total = info.get("count", 0)
         log.info("  [FeatureServer] %d total records for %d", total, year)
     except Exception as e:
+        FETCH_FAILURES[year] = e
         log.warning("  [FeatureServer] count failed for %d: %s", year, e)
         return None
 
     if total == 0:
         return None
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    try:
+        return strict_arcgis_dataframe(session, url=query_url, where="1=1",
+                                       expected_count=total, id_field="OBJECTID",
+                                       out_fields="*", page_size=2000)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [FeatureServer] strict pagination failed for %d: %s", year, exc)
+        return None
+    finally:
+        session.close()
 
     # Paginate in chunks of 2000 using JSON (CSV returns 400 on some years)
     parts = []
@@ -254,9 +309,12 @@ def process_idot_df(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     injured_col = next((c for c in df.columns
                         if c in ("TotalInjured", "Total Injured",
                                  "NUMBERINJURED")), None)
+    if fatal_col is None or serious_col is None:
+        log.error("  Missing required native outcome field(s) for %d", year)
+        return None
 
-    df["fatals"]     = pd.to_numeric(df[fatal_col],   errors="coerce").fillna(0) if fatal_col   else 0
-    df["serious_inj"]= pd.to_numeric(df[serious_col], errors="coerce").fillna(0) if serious_col else 0
+    df["fatals"]     = pd.to_numeric(df[fatal_col],   errors="coerce").fillna(0)
+    df["serious_inj"]= pd.to_numeric(df[serious_col], errors="coerce").fillna(0)
     df["all_injured"]= pd.to_numeric(df[injured_col], errors="coerce").fillna(0) if injured_col else 0
 
     log.info("  fatal_col=%s  serious_col=%s  injured_col=%s",
@@ -278,6 +336,7 @@ def process_idot_df(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
 # ── Main download loop ────────────────────────────────────────────────────────
 log.info("Downloading Illinois IDOT crash data …")
 parts = []
+coverage_rows = []
 
 for yr in range(2016, 2025):
     log.info("Year %d …", yr)
@@ -293,6 +352,16 @@ for yr in range(2016, 2025):
         log.info("  Falling back to FeatureServer pagination …")
         raw = fetch_via_featureserver(fs_url, yr)
 
+    validation_raw = None if raw is None else idot_validation_frame(raw)
+    coverage_rows.append(validate_source_frame("IL", yr, validation_raw,
+        required_columns={"CRASH_DATE", "COUNTY_CODE", "TOTALFATALS", "AINJURIES"},
+        date_column="CRASH_DATE", outcome_columns={"TOTALFATALS", "AINJURIES"},
+        column_aliases=IDOT_COLUMN_ALIASES,
+        geography_column="COUNTY_CODE", geography_mapper=idot_county_to_fips,
+        unresolvable_geography_values=frozenset({"0", "0.0"}),
+        source_checksum=None if raw is None else raw.attrs.get("source_checksum"),
+        terminal_error=FETCH_FAILURES.get(yr)))
+
     agg = process_idot_df(raw, yr)
     if agg is not None:
         parts.append(agg)
@@ -301,6 +370,8 @@ for yr in range(2016, 2025):
 
     time.sleep(2.0)
     gc.collect()
+
+write_state_manifest_or_raise("IL", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not parts:
     log.error("No Illinois data downloaded. Check network access.")

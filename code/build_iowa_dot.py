@@ -22,7 +22,7 @@ Iowa has 99 counties. FIPS = "19" + str(county_num * 2 - 1).zfill(3)
 
 Output: data/processed/iowa_dot_county_day.parquet
 """
-import sys, warnings, gc, time, json
+import sys, warnings, gc, time, json, hashlib
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +32,8 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import (filter_to_requested_years, strict_arcgis_dataframe,
+                               validate_source_frame, write_state_manifest_or_raise)
 
 warnings.filterwarnings("ignore")
 log = get_logger("iowa_dot")
@@ -74,6 +76,7 @@ IA_COUNTY_FIPS = {
     "WINNESHIEK": "19191", "WOODBURY": "19193", "WORTH": "19195", "WRIGHT": "19197",
 }
 VALID_IA_FIPS = set(IA_COUNTY_FIPS.values())
+FETCH_FAILURES: dict[int, BaseException] = {}
 
 OUT_FIELDS = "CRASH_DATE,COUNTY_NAME,FATALITIES,MAJINJURY,INJURIES,CRASH_MONTH,CRASH_DAY"
 
@@ -99,6 +102,7 @@ def fetch_via_download_api(retries: int = 2) -> pd.DataFrame | None:
                     "CSEV"
                 )
             )
+            df.attrs["source_checksum"] = hashlib.sha256(content).hexdigest()
             if not df.empty:
                 log.info("  [download-API] %d rows downloaded", len(df))
                 return df
@@ -114,19 +118,35 @@ def fetch_via_download_api(retries: int = 2) -> pd.DataFrame | None:
 def fetch_via_featureserver(year: int, retries: int = 2) -> pd.DataFrame | None:
     """Paginate one year from the FeatureServer (JSON format)."""
     # Count
+    where = (f"CRASH_DATE >= DATE '{year}-01-01' AND "
+             f"CRASH_DATE < DATE '{year+1}-01-01'")
     try:
         r = requests.get(FS_BASE, params={
-            "where": f"CRASH_MONTH >= 1 AND CRASH_DATE >= DATE '{year}-01-01' AND CRASH_DATE < DATE '{year+1}-01-01'",
+            "where": where,
             "returnCountOnly": "true", "f": "json"
         }, timeout=20, headers=HEADERS)
         total = r.json().get("count", 0)
         log.info("  [FeatureServer] year %d: %d records", year, total)
     except Exception as e:
+        FETCH_FAILURES[year] = e
         log.warning("  [FeatureServer] count failed for %d: %s", year, e)
         return None
 
     if total == 0:
         return None
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    try:
+        return strict_arcgis_dataframe(session, url=FS_BASE, where=where,
+                                       expected_count=total, id_field="OBJECTID",
+                                       out_fields=OUT_FIELDS, page_size=2000)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [FeatureServer] strict pagination failed for %d: %s", year, exc)
+        return None
+    finally:
+        session.close()
 
     parts = []
     offset = 0
@@ -187,10 +207,10 @@ def process_df(df: pd.DataFrame) -> pd.DataFrame | None:
 
     df = df.dropna(subset=["crash_date"])
 
-    # Filter to 2013-2024
-    df = df[(df["crash_date"].dt.year >= 2013) & (df["crash_date"].dt.year <= 2024)]
+    # The validated Iowa source contract begins in 2015.
+    df = filter_to_requested_years(df, state="IA", date_column="crash_date")
     if df.empty:
-        log.warning("  No rows in 2013-2024 range after date filter")
+        log.warning("  No rows in 2015-2024 range after date filter")
         return None
 
     # ── County → FIPS ────────────────────────────────────────────────────────────
@@ -212,9 +232,12 @@ def process_df(df: pd.DataFrame) -> pd.DataFrame | None:
     fatal_col   = next((c for c in df.columns if c == "FATALITIES"), None)
     serious_col = next((c for c in df.columns if c == "MAJINJURY"), None)
     inj_col     = next((c for c in df.columns if c == "INJURIES"), None)
+    if fatal_col is None or serious_col is None:
+        log.error("  Required Iowa native fatal/serious outcome field missing")
+        return None
 
-    df["fatals"]      = pd.to_numeric(df[fatal_col],   errors="coerce").fillna(0) if fatal_col   else 0
-    df["serious_inj"] = pd.to_numeric(df[serious_col], errors="coerce").fillna(0) if serious_col else 0
+    df["fatals"]      = pd.to_numeric(df[fatal_col],   errors="coerce").fillna(0)
+    df["serious_inj"] = pd.to_numeric(df[serious_col], errors="coerce").fillna(0)
     df["all_injured"] = pd.to_numeric(df[inj_col],     errors="coerce").fillna(0) if inj_col     else 0
 
     # ── Aggregate ────────────────────────────────────────────────────────────────
@@ -253,6 +276,18 @@ if raw is None or raw.empty:
 if raw is None or raw.empty:
     log.error("No Iowa data obtained.")
     import sys; sys.exit(1)
+
+coverage_rows = []
+raw_years = pd.to_datetime(raw["CRASH_DATE"], errors="coerce").dt.year
+for yr in range(2015, 2025):
+    year_raw = raw.loc[raw_years.eq(yr)].copy()
+    year_raw.attrs["source_checksum"] = raw.attrs.get("source_checksum")
+    coverage_rows.append(validate_source_frame("IA", yr, None if year_raw.empty else year_raw,
+        required_columns={"CRASH_DATE", "COUNTY_NAME", "FATALITIES", "MAJINJURY"},
+        date_column="CRASH_DATE", outcome_columns={"FATALITIES", "MAJINJURY"},
+        geography_column="COUNTY_NAME", geography_mapper=lambda value: IA_COUNTY_FIPS.get(str(value).strip().upper()),
+        source_checksum=raw.attrs.get("source_checksum"), terminal_error=FETCH_FAILURES.get(yr)))
+write_state_manifest_or_raise("IA", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 log.info("Processing %d raw rows …", len(raw))
 ia_panel = process_df(raw)

@@ -28,7 +28,7 @@ The CCRS file uses COUNTY_CODE (1–58 matching California county numbers).
 
 Output: data/processed/california_ccrs_county_day.parquet
 """
-import sys, warnings, io, gc, time
+import sys, warnings, io, gc, time, hashlib
 from pathlib import Path
 
 import numpy as np
@@ -37,12 +37,14 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("california_ccrs")
 
 OUT_PATH = DATA_PROC / "california_ccrs_county_day.parquet"
 DATA_PROC.mkdir(parents=True, exist_ok=True)
+CA_COVERAGE = []
 
 # ── California CCRS direct download URLs ─────────────────────────────────────
 # One crashes CSV per year; pattern confirmed from data.ca.gov API.
@@ -132,6 +134,21 @@ CA_COUNTY_FIPS = {
 }
 
 
+def ca_county_to_fips(value: object) -> str | None:
+    """Map the raw CCRS county code using the same table as aggregation.
+
+    CCRS's raw ``County Code`` is a sequential 1-58 alphabetical index (1 =
+    Alameda, 19 = Los Angeles, ...), not the odd-numbered FIPS suffix itself.
+    The aggregation path below applies the same ``code * 2 - 1`` transform;
+    this helper must match it exactly or every validation check silently
+    diverges from what the panel actually contains.
+    """
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric) or int(numeric) != numeric or not 1 <= int(numeric) <= 58:
+        return None
+    return CA_COUNTY_FIPS.get(int(numeric) * 2 - 1)
+
+
 def download_ccrs_year(year: int) -> pd.DataFrame | None:
     """
     Try to download and parse one year of CCRS crash data.
@@ -164,6 +181,9 @@ def download_ccrs_year(year: int) -> pd.DataFrame | None:
                 content = resp.content
                 df = pd.read_csv(io.StringIO(content.decode("latin1")),
                                  low_memory=False)
+                # Retain a reproducible source identity for the coverage
+                # manifest; a nonempty file alone is not evidence of validity.
+                df.attrs["source_checksum"] = hashlib.sha256(content).hexdigest()
                 log.info("  Downloaded %d rows for %d", len(df), year)
                 break
             except Exception as e:
@@ -215,6 +235,17 @@ def download_ccrs_year(year: int) -> pd.DataFrame | None:
         log.info("  county_col=%s  date_col=%s  fatal_col=%s  injured_col=%s",
                  county_col, date_col, fatal_col, injured_col)
 
+        result = validate_source_frame("CA", year, df,
+            required_columns={date_col, county_col, "NUMBERKILLED", "NUMBERINJURED"},
+            date_column=date_col, outcome_columns={"NUMBERKILLED", "NUMBERINJURED"},
+            geography_column=county_col,
+            geography_mapper=ca_county_to_fips,
+            source_checksum=df.attrs.get("source_checksum"))
+        CA_COVERAGE.append(result)
+        if not result.coverage_valid:
+            log.error("  Year %d failed CCRS source validation: %s", year, result.failure_reasons)
+            return None
+
         # ── Parse date ───────────────────────────────────────────────────────
         df["crash_date"] = pd.to_datetime(df[date_col], errors="coerce")
         df = df.dropna(subset=["crash_date"])
@@ -244,22 +275,25 @@ def download_ccrs_year(year: int) -> pd.DataFrame | None:
         # serious-injury count at the crash level. Use NUMBERINJURED as a proxy;
         # note this is broader than KABCO-A (Suspected Serious Injury).
         if injured_col:
-            df["serious_inj"] = pd.to_numeric(df[injured_col], errors="coerce").fillna(0)
+            df["injury_proxy"] = pd.to_numeric(df[injured_col], errors="coerce").fillna(0)
         else:
-            df["serious_inj"] = 0
+            df["injury_proxy"] = 0
 
         # Aggregate to county-day
         agg = (df.groupby(["fips", "crash_date"])
                   .agg(ca_fatals=("fatals", "sum"),
-                       ca_serious_inj=("serious_inj", "sum"),
+                       ca_injury_proxy=("injury_proxy", "sum"),
                        ca_crashes=("fips", "count"))
                   .reset_index()
                   .rename(columns={"crash_date": "date"}))
         log.info("  Aggregated to %d county-days  (fatals=%.0f  serious=%.0f)",
-                 len(agg), agg["ca_fatals"].sum(), agg["ca_serious_inj"].sum())
+                 len(agg), agg["ca_fatals"].sum(), agg["ca_injury_proxy"].sum())
         return agg
 
     except Exception as e:
+        CA_COVERAGE.append(validate_source_frame("CA", year, None,
+            required_columns={"CRASH DATE TIME", "COUNTY CODE", "NUMBERKILLED", "NUMBERINJURED"},
+            date_column="CRASH DATE TIME", outcome_columns={"NUMBERKILLED", "NUMBERINJURED"}, terminal_error=e))
         log.warning("  Year %d failed: %s", year, e)
         return None
 
@@ -275,6 +309,16 @@ for yr in range(2016, 2025):
     time.sleep(1.0)  # polite delay between requests
     gc.collect()
 
+# A rejected schema/download path must still have a diagnostic manifest row.
+recorded_years = {row.year for row in CA_COVERAGE}
+for missing_year in range(2016, 2025):
+    if missing_year not in recorded_years:
+        CA_COVERAGE.append(validate_source_frame("CA", missing_year, None,
+            required_columns={"CRASH DATE TIME", "COUNTY CODE", "NUMBERKILLED", "NUMBERINJURED"},
+            date_column="CRASH DATE TIME", outcome_columns={"NUMBERKILLED", "NUMBERINJURED"},
+            terminal_error="missing_bulk_diagnostic"))
+write_state_manifest_or_raise("CA", CA_COVERAGE, output_dir=DATA_PROC / "coverage")
+
 if not parts:
     log.error("No data downloaded. Check network access and URLs.")
     sys.exit(1)
@@ -283,16 +327,17 @@ ca_panel = pd.concat(parts, ignore_index=True)
 ca_panel["date"] = pd.to_datetime(ca_panel["date"])
 ca_panel = (ca_panel.groupby(["fips", "date"])
                      .agg(ca_fatals=("ca_fatals", "sum"),
-                          ca_serious_inj=("ca_serious_inj", "sum"),
+                          ca_injury_proxy=("ca_injury_proxy", "sum"),
                           ca_crashes=("ca_crashes", "sum"))
                      .reset_index())
+ca_panel["ca_serious_inj"] = np.nan
 
 log.info("\nFinal California CCRS panel:")
 log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
          len(ca_panel), ca_panel["fips"].nunique(),
          ca_panel["date"].min().date(), ca_panel["date"].max().date())
-log.info("  Total fatals: %.0f  Total serious injuries: %.0f",
-         ca_panel["ca_fatals"].sum(), ca_panel["ca_serious_inj"].sum())
+log.info("  Total fatals: %.0f  Total all-injury proxy: %.0f",
+         ca_panel["ca_fatals"].sum(), ca_panel["ca_injury_proxy"].sum())
 
 ca_panel.to_parquet(OUT_PATH, index=False)
 log.info("Saved → %s", OUT_PATH)

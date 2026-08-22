@@ -1,0 +1,13 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+DE_DSHS,10,2013,,32450,32450,32442,0,0,0,2013-01-01,2013-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,8,0
+DE_DSHS,10,2014,,32739,32739,32718,0,0,0,2014-01-01,2014-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,21,0
+DE_DSHS,10,2015,,35015,35015,34996,0,0,0,2015-01-01,2015-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,19,0
+DE_DSHS,10,2016,,36955,36955,36943,0,0,0,2016-01-01,2016-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,12,0
+DE_DSHS,10,2017,,37145,37145,37129,0,0,0,2017-01-01,2017-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,16,0
+DE_DSHS,10,2018,,37496,37496,37474,0,0,0,2018-01-01,2018-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,22,0
+DE_DSHS,10,2019,,37440,37440,37425,0,0,0,2019-01-01,2019-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,15,0
+DE_DSHS,10,2020,,31665,31665,31650,0,0,0,2020-01-01,2020-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,15,0
+DE_DSHS,10,2021,,37765,37765,37750,0,0,0,2021-01-01,2021-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,15,0
+DE_DSHS,10,2022,,37445,37445,37413,0,0,0,2022-01-01,2022-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,32,0
+DE_DSHS,10,2023,,37269,37269,37254,0,0,0,2023-01-01,2023-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,15,0
+DE_DSHS,10,2024,,37180,37180,37157,0,0,0,2024-01-01,2024-12-31,True,True,,Delaware DSHS Public Crash Data (data.delaware.gov Socrata),,0,23,0

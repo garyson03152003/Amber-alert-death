@@ -1,0 +1,8 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+UT_UDOT,49,2018,,61903,61903,61903,0,0,0,2018-01-01,2018-12-31,True,True,,UDOT Crash_Locations MapServer,,0,0,0
+UT_UDOT,49,2019,,64465,64465,64465,0,0,0,2019-01-01,2019-12-31,True,True,,UDOT Crash_Locations MapServer,,0,0,0
+UT_UDOT,49,2020,,50387,50387,50387,0,0,0,2020-01-01,2020-12-31,True,True,,UDOT Crash_Locations MapServer,,0,0,0
+UT_UDOT,49,2021,,61113,61113,61113,0,0,0,2021-01-01,2021-12-31,True,True,,UDOT Crash_Locations MapServer,,0,0,0
+UT_UDOT,49,2022,,58820,58820,58820,0,0,0,2022-01-01,2022-12-31,True,True,,UDOT Crash_Locations MapServer,,0,0,0
+UT_UDOT,49,2023,,59955,59955,59955,0,0,0,2023-01-01,2023-12-31,True,True,,UDOT Crash_Locations MapServer,,0,0,0
+UT_UDOT,49,2024,,59314,59314,59313,0,0,0,2024-01-01,2024-12-31,True,True,,UDOT Crash_Locations MapServer,,1,0,0

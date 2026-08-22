@@ -1,0 +1,7 @@
+record_type,status,sample,state,model,outcome,term,beta,se,pvalue,n_obs,exposure_mode,cluster,input_n,fitted_n,zero_share_input,terms_requested,terms_produced,error_reason,irr,pct_change
+estimate,ok,spillover_joint,FARS_NATIONAL,WLS_TWFE,fatals_per_100k,night_alert,-0.0024398791348598527,0.002645303434513237,0.3564202901222442,12593295.0,rate_per_100k_population_weighted,county+date,,,,,,,,
+estimate,ok,spillover_joint,FARS_NATIONAL,WLS_TWFE,fatals_per_100k,spillover_share_10pp,0.0026260358220043735,0.0011943652442612152,0.02797299120044472,12593295.0,rate_per_100k_population_weighted,county+date,,,,,,,,
+estimate,ok,spillover_joint,FARS_NATIONAL,PPML_raw_count,fatals,night_alert,-0.05719974569386642,0.08436756733301214,0.4977827028563313,12557142.0,log_population_offset,county+date,,,0.9725467401502148,,,,0.9444054096113298,-5.55945903886702
+estimate,ok,spillover_joint,FARS_NATIONAL,PPML_raw_count,fatals,spillover_share_10pp,0.06919216776593343,0.030948266022845033,0.025369037038072362,12557142.0,log_population_offset,county+date,,,0.9725467401502148,,,,1.071642124435505,7.1642124435504995
+estimate,ok,direct_vs_clean,FARS_NATIONAL,WLS_TWFE,fatals_per_100k,night_alert,0.0015014484126671585,0.0022651695233912193,0.507480802890107,12526681.0,rate_per_100k_population_weighted,county+date,,,,,,,,
+estimate,ok,direct_vs_clean,FARS_NATIONAL,PPML_raw_count,fatals,night_alert,0.060076007697048364,0.0625038073398731,0.33647294581839526,12490554.0,log_population_offset,county+date,,,0.972847716007137,,,,1.0619172573631872,6.191725736318721

@@ -1,0 +1,13 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+ID_COMPASS,16,2013,,8857,8857,8857,0,0,0,2013-01-01,2013-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2014,,9179,9179,9178,0,0,0,2014-01-01,2014-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,1,0
+ID_COMPASS,16,2015,,9806,9806,9806,0,0,0,2015-01-01,2015-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2016,,10312,10312,10312,0,0,0,2016-01-01,2016-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2017,,10114,10114,10114,0,0,0,2017-01-01,2017-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2018,,10144,10144,10144,0,0,0,2018-01-01,2018-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2019,,11050,11050,11050,0,0,0,2019-01-01,2019-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2020,,8758,8758,8758,0,0,0,2020-01-01,2020-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2021,,11065,11065,11065,0,0,0,2021-01-01,2021-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2022,,10913,10913,10913,0,0,0,2022-01-01,2022-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2023,,11351,11351,11351,0,0,0,2023-01-01,2023-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,0,0
+ID_COMPASS,16,2024,,11699,11699,11685,0,0,0,2024-01-01,2024-12-31,True,True,,"COMPASS/ITD 2-county (Ada, Canyon) Idaho CrashData FeatureServer",,0,14,0

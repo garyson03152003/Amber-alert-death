@@ -36,6 +36,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_socrata_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("newyork_dot")
@@ -46,6 +47,7 @@ DATA_PROC.mkdir(parents=True, exist_ok=True)
 BASE_URL   = "https://data.ny.gov/resource/e8ky-4vqe.json"
 PAGE_LIMIT = 50_000
 HEADERS    = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; research)"}
+FETCH_FAILURES: dict[int, BaseException] = {}
 
 # ── New York county FIPS mapping ──────────────────────────────────────────────
 # county_name in the data is UPPERCASE
@@ -118,8 +120,20 @@ NY_COUNTY_FIPS = {
 
 
 def fetch_year(year: int, session: requests.Session, retries: int = 3) -> pd.DataFrame:
-    """Download all crash records for a single year."""
+    """Download one year with count-first stable-ID Socrata pagination."""
     where = f"year = '{year}'"
+    try:
+        return strict_socrata_dataframe(
+            session, url=BASE_URL, where=where, id_field=":id", page_size=PAGE_LIMIT
+        )
+    except Exception as exc:
+        # A failed page is intentionally not converted to a partial DataFrame.
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict Socrata pagination failed: %s", year, exc)
+        return pd.DataFrame()
+
+    # Historical permissive pager retained below only for provenance; it is
+    # unreachable and must not be used for validated builds.
     parts = []
     offset = 0
     page = 0
@@ -167,30 +181,29 @@ log.info("Downloading New York State crash data (2021–2024) …")
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# Probe year range
-try:
-    r = session.get(BASE_URL, params={"$select": "min(year),max(year)", "$limit": 1}, timeout=30)
-    yr_range = r.json()[0] if r.ok and r.json() else {}
-    log.info("Available year range: %s – %s", yr_range.get("min_year","?"), yr_range.get("max_year","?"))
-    min_yr = int(yr_range.get("min_year", 2021))
-    max_yr = int(yr_range.get("max_year", 2024))
-except Exception as exc:
-    log.warning("Could not probe year range: %s — defaulting to 2021-2024", exc)
-    min_yr, max_yr = 2021, 2024
-
-YEARS = list(range(min_yr, max_yr + 1))
+# A moving API maximum can be a partial current year.  Validated builds use
+# only the closed source-contract years.
+YEARS = [2021, 2022, 2023, 2024]
 log.info("Fetching years: %s", YEARS)
 
 all_parts = []
+coverage_rows = []
 for yr in YEARS:
     log.info("Year %d …", yr)
     df_yr = fetch_year(yr, session)
+    coverage_rows.append(validate_source_frame("NY", yr,
+        None if FETCH_FAILURES.get(yr) is not None else df_yr,
+        required_columns={"date", "county_name", "accident_descriptor"}, date_column="date", outcome_columns=set(),
+        geography_column="county_name", geography_mapper=lambda value: NY_COUNTY_FIPS.get(str(value).strip().upper()),
+        unresolvable_geography_values=frozenset({"UNKNOWN"}),
+        terminal_error=FETCH_FAILURES.get(yr)))
     if not df_yr.empty:
         all_parts.append(df_yr)
     time.sleep(1.0)
     gc.collect()
 
 session.close()
+write_state_manifest_or_raise("NY", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not all_parts:
     log.error("No data downloaded.")

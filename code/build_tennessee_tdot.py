@@ -31,6 +31,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATA_PROC
 from utils import get_logger
+from state_dot_sources import strict_arcgis_dataframe, validate_source_frame, write_state_manifest_or_raise
 
 warnings.filterwarnings("ignore")
 log = get_logger("tennessee_tdot")
@@ -46,6 +47,7 @@ PAGE_SIZE = 2000
 OUT_FIELDS = "OBJECTID,NBR_TENN_C,CNTY_SEQ,DATEOFCRAS,YEAROFCRAS,TOTALKILLE,TOTALINJUR,TOTAL_INCA"
 SLEEP_PAGE = 0.25
 SLEEP_YEAR = 3.0
+FETCH_FAILURES: dict[int, BaseException] = {}
 
 # ── Tennessee county name → FIPS ──────────────────────────────────────────────
 TN_COUNTY_FIPS = {
@@ -97,11 +99,21 @@ def fetch_year(session: requests.Session, year: int) -> pd.DataFrame | None:
         total = r.json().get("count", 0)
         log.info("  [%d] total records: %d", year, total)
     except Exception as e:
+        FETCH_FAILURES[year] = e
         log.warning("  [%d] count failed: %s", year, e)
         return None
 
     if total == 0:
         log.warning("  [%d] 0 records — skip", year)
+        return None
+
+    try:
+        return strict_arcgis_dataframe(session, url=FS_URL, where=where,
+                                       expected_count=total, id_field="OBJECTID",
+                                       out_fields=OUT_FIELDS, page_size=PAGE_SIZE)
+    except Exception as exc:
+        FETCH_FAILURES[year] = exc
+        log.error("  [%d] strict pagination failed: %s", year, exc)
         return None
 
     parts, offset = [], 0
@@ -195,10 +207,16 @@ log.info("Downloading Tennessee TDOT crash data (2021–2024) …")
 session = requests.Session()
 session.headers.update(HEADERS)
 parts = []
+coverage_rows = []
 
 for yr in YEARS:
     log.info("Year %d …", yr)
     raw = fetch_year(session, yr)
+    coverage_rows.append(validate_source_frame("TN", yr, raw,
+        required_columns={"DATEOFCRAS", "NBR_TENN_C", "TOTALKILLE", "TOTAL_INCA"},
+        date_column="DATEOFCRAS", outcome_columns={"TOTALKILLE", "TOTAL_INCA"}, date_unit="ms",
+        geography_column="NBR_TENN_C", geography_mapper=TN_COUNTY_FIPS,
+        terminal_error=FETCH_FAILURES.get(yr)))
     agg = process_year(raw, yr)
     if agg is not None:
         parts.append(agg)
@@ -207,6 +225,7 @@ for yr in YEARS:
     time.sleep(SLEEP_YEAR)
 
 session.close()
+write_state_manifest_or_raise("TN", coverage_rows, output_dir=DATA_PROC / "coverage")
 
 if not parts:
     log.error("No Tennessee data downloaded.")

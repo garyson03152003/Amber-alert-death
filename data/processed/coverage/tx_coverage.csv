@@ -1,0 +1,6 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+TX_TXDOT_CRIS,48,2020,,546107,546107,546107,0,0,0,2020-01-01,2020-12-31,True,True,,TxDOT CRIS FeatureServer,,0,0,0
+TX_TXDOT_CRIS,48,2021,,633749,633749,633749,0,0,0,2021-01-01,2021-12-31,True,True,,TxDOT CRIS FeatureServer,,0,0,0
+TX_TXDOT_CRIS,48,2022,,635531,635531,635531,0,0,0,2022-01-01,2022-12-31,True,True,,TxDOT CRIS FeatureServer,,0,0,0
+TX_TXDOT_CRIS,48,2023,,639072,639072,639072,0,0,0,2023-01-01,2023-12-31,True,True,,TxDOT CRIS FeatureServer,,0,0,0
+TX_TXDOT_CRIS,48,2024,,633991,633991,633991,0,0,0,2024-01-01,2024-12-31,True,True,,TxDOT CRIS FeatureServer,,0,0,0

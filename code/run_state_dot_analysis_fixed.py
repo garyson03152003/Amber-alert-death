@@ -15,6 +15,7 @@ output/tables/state_dot_descriptives_fixed.csv
 """
 from __future__ import annotations
 
+import argparse
 import sys
 import warnings
 from pathlib import Path
@@ -32,6 +33,10 @@ from state_dot_analysis_core import (
     build_ppml_call_spec,
     build_commuter_spillover,
     add_spillover_classes,
+    validate_analysis_inputs,
+    extract_finite_coefficients,
+    fit_status_row,
+    summarize_fit_statuses,
 )
 
 warnings.filterwarnings("ignore")
@@ -61,6 +66,30 @@ STATE_TIMEZONE = {
     "47": "America/Chicago", "48": "America/Chicago",
     "51": "America/New_York", "55": "America/Chicago",
 }
+
+# Alert-origin counties are nationwide.  Outcome panels are narrowed only
+# after spillovers have been calculated from every valid US origin represented
+# in the commuting-flow matrix.
+NATIONWIDE_STATE_TIMEZONE = {
+    "01": "America/Chicago", "02": "America/Anchorage", "04": "America/Phoenix",
+    "05": "America/Chicago", "06": "America/Los_Angeles", "08": "America/Denver",
+    "09": "America/New_York", "10": "America/New_York", "11": "America/New_York",
+    "12": "America/New_York", "13": "America/New_York", "15": "Pacific/Honolulu",
+    "16": "America/Boise", "17": "America/Chicago", "18": "America/Indiana/Indianapolis",
+    "19": "America/Chicago", "20": "America/Chicago", "21": "America/New_York",
+    "22": "America/Chicago", "23": "America/New_York", "24": "America/New_York",
+    "25": "America/New_York", "26": "America/New_York", "27": "America/Chicago",
+    "28": "America/Chicago", "29": "America/Chicago", "30": "America/Denver",
+    "31": "America/Chicago", "32": "America/Los_Angeles", "33": "America/New_York",
+    "34": "America/New_York", "35": "America/Denver", "36": "America/New_York",
+    "37": "America/New_York", "38": "America/Chicago", "39": "America/New_York",
+    "40": "America/Chicago", "41": "America/Los_Angeles", "42": "America/New_York",
+    "44": "America/New_York", "45": "America/New_York", "46": "America/Chicago",
+    "47": "America/Chicago", "48": "America/Chicago", "49": "America/Denver",
+    "50": "America/New_York", "51": "America/New_York", "53": "America/Los_Angeles",
+    "54": "America/New_York", "55": "America/Chicago", "56": "America/Denver",
+}
+ACCEPTED_STATE_YEARS = Path(__file__).resolve().parent.parent / "config" / "accepted_state_years.csv"
 
 COUNTY_TIMEZONE_OVERRIDE = {
     "12033": "America/Chicago", "12059": "America/Chicago",
@@ -107,13 +136,113 @@ def load_state_crashes() -> pd.DataFrame:
         clean["state"] = state
         parts.append(clean)
         log.info(
-            "%s: %,d county-days; available crash/fatal/serious rows = %,d / %,d / %,d",
-            state, len(clean), clean["crashes"].notna().sum(), clean["fatals"].notna().sum(),
-            clean["serious_inj"].notna().sum(),
+            "%s: %s county-days; available crash/fatal/serious rows = %s / %s / %s",
+            state, f"{len(clean):,}", f"{clean['crashes'].notna().sum():,}",
+            f"{clean['fatals'].notna().sum():,}", f"{clean['serious_inj'].notna().sum():,}",
         )
     if not parts:
         raise FileNotFoundError("No state-DOT county-day files were found")
     return pd.concat(parts, ignore_index=True)
+
+
+def _load_coverage_manifests(coverage_dir: Path, states: set[str]) -> pd.DataFrame:
+    """Read only the source manifests needed by the selected validated panels."""
+    if not coverage_dir.is_dir():
+        raise FileNotFoundError(f"validated coverage manifest directory not found: {coverage_dir}")
+    parts = [pd.read_parquet(path) for path in sorted(coverage_dir.glob("*_coverage.parquet"))]
+    if not parts:
+        raise FileNotFoundError(f"no validated coverage manifests found under {coverage_dir}")
+    combined = pd.concat(parts, ignore_index=True)
+    if "state" not in combined.columns:
+        raise ValueError("coverage manifests are missing state")
+    combined["state"] = combined["state"].astype(str).str.upper()
+    # write_manifest() normalizes the state column to numeric Census FIPS
+    # (crash_coverage._manifest_frame's _state_code), so the 2-letter
+    # abbreviations from the accepted-state-years review file must be
+    # translated the same way before filtering.
+    from state_dot_sources import STATE_SOURCE_SPECS
+    fips_by_state = {
+        state: STATE_SOURCE_SPECS[state].state_fips if state in STATE_SOURCE_SPECS else state
+        for state in states
+    }
+    # Filtering on state FIPS alone is not enough: a diagnostic row from an
+    # unrelated source can share the same FIPS code as a state-DOT source
+    # (observed with Connecticut -- FARS's own "excluded from longitudinal
+    # panel" policy row for state 09 is a different reporting unit entirely,
+    # not a real CT_UCONN failure). Also require the row's source to match
+    # this state's own spec.
+    source_by_state = {
+        state: STATE_SOURCE_SPECS[state].source for state in states if state in STATE_SOURCE_SPECS
+    }
+    fips_source_pairs = {
+        (fips_by_state[state], source_by_state[state])
+        for state in states if state in source_by_state
+    }
+    if "source" in combined.columns and fips_source_pairs:
+        keep = combined.apply(
+            lambda row: (row["state"], row["source"]) in fips_source_pairs, axis=1
+        )
+        selected = combined.loc[keep].copy()
+    else:
+        selected = combined.loc[combined["state"].isin(fips_by_state.values())].copy()
+    selected["state"] = selected["state"].map(
+        {fips: state for state, fips in fips_by_state.items()}
+    ).fillna(selected["state"])
+    missing = sorted(states - set(selected["state"]))
+    if missing:
+        raise FileNotFoundError(f"missing coverage manifests for validated states: {', '.join(missing)}")
+    return selected
+
+
+def load_validated_state_crashes(*, direct_only: bool = False, flows: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Load reviewed zero-balanced panels; never fall back to legacy sparse files."""
+    if not ACCEPTED_STATE_YEARS.is_file():
+        raise FileNotFoundError(f"reviewed accepted state-years file not found: {ACCEPTED_STATE_YEARS}")
+    review = pd.read_csv(ACCEPTED_STATE_YEARS)
+    if not {"state", "year"}.issubset(review.columns):
+        raise ValueError("accepted state-years file must contain state and year")
+    review = review.copy()
+    review["state"] = review["state"].astype(str).str.upper()
+    if "review_status" not in review.columns:
+        review["review_status"] = "accepted"
+    accepted = review.loc[review["review_status"].astype(str).str.lower().eq("accepted")].copy()
+    if accepted.empty:
+        raise ValueError("accepted state-years file contains no reviewed accepted units")
+
+    panels: list[pd.DataFrame] = []
+    states = set(accepted["state"])
+    validated_dir = DATA_PROC / "validated"
+    for state in sorted(states):
+        path = validated_dir / f"{state.lower()}_county_day.parquet"
+        if not path.is_file():
+            raise FileNotFoundError(f"validated balanced panel not found for {state}: {path}")
+        panel = pd.read_parquet(path).copy()
+        panel["state"] = state
+        panels.append(panel)
+    result = pd.concat(panels, ignore_index=True)
+    manifest = _load_coverage_manifests(DATA_PROC / "coverage", states)
+    result["year"] = pd.to_numeric(result["year"], errors="raise").astype(int)
+    accepted_keys = accepted.loc[:, ["state", "year"]].copy()
+    accepted_keys["year"] = pd.to_numeric(accepted_keys["year"], errors="raise").astype(int)
+    manifest["year"] = pd.to_numeric(manifest["year"], errors="raise").astype(int)
+    manifest = manifest.merge(accepted_keys.drop_duplicates(), on=["state", "year"], how="inner")
+    panel_keys = set(map(tuple, result.loc[:, ["state", "year"]].drop_duplicates().to_records(index=False)))
+    manifest_keys = set(map(tuple, manifest.loc[:, ["state", "year"]].drop_duplicates().to_records(index=False)))
+    missing_manifest = sorted(panel_keys - manifest_keys)
+    if missing_manifest:
+        rendered = ", ".join(f"{state} {year}" for state, year in missing_manifest)
+        raise ValueError(f"missing coverage manifest rows for validated panel units: {rendered}")
+    validate_analysis_inputs(result, manifest, review, flows=flows, direct_only=direct_only)
+
+    # Canonical Task 5 names are the only names accepted at this boundary.
+    expected = {"crashes", "person_fatals", "serious_injury_persons"}
+    missing = expected - set(result.columns)
+    if missing:
+        raise ValueError(f"validated panel missing canonical outcome columns: {sorted(missing)}")
+    result = result.rename(columns={
+        "person_fatals": "fatals", "serious_injury_persons": "serious_inj",
+    })
+    return result
 
 
 def load_verified_night_alerts() -> pd.DataFrame:
@@ -133,9 +262,9 @@ def load_verified_night_alerts() -> pd.DataFrame:
     alerts = alerts[alerts["fips"].str.match(r"^\d{5}$")].copy()
     alerts["state_fips"] = alerts["fips"].str[:2]
     alerts = alerts[alerts["fips"].str[2:] != "000"].copy()
-    alerts = alerts[alerts["state_fips"].isin(STATE_TIMEZONE)].copy()
+    alerts = alerts[alerts["state_fips"].isin(NATIONWIDE_STATE_TIMEZONE)].copy()
     alerts["tz_name"] = alerts["fips"].map(COUNTY_TIMEZONE_OVERRIDE).fillna(
-        alerts["state_fips"].map(STATE_TIMEZONE)
+        alerts["state_fips"].map(NATIONWIDE_STATE_TIMEZONE)
     )
 
     utc = pd.to_datetime(alerts["sent_utc"], utc=True, errors="coerce")
@@ -159,12 +288,14 @@ def load_verified_night_alerts() -> pd.DataFrame:
         n_alerts=("alert_id", "nunique")
     )
     out["night_alert"] = 1
-    log.info("Verified county-level night-alert county-dates: %,d", len(out))
+    log.info("Verified county-level night-alert county-dates: %s", f"{len(out):,}")
     return out
 
 
-def build_panel() -> pd.DataFrame:
-    crashes = load_state_crashes()
+def build_panel(*, direct_only: bool = False) -> pd.DataFrame:
+    flows_path = DATA_PROC / "commuting" / "county_commuting_weights.parquet"
+    flows = pd.read_parquet(flows_path) if flows_path.is_file() else None
+    crashes = load_validated_state_crashes(direct_only=direct_only, flows=flows)
     crashes["date"] = pd.to_datetime(crashes["date"]).dt.normalize()
     crashes["year"] = crashes["date"].dt.year
 
@@ -192,9 +323,8 @@ def build_panel() -> pd.DataFrame:
     panel["night_alert"] = panel["night_alert"].fillna(0).astype(int)
     panel = panel.drop(columns=["effective_crash_date"], errors="ignore")
 
-    flows_path = DATA_PROC / "commuting" / "county_commuting_weights.parquet"
-    if flows_path.exists():
-        flows = pd.read_parquet(flows_path)
+    if not direct_only:
+        assert flows is not None  # validated above; makes the branch explicit.
         spill = build_commuter_spillover(night_alerts, flows)
         panel = panel.merge(
             spill,
@@ -203,11 +333,8 @@ def build_panel() -> pd.DataFrame:
         panel = panel.drop(columns=["effective_crash_date"], errors="ignore")
         log.info("Commuter spillover exposure merged from %s", flows_path)
     else:
-        log.warning(
-            "Commuting flows not found; run code/build_commuting_weights.py. "
-            "Spillover-aware models will reduce to direct-alert models."
-        )
         panel["spillover_commuters"] = 0.0
+        panel["spillover_share"] = 0.0
         panel["log_spillover_commuters"] = 0.0
 
     panel = add_spillover_classes(panel)
@@ -228,86 +355,146 @@ def _coef_row(fit, name: str):
 
 
 def _treatments(panel: pd.DataFrame) -> tuple[str, ...]:
-    if panel["log_spillover_commuters"].fillna(0).gt(0).any():
+    if panel.get("log_spillover_commuters", pd.Series(0.0, index=panel.index)).fillna(0).gt(0).any():
         return ("night_alert", "log_spillover_commuters")
     return ("night_alert",)
 
 
-def run_wls(panel: pd.DataFrame, rate_col: str, label: str, *, clean_controls=False) -> list[dict]:
+def _diagnostic(
+    *, label: str, model: str, outcome: str, sample: str, status: str,
+    input_n: int, fitted_n: int, zero_share: float | None,
+    terms_requested: tuple[str, ...], terms_produced: tuple[str, ...] = (),
+    error_reason: str | None = None,
+) -> dict[str, object]:
+    return {
+        "state": label, "model": model, "outcome": outcome, "sample": sample,
+        **fit_status_row(
+            status=status, input_n=input_n, fitted_n=fitted_n,
+            zero_share=zero_share, terms_requested=terms_requested,
+            terms_produced=terms_produced, error_reason=error_reason,
+        ),
+    }
+
+
+def run_wls(panel: pd.DataFrame, rate_col: str, label: str, *, clean_controls=False, direct_only: bool = False) -> list[dict]:
     import pyfixest as pf
 
     sub = panel.dropna(subset=[rate_col, "population", "night_alert"]).copy()
     if clean_controls:
         sub = sub[(sub["night_alert"] == 1) | (sub["clean_control"] == 1)].copy()
+    sample = "direct_vs_clean" if clean_controls else ("direct_only" if direct_only else "spillover_joint")
+    treatments = ("night_alert",) if (clean_controls or direct_only) else _treatments(sub)
+    zero_share = float((sub[rate_col] == 0).mean()) if len(sub) else None
     if len(sub) < 100 or sub["night_alert"].nunique() < 2:
-        return []
-
+        return [_diagnostic(
+            label=label, model="WLS_TWFE", outcome=rate_col, sample=sample,
+            status="skipped", input_n=len(sub), fitted_n=0, zero_share=zero_share,
+            terms_requested=treatments, error_reason="insufficient_estimable_sample",
+        )]
     sub["_fips_str"] = sub["fips"].astype(str)
     sub["_date_str"] = sub["date"].astype(str)
     sub["_year_str"] = sub["year"].astype(str)
     sub["_pop"] = sub["population"].astype(float)
-    treatments = ("night_alert",) if clean_controls else _treatments(sub)
     formula = f"{rate_col} ~ {' + '.join(treatments)} | _fips_str + _date_str"
-    fit = pf.feols(formula, data=sub, weights="_pop", vcov={"CRV1": "_fips_str + _year_str"})
+    try:
+        fit = pf.feols(formula, data=sub, weights="_pop", vcov={"CRV1": "_fips_str + _year_str"})
+    except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
+        return [_diagnostic(
+            label=label, model="WLS_TWFE", outcome=rate_col, sample=sample,
+            status="failed", input_n=len(sub), fitted_n=0, zero_share=zero_share,
+            terms_requested=treatments, error_reason=str(exc),
+        )]
 
+    coefficients, produced, errors = extract_finite_coefficients(fit, treatments)
     rows = []
-    for term in treatments:
-        vals = _coef_row(fit, term)
-        if vals is None:
-            continue
-        b, se, p = vals
+    for coefficient in coefficients:
+        b, se, p = coefficient["beta"], coefficient["se"], coefficient["pvalue"]
         rows.append({
-            "sample": "direct_vs_clean" if clean_controls else "spillover_joint",
-            "state": label, "model": "WLS_TWFE", "outcome": rate_col, "term": term,
+            "record_type": "estimate", "status": "ok", "sample": sample,
+            "state": label, "model": "WLS_TWFE", "outcome": rate_col, "term": coefficient["term"],
             "beta": b, "se": se, "pvalue": p, "n_obs": int(fit._N),
             "exposure_mode": "rate_per_100k_population_weighted",
         })
+    error_reason = next(iter(set(errors.values()))) if len(set(errors.values())) == 1 else "; ".join(
+        f"{term}:{reason}" for term, reason in errors.items()
+    )
+    rows.append(_diagnostic(
+        label=label, model="WLS_TWFE", outcome=rate_col, sample=sample,
+        status="ok" if not errors else ("partial" if produced else "failed"),
+        input_n=len(sub), fitted_n=int(fit._N), zero_share=zero_share,
+        terms_requested=treatments, terms_produced=produced, error_reason=error_reason,
+    ))
     return rows
 
 
-def run_ppml(panel: pd.DataFrame, count_col: str, label: str, *, clean_controls=False) -> list[dict]:
+def run_ppml(panel: pd.DataFrame, count_col: str, label: str, *, clean_controls=False, direct_only: bool = False) -> list[dict]:
     import pyfixest as pf
 
-    treatments = ("night_alert",) if clean_controls else _treatments(panel)
+    treatments = ("night_alert",) if (clean_controls or direct_only) else _treatments(panel)
     sub = prepare_ppml_sample(panel, count_col, treatment_cols=treatments)
     if clean_controls:
         sub = sub[(sub["night_alert"] == 1) | (sub["clean_control"] == 1)].copy()
+    sample = "direct_vs_clean" if clean_controls else ("direct_only" if direct_only else "spillover_joint")
+    zero_share = float((sub[count_col] == 0).mean()) if len(sub) else None
     if len(sub) < 100 or sub["night_alert"].nunique() < 2:
-        return []
+        return [_diagnostic(
+            label=label, model="PPML_raw_count", outcome=count_col, sample=sample,
+            status="skipped", input_n=len(sub), fitted_n=0, zero_share=zero_share,
+            terms_requested=treatments, error_reason="insufficient_estimable_sample",
+        )]
 
     spec = build_ppml_call_spec(pf.fepois, count_col=count_col, treatment_cols=treatments)
     kwargs = {"vcov": {"CRV1": "_fips_str + _year_str"}}
     if spec["offset"] is not None:
         kwargs["offset"] = spec["offset"]
 
-    zero_share = float((sub[count_col] == 0).mean())
     log.info(
-        "[%s %s] PPML sample %,d obs; %.1f%% zero outcomes; exposure=%s",
-        label, count_col, len(sub), 100 * zero_share, spec["exposure_mode"],
+        "[%s %s] PPML sample %s obs; %.1f%% zero outcomes; exposure=%s",
+        label, count_col, f"{len(sub):,}", 100 * zero_share, spec["exposure_mode"],
     )
-    fit = pf.fepois(spec["formula"], data=sub, **kwargs)
+    try:
+        fit = pf.fepois(spec["formula"], data=sub, **kwargs)
+    except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
+        return [_diagnostic(
+            label=label, model="PPML_raw_count", outcome=count_col, sample=sample,
+            status="failed", input_n=len(sub), fitted_n=0, zero_share=zero_share,
+            terms_requested=treatments, error_reason=str(exc),
+        )]
 
+    coefficients, produced, errors = extract_finite_coefficients(fit, treatments)
     rows = []
-    for term in treatments:
-        vals = _coef_row(fit, term)
-        if vals is None:
-            continue
-        b, se, p = vals
+    for coefficient in coefficients:
+        b, se, p = coefficient["beta"], coefficient["se"], coefficient["pvalue"]
         rows.append({
-            "sample": "direct_vs_clean" if clean_controls else "spillover_joint",
-            "state": label, "model": "PPML_raw_count", "outcome": count_col, "term": term,
+            "record_type": "estimate", "status": "ok", "sample": sample,
+            "state": label, "model": "PPML_raw_count", "outcome": count_col, "term": coefficient["term"],
             "beta": b, "se": se, "pvalue": p, "irr": float(np.exp(b)),
             "pct_change": float(100 * (np.exp(b) - 1)), "n_obs": int(fit._N),
             "zero_share_input": zero_share, "exposure_mode": spec["exposure_mode"],
         })
+    error_reason = next(iter(set(errors.values()))) if len(set(errors.values())) == 1 else "; ".join(
+        f"{term}:{reason}" for term, reason in errors.items()
+    )
+    rows.append(_diagnostic(
+        label=label, model="PPML_raw_count", outcome=count_col, sample=sample,
+        status="ok" if not errors else ("partial" if produced else "failed"),
+        input_n=len(sub), fitted_n=int(fit._N), zero_share=zero_share,
+        terms_requested=treatments, terms_produced=produced, error_reason=error_reason,
+    ))
     return rows
 
 
-def main() -> None:
-    panel = build_panel()
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--direct-only", action="store_true",
+        help="run the explicitly requested direct-alert-only sensitivity; do not relabel it as spillover_joint",
+    )
+    args = parser.parse_args(argv)
+    panel = build_panel(direct_only=args.direct_only)
     log.info(
-        "Panel: %,d rows, %d counties, %d direct-alert days, %d spillover-only days, %d clean controls",
-        len(panel), panel["fips"].nunique(), int((panel["exposure_class"] == "direct").sum()),
+        "Panel: %s rows, %d counties, %d direct-alert days, %d spillover-only days, %d clean controls",
+        f"{len(panel):,}", panel["fips"].nunique(), int((panel["exposure_class"] == "direct").sum()),
         int((panel["exposure_class"] == "spillover").sum()),
         int((panel["exposure_class"] == "clean_control").sum()),
     )
@@ -332,19 +519,21 @@ def main() -> None:
     for state_filter in [None] + sorted(panel["state"].unique().tolist()):
         label = "ALL" if state_filter is None else state_filter
         sub = panel if state_filter is None else panel[panel["state"] == state_filter]
-        if sub["night_alert"].sum() < 10:
-            continue
         for rate_col, count_col in outcomes:
-            if sub[count_col].notna().sum() < 100:
-                continue
-            results.extend(run_wls(sub, rate_col, label, clean_controls=False))
-            results.extend(run_ppml(sub, count_col, label, clean_controls=False))
+            results.extend(run_wls(sub, rate_col, label, clean_controls=False, direct_only=args.direct_only))
+            results.extend(run_ppml(sub, count_col, label, clean_controls=False, direct_only=args.direct_only))
             results.extend(run_wls(sub, rate_col, label, clean_controls=True))
             results.extend(run_ppml(sub, count_col, label, clean_controls=True))
 
-    out = pd.DataFrame(results)
+    all_rows = pd.DataFrame(results)
+    out = all_rows.loc[all_rows.get("record_type", pd.Series(dtype=str)).eq("estimate")].copy()
+    statuses = all_rows.loc[all_rows.get("record_type", pd.Series(dtype=str)).eq("fit_status")].copy()
+    statuses = pd.concat([statuses, pd.DataFrame([{
+        "record_type": "model_count_summary", **summarize_fit_statuses(statuses.to_dict("records")),
+    }])], ignore_index=True)
     out.to_csv(OUTPUT_TABS / "state_dot_analysis_fixed.csv", index=False)
-    log.info("Saved %d result rows → %s", len(out), OUTPUT_TABS / "state_dot_analysis_fixed.csv")
+    statuses.to_csv(OUTPUT_TABS / "state_dot_analysis_fixed_status.csv", index=False)
+    log.info("Saved %d estimates and %d fit diagnostics → %s", len(out), len(statuses) - 1, OUTPUT_TABS)
 
 
 if __name__ == "__main__":
