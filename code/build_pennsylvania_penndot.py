@@ -335,35 +335,40 @@ def build_panel(df: pd.DataFrame) -> pd.DataFrame:
     return panel
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-log.info("=== Pennsylvania PennDOT crash data download ===")
-log.info("Source: %s", BASE_URL)
-log.info("Years:  %s", TARGET_YEARS)
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ──────────────────────────────────────────────────────────────────────
+    log.info("=== Pennsylvania PennDOT crash data download ===")
+    log.info("Source: %s", BASE_URL)
+    log.info("Years:  %s", TARGET_YEARS)
 
-# Probe available columns first
-log.info("Probing available columns …")
-available_cols = probe_columns()
+    # Probe available columns first
+    log.info("Probing available columns …")
+    available_cols = probe_columns()
 
-# Download all pages
-log.info("Fetching crash records …")
-raw_df = fetch_all_pages()
-gc.collect()
+    # Download all pages
+    log.info("Fetching crash records …")
+    raw_df = fetch_all_pages()
+    gc.collect()
 
-if raw_df.empty:
-    log.error("No data downloaded. Check network access and API availability.")
-    sys.exit(1)
+    if raw_df.empty:
+        log.error("No data downloaded. Check network access and API availability.")
+        sys.exit(1)
 
-# Build the county-month panel
-log.info("Building county-month panel …")
-panel = build_panel(raw_df)
-del raw_df
-gc.collect()
+    # Build the county-month panel
+    log.info("Building county-month panel …")
+    panel = build_panel(raw_df)
+    del raw_df
+    gc.collect()
 
-if panel.empty:
-    log.error("Panel is empty after processing. Exiting.")
-    sys.exit(1)
+    if panel.empty:
+        log.error("Panel is empty after processing. Exiting.")
+        sys.exit(1)
 
-# Save
-panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
-log.info("Done.")
+    # Save
+    panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)
+    log.info("Done.")

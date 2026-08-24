@@ -145,37 +145,42 @@ def download_year_hourly(year: int) -> pd.DataFrame | None:
     return agg
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-log.info("Building California CCRS county-hour panel (2016–2022) …")
-parts = []
-for yr in sorted(CCRS_CRASH_URLS):
-    part = download_year_hourly(yr)
-    if part is not None:
-        parts.append(part)
-    time.sleep(1.5)
-    gc.collect()
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ──────────────────────────────────────────────────────────────────────
+    log.info("Building California CCRS county-hour panel (2016–2022) …")
+    parts = []
+    for yr in sorted(CCRS_CRASH_URLS):
+        part = download_year_hourly(yr)
+        if part is not None:
+            parts.append(part)
+        time.sleep(1.5)
+        gc.collect()
 
-if not parts:
-    log.error("No data downloaded.")
-    sys.exit(1)
+    if not parts:
+        log.error("No data downloaded.")
+        sys.exit(1)
 
-hourly = pd.concat(parts, ignore_index=True)
-hourly["date"] = pd.to_datetime(hourly["date"])
-hourly["hour"] = hourly["hour"].astype(int)
+    hourly = pd.concat(parts, ignore_index=True)
+    hourly["date"] = pd.to_datetime(hourly["date"])
+    hourly["hour"] = hourly["hour"].astype(int)
 
-# Collapse duplicate (fips, date, hour) rows from concat
-hourly = (hourly.groupby(["fips", "date", "hour"])
-                .agg(ca_crashes    =("ca_crashes",     "sum"),
-                     ca_fatals     =("ca_fatals",      "sum"),
-                     ca_serious_inj=("ca_serious_inj", "sum"))
-                .reset_index())
+    # Collapse duplicate (fips, date, hour) rows from concat
+    hourly = (hourly.groupby(["fips", "date", "hour"])
+                    .agg(ca_crashes    =("ca_crashes",     "sum"),
+                         ca_fatals     =("ca_fatals",      "sum"),
+                         ca_serious_inj=("ca_serious_inj", "sum"))
+                    .reset_index())
 
-log.info("\nFinal CA CCRS county-hour panel:")
-log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
-         len(hourly), hourly["fips"].nunique(),
-         hourly["date"].min().date(), hourly["date"].max().date())
-log.info("  Total crashes: %.0f  fatals: %.0f",
-         hourly["ca_crashes"].sum(), hourly["ca_fatals"].sum())
+    log.info("\nFinal CA CCRS county-hour panel:")
+    log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
+             len(hourly), hourly["fips"].nunique(),
+             hourly["date"].min().date(), hourly["date"].max().date())
+    log.info("  Total crashes: %.0f  fatals: %.0f",
+             hourly["ca_crashes"].sum(), hourly["ca_fatals"].sum())
 
-hourly.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    hourly.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

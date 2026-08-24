@@ -4,7 +4,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code" / "traffic_volume"))
 
-from parse_tmas import parse_legacy_vol_line, parse_modern_vol_bytes, parse_modern_sta_bytes, _decode_coord
+from parse_tmas import (
+    parse_legacy_vol_line, parse_modern_vol_bytes, parse_modern_sta_bytes, _decode_coord,
+    parse_pipe_headerless_vol_line, _detect_vol_format,
+)
 
 
 # A real record pulled from FHWA's jan_2015_ccs_data.zip (DC, station
@@ -94,3 +97,40 @@ def test_modern_sta_bytes_decodes_county_and_coordinates():
     assert df.iloc[0]["county_fips"] == "097"
     assert abs(df.iloc[0]["latitude"] - 31.076964) < 1e-9
     assert abs(df.iloc[0]["longitude"] - (-88.022908)) < 1e-9
+
+
+# A real record pulled from FHWA's jan_2021_ccs_data.zip (DC, station
+# 000101). 2021 archives are pipe-delimited but -- unlike 2022+ -- have no
+# header row and still use the legacy format's 2-digit year and field order.
+# Confirmed byte-for-byte: Jan 1, 2021 was a Friday -- FHWA's day-of-week
+# code 6 (Sun=1..Sat=7), which is what this line encodes.
+_REAL_HEADERLESS_2021_LINE = (
+    "3|02|1R|000101|1|1|21|01|01|6|00004|00002|00000|00002|00000|00001|00001|"
+    "00009|00010|00016|00028|00038|00048|00057|00034|00032|00011|00014|00017|"
+    "00013|00008|00007|00003|00004|0"
+)
+
+
+def test_pipe_headerless_vol_line_matches_known_day_of_week():
+    parsed = parse_pipe_headerless_vol_line(_REAL_HEADERLESS_2021_LINE)
+    assert parsed is not None
+    assert parsed["state_fips"] == "02"
+    assert parsed["station_id"] == "000101"
+    assert parsed["year"] == 2021
+    assert parsed["month"] == 1
+    assert parsed["day"] == 1
+    assert parsed["day_of_week"] == 6
+    assert len(parsed["hours"]) == 24
+    assert parsed["hours"][0] == 4
+    assert parsed["hours"][10] == 28
+
+
+def test_pipe_headerless_vol_line_rejects_non_volume_record_type():
+    non_volume = "9" + _REAL_HEADERLESS_2021_LINE[1:]
+    assert parse_pipe_headerless_vol_line(non_volume) is None
+
+
+def test_detect_vol_format_distinguishes_all_three_formats():
+    assert _detect_vol_format("record_type|state_code|f_system") == "pipe_header"
+    assert _detect_vol_format(_REAL_HEADERLESS_2021_LINE) == "pipe_headerless"
+    assert _detect_vol_format(_REAL_LEGACY_LINE) == "legacy"

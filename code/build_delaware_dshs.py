@@ -79,11 +79,25 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     if df is None or df.empty:
         return None
     df = df.copy()
-    # crash_datetime is ISO 8601 with a "Z" (UTC) suffix; parse then drop the
-    # timezone so this matches every other state's naive datetime64 columns
-    # (the panel's calendar-date grain makes the UTC/local distinction
-    # immaterial here -- this dataset has no separate local-time field).
-    df["crash_date"] = pd.to_datetime(df["crash_datetime"], errors="coerce", utc=True).dt.tz_localize(None)
+    # crash_datetime is ISO 8601 with a "Z" (UTC) suffix. It MUST be converted
+    # to Delaware local time before the calendar date is taken.
+    #
+    # An earlier version parsed as UTC and merely dropped the timezone, on the
+    # reasoning that the UTC/local distinction was immaterial at calendar-date
+    # grain. It is not: EST/EDT is UTC-5/-4, so every crash at local hour >= 19
+    # falls on the *following* UTC date. That silently shifted 16.9% of all
+    # Delaware crashes forward by one day. Verified directly against the
+    # county-hour panel -- reassigning local timestamps to their UTC date
+    # reproduces the old daily series exactly (match share 1.0000, mean abs
+    # diff 0.0), which is what identified the bug.
+    #
+    # Local dates are also the correct grain for this project: FARS and the
+    # AMBER-alert treatment are both aligned on local calendar date.
+    df["crash_date"] = (
+        pd.to_datetime(df["crash_datetime"], errors="coerce", utc=True)
+        .dt.tz_convert("America/New_York")
+        .dt.tz_localize(None)
+    )
     n_bad_dt = df["crash_date"].isna().sum()
     if n_bad_dt:
         log.warning("  [%d] %d rows with unparseable crash_datetime dropped", year, n_bad_dt)
@@ -108,46 +122,51 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading Delaware DSHS crash data (2013–2024) …")
-log.info("Source: %s", BASE_URL)
+# Executed only as a script. Without this guard the whole download-and-
+# write pipeline ran on *import*, so merely importing this module (from a
+# test, a notebook, or another builder) silently re-downloaded the source
+# and overwrote the Delaware panel on disk.
+if __name__ == "__main__":
+    log.info("Downloading Delaware DSHS crash data (2013–2024) …")
+    log.info("Source: %s", BASE_URL)
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("=== Year %d ===", yr)
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("DE", yr, None if raw.empty else raw,
-        required_columns={"crash_datetime", "county", "year"},
-        date_column="crash_datetime", outcome_columns=set(),
-        geography_column="county", geography_mapper=county_to_fips,
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    del raw, agg
-    gc.collect()
-    time.sleep(0.5)
+    for yr in YEARS:
+        log.info("=== Year %d ===", yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("DE", yr, None if raw.empty else raw,
+            required_columns={"crash_datetime", "county", "year"},
+            date_column="crash_datetime", outcome_columns=set(),
+            geography_column="county", geography_mapper=county_to_fips,
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        del raw, agg
+        gc.collect()
+        time.sleep(0.5)
 
-session.close()
-write_state_manifest_or_raise("DE", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("DE", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Delaware data downloaded — aborting.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Delaware data downloaded — aborting.")
+        sys.exit(1)
 
-de_panel = pd.concat(parts, ignore_index=True)
-de_panel["date"] = pd.to_datetime(de_panel["date"])
-de_panel = de_panel.groupby(["fips", "date"], as_index=False)["de_crashes"].sum()
+    de_panel = pd.concat(parts, ignore_index=True)
+    de_panel["date"] = pd.to_datetime(de_panel["date"])
+    de_panel = de_panel.groupby(["fips", "date"], as_index=False)["de_crashes"].sum()
 
-log.info("")
-log.info("Final Delaware DSHS panel:")
-log.info("  Rows       : %d", len(de_panel))
-log.info("  Counties   : %d", de_panel["fips"].nunique())
-log.info("  Date range : %s – %s", de_panel["date"].min().date(), de_panel["date"].max().date())
-log.info("  de_crashes : %d", int(de_panel["de_crashes"].sum()))
+    log.info("")
+    log.info("Final Delaware DSHS panel:")
+    log.info("  Rows       : %d", len(de_panel))
+    log.info("  Counties   : %d", de_panel["fips"].nunique())
+    log.info("  Date range : %s – %s", de_panel["date"].min().date(), de_panel["date"].max().date())
+    log.info("  de_crashes : %d", int(de_panel["de_crashes"].sum()))
 
-de_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    de_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

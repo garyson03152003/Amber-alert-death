@@ -132,58 +132,63 @@ def process_year(incidents: pd.DataFrame, drivers: pd.DataFrame, nonmotorists: p
     return agg
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading Montgomery County MD crash data (2015–2025) …")
-log.info("Source: %s", INCIDENTS_URL)
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ─────────────────────────────────────────────────────────────────────
+    log.info("Downloading Montgomery County MD crash data (2015–2025) …")
+    log.info("Source: %s", INCIDENTS_URL)
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("=== Year %d ===", yr)
-    try:
-        incidents, drivers, nonmotorists = fetch_year(session, yr)
-    except Exception as exc:
-        FETCH_FAILURES[yr] = exc
-        log.error("  [%d] strict Socrata pagination failed: %s", yr, exc)
-        incidents, drivers, nonmotorists = None, None, None
-    coverage_rows.append(validate_source_frame("MOCO", yr, incidents,
-        required_columns={"report_number", "crash_date_time"},
-        date_column="crash_date_time", outcome_columns=set(),
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(incidents, drivers, nonmotorists, yr) if incidents is not None else None
-    if agg is not None:
-        parts.append(agg)
-    del incidents, drivers, nonmotorists, agg
-    gc.collect()
-    time.sleep(0.5)
+    for yr in YEARS:
+        log.info("=== Year %d ===", yr)
+        try:
+            incidents, drivers, nonmotorists = fetch_year(session, yr)
+        except Exception as exc:
+            FETCH_FAILURES[yr] = exc
+            log.error("  [%d] strict Socrata pagination failed: %s", yr, exc)
+            incidents, drivers, nonmotorists = None, None, None
+        coverage_rows.append(validate_source_frame("MOCO", yr, incidents,
+            required_columns={"report_number", "crash_date_time"},
+            date_column="crash_date_time", outcome_columns=set(),
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(incidents, drivers, nonmotorists, yr) if incidents is not None else None
+        if agg is not None:
+            parts.append(agg)
+        del incidents, drivers, nonmotorists, agg
+        gc.collect()
+        time.sleep(0.5)
 
-session.close()
-write_state_manifest_or_raise("MOCO", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("MOCO", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Montgomery County data downloaded — aborting.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Montgomery County data downloaded — aborting.")
+        sys.exit(1)
 
-moco_panel = pd.concat(parts, ignore_index=True)
-moco_panel["date"] = pd.to_datetime(moco_panel["date"])
-moco_panel = (
-    moco_panel.groupby(["fips", "date"])
-      .agg(moco_crashes=("moco_crashes", "sum"), moco_fatals=("moco_fatals", "sum"),
-           moco_serious_inj=("moco_serious_inj", "sum"))
-      .reset_index()
-)
+    moco_panel = pd.concat(parts, ignore_index=True)
+    moco_panel["date"] = pd.to_datetime(moco_panel["date"])
+    moco_panel = (
+        moco_panel.groupby(["fips", "date"])
+          .agg(moco_crashes=("moco_crashes", "sum"), moco_fatals=("moco_fatals", "sum"),
+               moco_serious_inj=("moco_serious_inj", "sum"))
+          .reset_index()
+    )
 
-log.info("")
-log.info("Final Montgomery County MD panel:")
-log.info("  Rows            : %d", len(moco_panel))
-log.info("  Counties        : %d", moco_panel["fips"].nunique())
-log.info("  Date range      : %s – %s", moco_panel["date"].min().date(), moco_panel["date"].max().date())
-log.info("  moco_crashes    : %d", int(moco_panel["moco_crashes"].sum()))
-log.info("  moco_fatals     : %.0f", moco_panel["moco_fatals"].sum())
-log.info("  moco_serious_inj: %.0f", moco_panel["moco_serious_inj"].sum())
+    log.info("")
+    log.info("Final Montgomery County MD panel:")
+    log.info("  Rows            : %d", len(moco_panel))
+    log.info("  Counties        : %d", moco_panel["fips"].nunique())
+    log.info("  Date range      : %s – %s", moco_panel["date"].min().date(), moco_panel["date"].max().date())
+    log.info("  moco_crashes    : %d", int(moco_panel["moco_crashes"].sum()))
+    log.info("  moco_fatals     : %.0f", moco_panel["moco_fatals"].sum())
+    log.info("  moco_serious_inj: %.0f", moco_panel["moco_serious_inj"].sum())
 
-moco_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    moco_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

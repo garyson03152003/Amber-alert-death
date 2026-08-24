@@ -35,10 +35,9 @@ MONTHS = [
     "jan", "feb", "mar", "apr", "may", "jun",
     "jul", "aug", "sep", "oct", "nov", "dec",
 ]
-# Confirmed directly: monthly CCS archives before 2020 are the legacy
-# fixed-width format; 2020 onward is pipe-delimited (matches FHWA's own
-# statement on the source page, and spot-checked for 2015 vs 2023).
-MODERN_FIRST_YEAR = 2020
+# VOL format is auto-detected per zip in parse_tmas.read_vol_zip -- there is
+# no clean year cutoff (2020 is still legacy fixed-width, 2021 is a distinct
+# headerless-pipe format, only 2022+ has the documented header+pipe layout).
 
 
 def _melt_hours(df: pd.DataFrame) -> pd.DataFrame:
@@ -48,7 +47,7 @@ def _melt_hours(df: pd.DataFrame) -> pd.DataFrame:
     base = df[["state_fips", "station_id", "year", "month", "day"]].copy()
     hours_matrix = pd.DataFrame(df["hours"].tolist(), index=df.index)
     hours_matrix.columns = range(24)
-    long = hours_matrix.stack(dropna=False)
+    long = hours_matrix.stack()  # pandas 3.0's stack() never drops NaN rows
     long.index.set_names(["_row", "hour"], inplace=True)
     long = long.rename("traffic_volume").reset_index()
     out = base.loc[long["_row"]].reset_index(drop=True)
@@ -75,14 +74,13 @@ def process_year(year: int) -> pd.DataFrame | None:
         ["county_fips_full", "latitude", "longitude"]
     ]
 
-    modern = year >= MODERN_FIRST_YEAR
     monthly_parts = []
     for month in MONTHS:
         vol_zip = year_dir / f"{month}_{year}_ccs_data.zip"
         if not vol_zip.is_file():
             log.warning("[%d-%s] no volume data downloaded, skipping month", year, month)
             continue
-        raw = read_vol_zip(vol_zip, modern=modern)
+        raw = read_vol_zip(vol_zip)
         if raw.empty:
             log.warning("[%d-%s] volume file parsed empty", year, month)
             continue

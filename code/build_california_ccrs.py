@@ -298,46 +298,51 @@ def download_ccrs_year(year: int) -> pd.DataFrame | None:
         return None
 
 
-# ── Main download loop ────────────────────────────────────────────────────────
-log.info("Downloading California CCRS crash data …")
-parts = []
-for yr in range(2016, 2025):
-    log.info("Year %d …", yr)
-    part = download_ccrs_year(yr)
-    if part is not None:
-        parts.append(part)
-    time.sleep(1.0)  # polite delay between requests
-    gc.collect()
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main download loop ────────────────────────────────────────────────────────
+    log.info("Downloading California CCRS crash data …")
+    parts = []
+    for yr in range(2016, 2025):
+        log.info("Year %d …", yr)
+        part = download_ccrs_year(yr)
+        if part is not None:
+            parts.append(part)
+        time.sleep(1.0)  # polite delay between requests
+        gc.collect()
 
-# A rejected schema/download path must still have a diagnostic manifest row.
-recorded_years = {row.year for row in CA_COVERAGE}
-for missing_year in range(2016, 2025):
-    if missing_year not in recorded_years:
-        CA_COVERAGE.append(validate_source_frame("CA", missing_year, None,
-            required_columns={"CRASH DATE TIME", "COUNTY CODE", "NUMBERKILLED", "NUMBERINJURED"},
-            date_column="CRASH DATE TIME", outcome_columns={"NUMBERKILLED", "NUMBERINJURED"},
-            terminal_error="missing_bulk_diagnostic"))
-write_state_manifest_or_raise("CA", CA_COVERAGE, output_dir=DATA_PROC / "coverage")
+    # A rejected schema/download path must still have a diagnostic manifest row.
+    recorded_years = {row.year for row in CA_COVERAGE}
+    for missing_year in range(2016, 2025):
+        if missing_year not in recorded_years:
+            CA_COVERAGE.append(validate_source_frame("CA", missing_year, None,
+                required_columns={"CRASH DATE TIME", "COUNTY CODE", "NUMBERKILLED", "NUMBERINJURED"},
+                date_column="CRASH DATE TIME", outcome_columns={"NUMBERKILLED", "NUMBERINJURED"},
+                terminal_error="missing_bulk_diagnostic"))
+    write_state_manifest_or_raise("CA", CA_COVERAGE, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No data downloaded. Check network access and URLs.")
-    sys.exit(1)
+    if not parts:
+        log.error("No data downloaded. Check network access and URLs.")
+        sys.exit(1)
 
-ca_panel = pd.concat(parts, ignore_index=True)
-ca_panel["date"] = pd.to_datetime(ca_panel["date"])
-ca_panel = (ca_panel.groupby(["fips", "date"])
-                     .agg(ca_fatals=("ca_fatals", "sum"),
-                          ca_injury_proxy=("ca_injury_proxy", "sum"),
-                          ca_crashes=("ca_crashes", "sum"))
-                     .reset_index())
-ca_panel["ca_serious_inj"] = np.nan
+    ca_panel = pd.concat(parts, ignore_index=True)
+    ca_panel["date"] = pd.to_datetime(ca_panel["date"])
+    ca_panel = (ca_panel.groupby(["fips", "date"])
+                         .agg(ca_fatals=("ca_fatals", "sum"),
+                              ca_injury_proxy=("ca_injury_proxy", "sum"),
+                              ca_crashes=("ca_crashes", "sum"))
+                         .reset_index())
+    ca_panel["ca_serious_inj"] = np.nan
 
-log.info("\nFinal California CCRS panel:")
-log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
-         len(ca_panel), ca_panel["fips"].nunique(),
-         ca_panel["date"].min().date(), ca_panel["date"].max().date())
-log.info("  Total fatals: %.0f  Total all-injury proxy: %.0f",
-         ca_panel["ca_fatals"].sum(), ca_panel["ca_injury_proxy"].sum())
+    log.info("\nFinal California CCRS panel:")
+    log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
+             len(ca_panel), ca_panel["fips"].nunique(),
+             ca_panel["date"].min().date(), ca_panel["date"].max().date())
+    log.info("  Total fatals: %.0f  Total all-injury proxy: %.0f",
+             ca_panel["ca_fatals"].sum(), ca_panel["ca_injury_proxy"].sum())
 
-ca_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    ca_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

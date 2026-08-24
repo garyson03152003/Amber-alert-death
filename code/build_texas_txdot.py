@@ -180,52 +180,57 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     return agg
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-log.info("Downloading TxDOT statewide crash data (2020–2024) …")
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ──────────────────────────────────────────────────────────────────────
+    log.info("Downloading TxDOT statewide crash data (2020–2024) …")
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("Year %d …", yr)
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("TX", yr, raw,
-        required_columns={"crash_id", "crash_date", "cnty_id", "death_cnt", "sus_serious_injry_cnt"},
-        date_column="crash_date", outcome_columns={"death_cnt", "sus_serious_injry_cnt"},
-        geography_column="cnty_id", geography_mapper=lambda value: cris_to_fips(int(value)) if pd.notna(value) and 1 <= int(value) <= 254 else None,
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    del raw, agg
-    gc.collect()
-    time.sleep(SLEEP_YEAR)
+    for yr in YEARS:
+        log.info("Year %d …", yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("TX", yr, raw,
+            required_columns={"crash_id", "crash_date", "cnty_id", "death_cnt", "sus_serious_injry_cnt"},
+            date_column="crash_date", outcome_columns={"death_cnt", "sus_serious_injry_cnt"},
+            geography_column="cnty_id", geography_mapper=lambda value: cris_to_fips(int(value)) if pd.notna(value) and 1 <= int(value) <= 254 else None,
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        del raw, agg
+        gc.collect()
+        time.sleep(SLEEP_YEAR)
 
-session.close()
-write_state_manifest_or_raise("TX", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("TX", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Texas data downloaded.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Texas data downloaded.")
+        sys.exit(1)
 
-panel = pd.concat(parts, ignore_index=True)
-panel = (
-    panel.groupby(["fips", "date"])
-    .agg(tx_crashes=("tx_crashes","sum"), tx_fatals=("tx_fatals","sum"),
-         tx_serious_inj=("tx_serious_inj","sum"))
-    .reset_index()
-)
-panel = panel.sort_values(["fips", "date"]).reset_index(drop=True)
-panel["date"] = pd.to_datetime(panel["date"])
+    panel = pd.concat(parts, ignore_index=True)
+    panel = (
+        panel.groupby(["fips", "date"])
+        .agg(tx_crashes=("tx_crashes","sum"), tx_fatals=("tx_fatals","sum"),
+             tx_serious_inj=("tx_serious_inj","sum"))
+        .reset_index()
+    )
+    panel = panel.sort_values(["fips", "date"]).reset_index(drop=True)
+    panel["date"] = pd.to_datetime(panel["date"])
 
-log.info("\nFinal Texas TxDOT panel:")
-log.info("  Rows: %d  Counties: %d  %s – %s",
-         len(panel), panel["fips"].nunique(),
-         panel["date"].min().date(), panel["date"].max().date())
-log.info("  tx_crashes=%.0f  tx_fatals=%.0f  tx_serious_inj=%.0f",
-         panel["tx_crashes"].sum(), panel["tx_fatals"].sum(),
-         panel["tx_serious_inj"].sum())
+    log.info("\nFinal Texas TxDOT panel:")
+    log.info("  Rows: %d  Counties: %d  %s – %s",
+             len(panel), panel["fips"].nunique(),
+             panel["date"].min().date(), panel["date"].max().date())
+    log.info("  tx_crashes=%.0f  tx_fatals=%.0f  tx_serious_inj=%.0f",
+             panel["tx_crashes"].sum(), panel["tx_fatals"].sum(),
+             panel["tx_serious_inj"].sum())
 
-panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

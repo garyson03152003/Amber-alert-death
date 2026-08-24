@@ -18,7 +18,7 @@ B08301 column layout (all 21 cells, 1-indexed from SEQ_START=157):
 Output: data/processed/county_car_commuters.parquet
   Columns: fips(str5), total_workers, car_total, drove_alone, carpooled, car_share
 """
-import sys, time, urllib.request, zipfile, io, warnings
+import sys, os, time, urllib.request, zipfile, io, warnings
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -30,10 +30,41 @@ from utils import get_logger
 warnings.filterwarnings("ignore")
 log = get_logger("car_commuters")
 
-OUT_PATH = Path(__file__).parent.parent / "data" / "processed" / "county_car_commuters.parquet"
+ACS_YEAR = int(os.environ.get("ACS_YEAR", "2020"))
+OUT_PATH = (Path(__file__).parent.parent / "data" / "processed" /
+            ("county_car_commuters.parquet" if ACS_YEAR == 2020
+             else f"county_car_commuters_{ACS_YEAR}.parquet"))
 BASE_URL = ("https://www2.census.gov/programs-surveys/acs/summary_file/"
-            "2020/data/5_year_by_state")
-SEQ_START    = 157   # ABSOLUTE 1-indexed column position in seq file (incl. 6 header cols)
+            f"{ACS_YEAR}/data/5_year_by_state")
+LOOKUP_URL = ("https://www2.census.gov/programs-surveys/acs/summary_file/"
+              f"{ACS_YEAR}/documentation/user_tools/"
+              "ACS_5yr_Seq_Table_Number_Lookup.txt")
+
+
+def resolve_table_location(table_id: str = "B08301") -> tuple[str, int]:
+    """Look up this vintage's sequence number and start position for a table.
+
+    The sequence is NOT stable across ACS vintages -- B08301 is sequence 0027
+    in 2020 but 0028 in 2015, while the start position is 157 in both. Reading
+    the wrong sequence yields a same-shaped 21-cell table of an entirely
+    different variable, which would parse cleanly and be silently wrong, so
+    this is derived from Census's own lookup rather than hardcoded.
+    """
+    import io as _io
+    import urllib.request as _u
+    with _u.urlopen(LOOKUP_URL, timeout=120) as r:
+        text = r.read().decode("latin-1")
+    lk = pd.read_csv(_io.StringIO(text), dtype=str)
+    lk.columns = [c.strip() for c in lk.columns]
+    sub = lk[lk["Table ID"].astype(str).str.strip() == table_id]
+    if sub.empty:
+        raise ValueError(f"{table_id} not present in the {ACS_YEAR} ACS lookup")
+    seq = str(sub["Sequence Number"].dropna().iloc[0]).strip().zfill(4)
+    start = int(str(sub["Start Position"].dropna().iloc[0]).strip())
+    log.info("ACS %d: %s -> sequence %s, start position %d",
+             ACS_YEAR, table_id, seq, start)
+    return seq, start
+
 # → 0-indexed data_offset = SEQ_START - 1 = 156
 # B08301 layout (0-indexed from data_offset):
 #  +0 = B08301_001 Total workers
@@ -41,13 +72,16 @@ SEQ_START    = 157   # ABSOLUTE 1-indexed column position in seq file (incl. 6 h
 #  +2 = B08301_003 Drove alone
 #  +3 = B08301_004 Carpooled (total; sub-cats at +4..+8)
 #  +9 = B08301_010 Public transportation  ← NOT carpooled
+SEQ_NUM, SEQ_START = resolve_table_location("B08301")
 GEO_SUMLEVEL = "050" # county summary level
 
 # State name → URL slug (Census uses spaces replaced by underscores in URLs)
 STATES = {
     "Alabama": "al", "Alaska": "ak", "Arizona": "az", "Arkansas": "ar",
     "California": "ca", "Colorado": "co", "Connecticut": "ct", "Delaware": "de",
-    "District_of_Columbia": "dc", "Florida": "fl", "Georgia": "ga", "Hawaii": "hi",
+    # Census uses CamelCase with no separators for multi-word states;
+    # "District_of_Columbia" 404s in every vintage.
+    "DistrictOfColumbia": "dc", "Florida": "fl", "Georgia": "ga", "Hawaii": "hi",
     "Idaho": "id", "Illinois": "il", "Indiana": "in", "Iowa": "ia",
     "Kansas": "ks", "Kentucky": "ky", "Louisiana": "la", "Maine": "me",
     "Maryland": "md", "Massachusetts": "ma", "Michigan": "mi", "Minnesota": "mn",
@@ -80,9 +114,9 @@ def fetch_state(url_name: str, stab: str) -> pd.DataFrame | None:
             # Geo header: g20205xx.csv
             geo_file = next((f for f in files if f.startswith("g") and f.endswith(".csv")), None)
             # Seq27: e20205xx0027000.txt
-            seq_file = next((f for f in files if f.startswith("e") and "0027" in f), None)
+            seq_file = next((f for f in files if f.startswith("e") and SEQ_NUM in f), None)
             if geo_file is None or seq_file is None:
-                log.warning("%s: missing geo=%s or seq27=%s", url_name, geo_file, seq_file)
+                log.warning("%s: missing geo=%s or seq%s=%s", url_name, geo_file, SEQ_NUM, seq_file)
                 return None
 
             with z.open(geo_file) as f:
@@ -107,7 +141,7 @@ def fetch_state(url_name: str, stab: str) -> pd.DataFrame | None:
         ncols_needed = 5  # B08301_001..004 + one spare
 
         if seq.shape[1] < data_offset + ncols_needed:
-            log.warning("%s: seq27 too narrow (%d cols)", url_name, seq.shape[1])
+            log.warning("%s: seq%s too narrow (%d cols)", url_name, SEQ_NUM, seq.shape[1])
             return None
 
         data_cols = list(seq.columns[data_offset : data_offset + ncols_needed])

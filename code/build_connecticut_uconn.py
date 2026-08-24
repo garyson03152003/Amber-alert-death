@@ -158,7 +158,26 @@ def process_year(crashes: pd.DataFrame, persons: pd.DataFrame, year: int) -> pd.
     if crashes is None or crashes.empty:
         return None
     crashes = crashes.copy()
-    crashes["crash_date"] = pd.to_datetime(crashes["CrashDate"], unit="ms", errors="coerce")
+    # CrashDate is ArcGIS epoch milliseconds (UTC) carrying a real time of day
+    # -- 1,440 distinct values, i.e. minute resolution. It MUST be converted to
+    # Connecticut local time before the calendar date is taken.
+    #
+    # Parsing the epoch without a timezone yields naive UTC: Eastern is
+    # UTC-5/-4, so every crash at local hour >= 19 falls on the *following*
+    # UTC date, shifting 12.6% of all CT crashes forward by a day. Two
+    # independent checks agree: the service declares
+    # dateFieldsTimeReference = {timeZoneIANA: America/New_York,
+    # respectsDaylightSaving: true}, and the raw UTC hours peak at 20:00
+    # (implausible) whereas converted local hours peak at 17:00 with a 04:00
+    # trough (a normal crash curve).
+    #
+    # Local dates are the correct grain: FARS and the AMBER-alert treatment
+    # are both aligned on local calendar date.
+    crashes["crash_date"] = (
+        pd.to_datetime(crashes["CrashDate"], unit="ms", errors="coerce", utc=True)
+        .dt.tz_convert("America/New_York")
+        .dt.tz_localize(None)
+    )
     n_bad_dt = crashes["crash_date"].isna().sum()
     if n_bad_dt:
         log.warning("  [%d] %d rows with unparseable CrashDate dropped", year, n_bad_dt)
@@ -195,54 +214,59 @@ def process_year(crashes: pd.DataFrame, persons: pd.DataFrame, year: int) -> pd.
     return agg
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading Connecticut UConn crash data (2015–2021) …")
-log.info("Source: %s", BASE)
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ─────────────────────────────────────────────────────────────────────
+    log.info("Downloading Connecticut UConn crash data (2015–2021) …")
+    log.info("Source: %s", BASE)
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("=== Year %d ===", yr)
-    crashes, persons = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("CT", yr, crashes,
-        required_columns={"CrashID", "CrashDate", "CrashDateYear", "CrashTownName"},
-        date_column="CrashDate", outcome_columns=set(), date_unit="ms",
-        geography_column="CrashTownName", geography_mapper=town_to_fips,
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(crashes, persons, yr)
-    if agg is not None:
-        parts.append(agg)
-    del crashes, persons, agg
-    gc.collect()
-    time.sleep(1.0)
+    for yr in YEARS:
+        log.info("=== Year %d ===", yr)
+        crashes, persons = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("CT", yr, crashes,
+            required_columns={"CrashID", "CrashDate", "CrashDateYear", "CrashTownName"},
+            date_column="CrashDate", outcome_columns=set(), date_unit="ms",
+            geography_column="CrashTownName", geography_mapper=town_to_fips,
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(crashes, persons, yr)
+        if agg is not None:
+            parts.append(agg)
+        del crashes, persons, agg
+        gc.collect()
+        time.sleep(1.0)
 
-session.close()
-write_state_manifest_or_raise("CT", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("CT", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Connecticut data downloaded — aborting.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Connecticut data downloaded — aborting.")
+        sys.exit(1)
 
-ct_panel = pd.concat(parts, ignore_index=True)
-ct_panel["date"] = pd.to_datetime(ct_panel["date"])
-ct_panel = (
-    ct_panel.groupby(["fips", "date"])
-      .agg(ct_fatals=("ct_fatals", "sum"), ct_serious_inj=("ct_serious_inj", "sum"),
-           ct_crashes=("ct_crashes", "sum"))
-      .reset_index()
-)
+    ct_panel = pd.concat(parts, ignore_index=True)
+    ct_panel["date"] = pd.to_datetime(ct_panel["date"])
+    ct_panel = (
+        ct_panel.groupby(["fips", "date"])
+          .agg(ct_fatals=("ct_fatals", "sum"), ct_serious_inj=("ct_serious_inj", "sum"),
+               ct_crashes=("ct_crashes", "sum"))
+          .reset_index()
+    )
 
-log.info("")
-log.info("Final Connecticut UConn panel:")
-log.info("  Rows          : %d", len(ct_panel))
-log.info("  Counties      : %d", ct_panel["fips"].nunique())
-log.info("  Date range    : %s – %s", ct_panel["date"].min().date(), ct_panel["date"].max().date())
-log.info("  ct_fatals     : %.0f", ct_panel["ct_fatals"].sum())
-log.info("  ct_serious_inj: %.0f", ct_panel["ct_serious_inj"].sum())
-log.info("  ct_crashes    : %d", int(ct_panel["ct_crashes"].sum()))
+    log.info("")
+    log.info("Final Connecticut UConn panel:")
+    log.info("  Rows          : %d", len(ct_panel))
+    log.info("  Counties      : %d", ct_panel["fips"].nunique())
+    log.info("  Date range    : %s – %s", ct_panel["date"].min().date(), ct_panel["date"].max().date())
+    log.info("  ct_fatals     : %.0f", ct_panel["ct_fatals"].sum())
+    log.info("  ct_serious_inj: %.0f", ct_panel["ct_serious_inj"].sum())
+    log.info("  ct_crashes    : %d", int(ct_panel["ct_crashes"].sum()))
 
-ct_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    ct_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

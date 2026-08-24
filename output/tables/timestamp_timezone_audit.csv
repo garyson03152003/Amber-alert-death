@@ -1,0 +1,12 @@
+source,verdict,detail,year,column,tz,n,share_at_utc_midnight,raw_utc_peak,raw_utc_trough,local_peak,local_trough,share_dates_shifted
+CT,no_usable_frame,tuple,,,,,,,,,,
+FL,AMBIGUOUS_needs_review,,2019.0,CRASH_DATE,America/New_York,38785.0,0.0,5.0,0.0,1.0,2.0,
+HI,local_stored_as_utc_SAFE,,2019.0,Crash_Date,Pacific/Honolulu,102.0,0.039216,18.0,1.0,8.0,1.0,
+INMPO,date_only_SAFE,,2019.0,Date,America/Indiana/Indianapolis,911.0,1.0,,,,,
+NC,no_usable_frame,NoneType,,,,,,,,,,
+OR,AMBIGUOUS_needs_review,,2019.0,CRASH_DT,America/Los_Angeles,50128.0,0.0,12.0,0.0,5.0,0.0,
+VA,date_only_SAFE,,2019.0,CRASH_DT,America/New_York,128172.0,1.0,,,,,
+NV,no_usable_frame,NoneType,,,,,,,,,,
+IDCOMPASS,date_only_SAFE,,2019.0,accident_date,America/Boise,11050.0,1.0,,,,,
+MA,local_stored_as_utc_SAFE,,2019.0,CRASH_DATE,America/New_York,140880.0,0.000674,17.0,4.0,12.0,23.0,
+UT,genuine_utc_AFFECTED,,2019.0,CRASH_DATETIME,America/Denver,64465.0,0.003273,23.0,9.0,17.0,3.0,0.2626

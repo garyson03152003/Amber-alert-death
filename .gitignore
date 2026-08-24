@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+
+# Raw TMAS downloads (~3.2GB): fully reproducible via
+# code/traffic_volume/download_tmas.py, not a deliverable.
+data/raw/tmas/
+
+# Single-file outputs over GitHub's 100MB push limit.
+data/processed/traffic/tmas_station_day_outcomes.parquet

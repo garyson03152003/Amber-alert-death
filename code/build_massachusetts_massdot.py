@@ -70,6 +70,13 @@ COMMON_FIELDS = "CNTY_NAME,NUMB_FATAL_INJR,NUMB_NONFATAL_INJR,MAX_INJR_SVRTY_CL"
 YEAR_DATE_FIELD = {yr: "CRASH_DATETIME" for yr in range(2013, 2018)}
 YEAR_DATE_FIELD.update({yr: "CRASH_DATE" for yr in range(2018, 2021)})
 
+def _ma_county_to_fips(name: object) -> str | None:
+    """Callable wrapper over MA_COUNTY_FIPS, for reuse by other builders."""
+    if name is None:
+        return None
+    return MA_COUNTY_FIPS.get(str(name).strip().upper())
+
+
 def out_fields(year: int) -> str:
     return f"{YEAR_DATE_FIELD[year]},{COMMON_FIELDS}"
 
@@ -229,55 +236,60 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading Massachusetts MassDOT crash data (2013–2020) …")
+# Executed only as a script. Without this guard the whole download-and-
+# write pipeline ran on *import*, so merely importing this module (from a
+# test, a notebook, or another builder) silently re-downloaded the source
+# and overwrote the Massachusetts panel on disk.
+if __name__ == "__main__":
+    log.info("Downloading Massachusetts MassDOT crash data (2013–2020) …")
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("Year %d …", yr)
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("MA", yr, raw,
-        required_columns={YEAR_DATE_FIELD[yr], "CNTY_NAME", "NUMB_FATAL_INJR", "NUMB_NONFATAL_INJR", "MAX_INJR_SVRTY_CL"},
-        date_column=YEAR_DATE_FIELD[yr], outcome_columns={"NUMB_FATAL_INJR", "NUMB_NONFATAL_INJR"}, date_unit="ms",
-        geography_column="CNTY_NAME", geography_mapper=lambda value: MA_COUNTY_FIPS.get(str(value).strip().upper()),
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    del raw, agg
-    time.sleep(2.0)
-    gc.collect()
+    for yr in YEARS:
+        log.info("Year %d …", yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("MA", yr, raw,
+            required_columns={YEAR_DATE_FIELD[yr], "CNTY_NAME", "NUMB_FATAL_INJR", "NUMB_NONFATAL_INJR", "MAX_INJR_SVRTY_CL"},
+            date_column=YEAR_DATE_FIELD[yr], outcome_columns={"NUMB_FATAL_INJR", "NUMB_NONFATAL_INJR"}, date_unit="ms",
+            geography_column="CNTY_NAME", geography_mapper=lambda value: MA_COUNTY_FIPS.get(str(value).strip().upper()),
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        del raw, agg
+        time.sleep(2.0)
+        gc.collect()
 
-session.close()
-write_state_manifest_or_raise("MA", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("MA", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Massachusetts data downloaded.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Massachusetts data downloaded.")
+        sys.exit(1)
 
-ma_panel = pd.concat(parts, ignore_index=True)
-ma_panel["date"] = pd.to_datetime(ma_panel["date"])
+    ma_panel = pd.concat(parts, ignore_index=True)
+    ma_panel["date"] = pd.to_datetime(ma_panel["date"])
 
-ma_panel = (
-    ma_panel.groupby(["fips", "date"])
-      .agg(
-          ma_fatals     =("ma_fatals",      "sum"),
-          ma_injury_proxy=("ma_injury_proxy", "sum"),
-          ma_crashes    =("ma_crashes",     "sum"),
-      )
-      .reset_index()
-)
+    ma_panel = (
+        ma_panel.groupby(["fips", "date"])
+          .agg(
+              ma_fatals     =("ma_fatals",      "sum"),
+              ma_injury_proxy=("ma_injury_proxy", "sum"),
+              ma_crashes    =("ma_crashes",     "sum"),
+          )
+          .reset_index()
+    )
 
-log.info("\nFinal Massachusetts panel:")
-log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
-         len(ma_panel), ma_panel["fips"].nunique(),
-         ma_panel["date"].min().date(), ma_panel["date"].max().date())
-ma_panel["ma_serious_inj"] = np.nan
-log.info("  Total ma_fatals: %.0f  Total ma_injury_proxy: %.0f",
-         ma_panel["ma_fatals"].sum(), ma_panel["ma_injury_proxy"].sum())
+    log.info("\nFinal Massachusetts panel:")
+    log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
+             len(ma_panel), ma_panel["fips"].nunique(),
+             ma_panel["date"].min().date(), ma_panel["date"].max().date())
+    ma_panel["ma_serious_inj"] = np.nan
+    log.info("  Total ma_fatals: %.0f  Total ma_injury_proxy: %.0f",
+             ma_panel["ma_fatals"].sum(), ma_panel["ma_injury_proxy"].sum())
 
-ma_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    ma_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

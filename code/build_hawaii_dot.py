@@ -145,47 +145,52 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     return agg
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading Hawaii statewide fatal-crash data (2012–2024) …")
-log.info("Source: %s", QUERY_URL)
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ─────────────────────────────────────────────────────────────────────
+    log.info("Downloading Hawaii statewide fatal-crash data (2012–2024) …")
+    log.info("Source: %s", QUERY_URL)
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("=== Year %d ===", yr)
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("HI", yr, None if raw.empty else raw,
-        required_columns={"Crash_Date", "Crash_Year", "County", "Total_Fatalities"},
-        date_column="Crash_Date", outcome_columns={"Total_Fatalities"}, date_unit="ms",
-        geography_column="County", geography_mapper=county_to_fips,
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    del raw, agg
-    gc.collect()
-    time.sleep(0.5)
+    for yr in YEARS:
+        log.info("=== Year %d ===", yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("HI", yr, None if raw.empty else raw,
+            required_columns={"Crash_Date", "Crash_Year", "County", "Total_Fatalities"},
+            date_column="Crash_Date", outcome_columns={"Total_Fatalities"}, date_unit="ms",
+            geography_column="County", geography_mapper=county_to_fips,
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        del raw, agg
+        gc.collect()
+        time.sleep(0.5)
 
-session.close()
-write_state_manifest_or_raise("HI", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("HI", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Hawaii data downloaded — aborting.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Hawaii data downloaded — aborting.")
+        sys.exit(1)
 
-hi_panel = pd.concat(parts, ignore_index=True)
-hi_panel["date"] = pd.to_datetime(hi_panel["date"])
-hi_panel = hi_panel.groupby(["fips", "date"], as_index=False)["hi_fatals"].sum()
+    hi_panel = pd.concat(parts, ignore_index=True)
+    hi_panel["date"] = pd.to_datetime(hi_panel["date"])
+    hi_panel = hi_panel.groupby(["fips", "date"], as_index=False)["hi_fatals"].sum()
 
-log.info("")
-log.info("Final Hawaii panel:")
-log.info("  Rows       : %d", len(hi_panel))
-log.info("  Counties   : %d", hi_panel["fips"].nunique())
-log.info("  Date range : %s – %s", hi_panel["date"].min().date(), hi_panel["date"].max().date())
-log.info("  hi_fatals  : %.0f", hi_panel["hi_fatals"].sum())
+    log.info("")
+    log.info("Final Hawaii panel:")
+    log.info("  Rows       : %d", len(hi_panel))
+    log.info("  Counties   : %d", hi_panel["fips"].nunique())
+    log.info("  Date range : %s – %s", hi_panel["date"].min().date(), hi_panel["date"].max().date())
+    log.info("  hi_fatals  : %.0f", hi_panel["hi_fatals"].sum())
 
-hi_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    hi_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

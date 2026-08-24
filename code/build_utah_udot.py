@@ -102,7 +102,24 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     if df is None or df.empty:
         return None
     df = df.copy()
-    df["crash_date"] = pd.to_datetime(df["CRASH_DATETIME"], unit="ms", errors="coerce")
+    # CRASH_DATETIME is ArcGIS epoch milliseconds, which are UTC, and it
+    # carries a real time-of-day component. It MUST be converted to Utah
+    # local time before the calendar date is taken.
+    #
+    # Parsing the epoch without a timezone yields naive UTC: Denver is
+    # UTC-7/-6, so every crash at local hour >= 17 falls on the *following*
+    # UTC date. That silently shifted 32.8% of all Utah crashes forward by a
+    # day. Verified directly against the county-hour panel -- reassigning
+    # local timestamps to their UTC date reproduces the old daily series
+    # exactly (match share 1.0000, mean abs diff 0.0).
+    #
+    # Local dates are the correct grain here: FARS and the AMBER-alert
+    # treatment are both aligned on local calendar date.
+    df["crash_date"] = (
+        pd.to_datetime(df["CRASH_DATETIME"], unit="ms", errors="coerce", utc=True)
+        .dt.tz_convert("America/Denver")
+        .dt.tz_localize(None)
+    )
     n_bad_dt = df["crash_date"].isna().sum()
     if n_bad_dt:
         log.warning("  [%d] %d rows with unparseable CRASH_DATETIME dropped", year, n_bad_dt)
@@ -132,53 +149,58 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading Utah UDOT crash data (2018–2024) …")
-log.info("Source: %s", BASE)
+# Executed only as a script. Without this guard the whole download-and-
+# write pipeline ran on *import*, so merely importing this module (from a
+# test, a notebook, or another builder) silently re-downloaded the source
+# and overwrote the Utah panel on disk.
+if __name__ == "__main__":
+    log.info("Downloading Utah UDOT crash data (2018–2024) …")
+    log.info("Source: %s", BASE)
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in sorted(YEAR_LAYER):
-    log.info("=== Year %d ===", yr)
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("UT", yr, raw,
-        required_columns={"CRASH_DATETIME", "COUNTY_NAME", "NUMBER_FATALITIES", "NUMBER_FOUR_INJURIES"},
-        date_column="CRASH_DATETIME", outcome_columns={"NUMBER_FATALITIES", "NUMBER_FOUR_INJURIES"}, date_unit="ms",
-        geography_column="COUNTY_NAME", geography_mapper=county_to_fips,
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    del raw, agg
-    gc.collect()
-    time.sleep(1.0)
+    for yr in sorted(YEAR_LAYER):
+        log.info("=== Year %d ===", yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("UT", yr, raw,
+            required_columns={"CRASH_DATETIME", "COUNTY_NAME", "NUMBER_FATALITIES", "NUMBER_FOUR_INJURIES"},
+            date_column="CRASH_DATETIME", outcome_columns={"NUMBER_FATALITIES", "NUMBER_FOUR_INJURIES"}, date_unit="ms",
+            geography_column="COUNTY_NAME", geography_mapper=county_to_fips,
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        del raw, agg
+        gc.collect()
+        time.sleep(1.0)
 
-session.close()
-write_state_manifest_or_raise("UT", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("UT", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Utah data downloaded — aborting.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Utah data downloaded — aborting.")
+        sys.exit(1)
 
-ut_panel = pd.concat(parts, ignore_index=True)
-ut_panel["date"] = pd.to_datetime(ut_panel["date"])
-ut_panel = (
-    ut_panel.groupby(["fips", "date"])
-      .agg(ut_fatals=("ut_fatals", "sum"), ut_serious_inj=("ut_serious_inj", "sum"),
-           ut_crashes=("ut_crashes", "sum"))
-      .reset_index()
-)
+    ut_panel = pd.concat(parts, ignore_index=True)
+    ut_panel["date"] = pd.to_datetime(ut_panel["date"])
+    ut_panel = (
+        ut_panel.groupby(["fips", "date"])
+          .agg(ut_fatals=("ut_fatals", "sum"), ut_serious_inj=("ut_serious_inj", "sum"),
+               ut_crashes=("ut_crashes", "sum"))
+          .reset_index()
+    )
 
-log.info("")
-log.info("Final Utah UDOT panel:")
-log.info("  Rows          : %d", len(ut_panel))
-log.info("  Counties      : %d", ut_panel["fips"].nunique())
-log.info("  Date range    : %s – %s", ut_panel["date"].min().date(), ut_panel["date"].max().date())
-log.info("  ut_fatals     : %.0f", ut_panel["ut_fatals"].sum())
-log.info("  ut_serious_inj: %.0f", ut_panel["ut_serious_inj"].sum())
-log.info("  ut_crashes    : %d", int(ut_panel["ut_crashes"].sum()))
+    log.info("")
+    log.info("Final Utah UDOT panel:")
+    log.info("  Rows          : %d", len(ut_panel))
+    log.info("  Counties      : %d", ut_panel["fips"].nunique())
+    log.info("  Date range    : %s – %s", ut_panel["date"].min().date(), ut_panel["date"].max().date())
+    log.info("  ut_fatals     : %.0f", ut_panel["ut_fatals"].sum())
+    log.info("  ut_serious_inj: %.0f", ut_panel["ut_serious_inj"].sum())
+    log.info("  ut_crashes    : %d", int(ut_panel["ut_crashes"].sum()))
 
-ut_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    ut_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

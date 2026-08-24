@@ -168,134 +168,139 @@ def fetch_county_year(
     return None
 
 
-# ── Main download loop ────────────────────────────────────────────────────────
-log.info("Downloading Wisconsin crash data (2013–2024) via Community Maps API …")
-log.info("Counties: %d  Years: %s–%s", len(WI_COUNTIES), YEARS[0], YEARS[-1])
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main download loop ────────────────────────────────────────────────────────
+    log.info("Downloading Wisconsin crash data (2013–2024) via Community Maps API …")
+    log.info("Counties: %d  Years: %s–%s", len(WI_COUNTIES), YEARS[0], YEARS[-1])
 
-session = requests.Session()
-session.headers.update(HEADERS)
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
-all_parts: list[pd.DataFrame] = []
-coverage_rows = []
-total_requests = len(WI_COUNTIES) * len(YEARS)
-done = 0
+    all_parts: list[pd.DataFrame] = []
+    coverage_rows = []
+    total_requests = len(WI_COUNTIES) * len(YEARS)
+    done = 0
 
-for county_param, (county_upper, fips) in WI_COUNTIES.items():
-    county_rows: list[dict] = []
+    for county_param, (county_upper, fips) in WI_COUNTIES.items():
+        county_rows: list[dict] = []
 
-    for yr in YEARS:
-        done += 1
-        props = fetch_county_year(session, county_param, yr)
+        for yr in YEARS:
+            done += 1
+            props = fetch_county_year(session, county_param, yr)
 
-        if props is None:
-            log.warning("  [%s %d] skipped (all retries failed)", county_param, yr)
+            if props is None:
+                log.warning("  [%s %d] skipped (all retries failed)", county_param, yr)
+                coverage_rows.append(validate_wisconsin_county_year(
+                    fips, yr, response_kind="failed", terminal_error="request_failed",
+                ))
+                time.sleep(1.0)
+                continue
+
+            if not props:
+                # Zero crashes this county-year is plausible for small/rural counties
+                log.debug("  [%s %d] 0 crashes", county_param, yr)
+                coverage_rows.append(validate_wisconsin_county_year(
+                    fips, yr, response_kind="empty", request_complete=True,
+                ))
+                time.sleep(0.3)
+                continue
+
+            raw_request = pd.DataFrame(props)
+            raw_dates = raw_request["date"] if "date" in raw_request else pd.Series(pd.NaT, index=raw_request.index)
+            request_dates = pd.to_datetime(raw_dates, format="%m/%d/%Y", errors="coerce")
+            wrong_year = int(request_dates.notna().sum() - request_dates.dt.year.eq(yr).sum())
             coverage_rows.append(validate_wisconsin_county_year(
-                fips, yr, response_kind="failed", terminal_error="request_failed",
+                fips, yr, response_kind="success", expected_records=len(raw_request),
+                fetched_records=len(raw_request), retained_records=len(raw_request),
+                request_complete=True,
+                required_columns_ok={"date", "totfatl", "injsvr"}.issubset(raw_request.columns),
+                invalid_date_count=int(request_dates.isna().sum()) + wrong_year,
+                observed_min_date=request_dates.min(), observed_max_date=request_dates.max(),
             ))
-            time.sleep(1.0)
+
+            county_rows.extend(props)
+            log.debug("  [%s %d] %d crashes", county_param, yr, len(props))
+            time.sleep(0.4)   # polite delay
+
+        if not county_rows:
+            log.warning("[%s] no data across all years — skipping", county_param)
             continue
 
-        if not props:
-            # Zero crashes this county-year is plausible for small/rural counties
-            log.debug("  [%s %d] 0 crashes", county_param, yr)
-            coverage_rows.append(validate_wisconsin_county_year(
-                fips, yr, response_kind="empty", request_complete=True,
-            ))
-            time.sleep(0.3)
-            continue
+        df = pd.DataFrame(county_rows)
 
-        raw_request = pd.DataFrame(props)
-        raw_dates = raw_request["date"] if "date" in raw_request else pd.Series(pd.NaT, index=raw_request.index)
-        request_dates = pd.to_datetime(raw_dates, format="%m/%d/%Y", errors="coerce")
-        wrong_year = int(request_dates.notna().sum() - request_dates.dt.year.eq(yr).sum())
-        coverage_rows.append(validate_wisconsin_county_year(
-            fips, yr, response_kind="success", expected_records=len(raw_request),
-            fetched_records=len(raw_request), retained_records=len(raw_request),
-            request_complete=True,
-            required_columns_ok={"date", "totfatl", "injsvr"}.issubset(raw_request.columns),
-            invalid_date_count=int(request_dates.isna().sum()) + wrong_year,
-            observed_min_date=request_dates.min(), observed_max_date=request_dates.max(),
-        ))
+        # ── Parse date ──────────────────────────────────────────────────────────
+        df["crash_date"] = pd.to_datetime(df["date"], format="%m/%d/%Y", errors="coerce")
+        df = df.dropna(subset=["crash_date"])
+        df["crash_date"] = df["crash_date"].dt.normalize()
 
-        county_rows.extend(props)
-        log.debug("  [%s %d] %d crashes", county_param, yr, len(props))
-        time.sleep(0.4)   # polite delay
+        # ── Severity ────────────────────────────────────────────────────────────
+        df["totfatl"] = pd.to_numeric(df.get("totfatl", 0), errors="coerce").fillna(0)
+        df["totinj"]  = pd.to_numeric(df.get("totinj",  0), errors="coerce").fillna(0)
+        df["injsvr"]  = df.get("injsvr", pd.Series("O", index=df.index)).astype(str)
 
-    if not county_rows:
-        log.warning("[%s] no data across all years — skipping", county_param)
-        continue
+        # The API exposes total injuries for an A-severity crash, not a verified
+        # count of seriously injured people.  Retain it under an honest proxy name;
+        # the comparable serious-injury outcome remains unavailable.
+        df["injury_proxy"] = df["totinj"].where(df["injsvr"] == "A", 0)
 
-    df = pd.DataFrame(county_rows)
+        # ── Aggregate to county-day ──────────────────────────────────────────────
+        agg = (
+            df.groupby("crash_date")
+              .agg(
+                  wi_fatals     =("totfatl",    "sum"),
+                  wi_injury_proxy=("injury_proxy", "sum"),
+                  wi_crashes    =("totfatl",    "count"),
+              )
+              .reset_index()
+              .rename(columns={"crash_date": "date"})
+        )
+        agg["fips"] = fips
+        all_parts.append(agg)
 
-    # ── Parse date ──────────────────────────────────────────────────────────
-    df["crash_date"] = pd.to_datetime(df["date"], format="%m/%d/%Y", errors="coerce")
-    df = df.dropna(subset=["crash_date"])
-    df["crash_date"] = df["crash_date"].dt.normalize()
+        log.info("[%d/%d] %-15s → %d county-days  fatals=%.0f  serious=%.0f",
+                 done // len(YEARS), len(WI_COUNTIES), county_param,
+                 len(agg), agg["wi_fatals"].sum(), agg["wi_injury_proxy"].sum())
 
-    # ── Severity ────────────────────────────────────────────────────────────
-    df["totfatl"] = pd.to_numeric(df.get("totfatl", 0), errors="coerce").fillna(0)
-    df["totinj"]  = pd.to_numeric(df.get("totinj",  0), errors="coerce").fillna(0)
-    df["injsvr"]  = df.get("injsvr", pd.Series("O", index=df.index)).astype(str)
+        del df, agg, county_rows
+        gc.collect()
 
-    # The API exposes total injuries for an A-severity crash, not a verified
-    # count of seriously injured people.  Retain it under an honest proxy name;
-    # the comparable serious-injury outcome remains unavailable.
-    df["injury_proxy"] = df["totinj"].where(df["injsvr"] == "A", 0)
+    session.close()
 
-    # ── Aggregate to county-day ──────────────────────────────────────────────
-    agg = (
-        df.groupby("crash_date")
+    # One explicit manifest row is written for every 72 x 12 county-year request.
+    write_manifest(coverage_rows, DATA_PROC / "coverage", filename="wisconsin_coverage")
+    if any(not row.coverage_valid for row in coverage_rows):
+        raise RuntimeError("Wisconsin coverage validation failed; sparse output is not valid for balancing")
+
+    # ── Combine ───────────────────────────────────────────────────────────────────
+    if not all_parts:
+        log.error("No Wisconsin data collected.")
+        sys.exit(1)
+
+    wi_panel = pd.concat(all_parts, ignore_index=True)
+    wi_panel["date"] = pd.to_datetime(wi_panel["date"])
+
+    # De-duplicate in case of overlap
+    wi_panel = (
+        wi_panel.groupby(["fips", "date"])
           .agg(
-              wi_fatals     =("totfatl",    "sum"),
-              wi_injury_proxy=("injury_proxy", "sum"),
-              wi_crashes    =("totfatl",    "count"),
+              wi_fatals     =("wi_fatals",      "sum"),
+              wi_injury_proxy=("wi_injury_proxy", "sum"),
+              wi_crashes    =("wi_crashes",     "sum"),
           )
           .reset_index()
-          .rename(columns={"crash_date": "date"})
     )
-    agg["fips"] = fips
-    all_parts.append(agg)
 
-    log.info("[%d/%d] %-15s → %d county-days  fatals=%.0f  serious=%.0f",
-             done // len(YEARS), len(WI_COUNTIES), county_param,
-             len(agg), agg["wi_fatals"].sum(), agg["wi_injury_proxy"].sum())
+    log.info("\nFinal Wisconsin panel:")
+    log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
+             len(wi_panel), wi_panel["fips"].nunique(),
+             wi_panel["date"].min().date(), wi_panel["date"].max().date())
+    wi_panel["wi_serious_inj"] = np.nan
+    log.info("  Total wi_fatals: %.0f  Total wi_injury_proxy: %.0f",
+             wi_panel["wi_fatals"].sum(), wi_panel["wi_injury_proxy"].sum())
 
-    del df, agg, county_rows
-    gc.collect()
-
-session.close()
-
-# One explicit manifest row is written for every 72 x 12 county-year request.
-write_manifest(coverage_rows, DATA_PROC / "coverage", filename="wisconsin_coverage")
-if any(not row.coverage_valid for row in coverage_rows):
-    raise RuntimeError("Wisconsin coverage validation failed; sparse output is not valid for balancing")
-
-# ── Combine ───────────────────────────────────────────────────────────────────
-if not all_parts:
-    log.error("No Wisconsin data collected.")
-    sys.exit(1)
-
-wi_panel = pd.concat(all_parts, ignore_index=True)
-wi_panel["date"] = pd.to_datetime(wi_panel["date"])
-
-# De-duplicate in case of overlap
-wi_panel = (
-    wi_panel.groupby(["fips", "date"])
-      .agg(
-          wi_fatals     =("wi_fatals",      "sum"),
-          wi_injury_proxy=("wi_injury_proxy", "sum"),
-          wi_crashes    =("wi_crashes",     "sum"),
-      )
-      .reset_index()
-)
-
-log.info("\nFinal Wisconsin panel:")
-log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
-         len(wi_panel), wi_panel["fips"].nunique(),
-         wi_panel["date"].min().date(), wi_panel["date"].max().date())
-wi_panel["wi_serious_inj"] = np.nan
-log.info("  Total wi_fatals: %.0f  Total wi_injury_proxy: %.0f",
-         wi_panel["wi_fatals"].sum(), wi_panel["wi_injury_proxy"].sum())
-
-wi_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    wi_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

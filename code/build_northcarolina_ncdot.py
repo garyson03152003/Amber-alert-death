@@ -143,54 +143,59 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     return agg
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading North Carolina NCDOT crash data (2021–2024) …")
-log.info("Source: %s", FEATURE_SERVER)
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ─────────────────────────────────────────────────────────────────────
+    log.info("Downloading North Carolina NCDOT crash data (2021–2024) …")
+    log.info("Source: %s", FEATURE_SERVER)
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("=== Year %d ===", yr)
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("NC", yr, raw,
-        required_columns={"Date", "County", "NumFatalities", "NumAInjuries"},
-        date_column="Date", outcome_columns={"NumFatalities", "NumAInjuries"}, date_unit="ms",
-        geography_column="County", geography_mapper=county_to_fips,
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    del raw, agg
-    gc.collect()
-    time.sleep(1.0)
+    for yr in YEARS:
+        log.info("=== Year %d ===", yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("NC", yr, raw,
+            required_columns={"Date", "County", "NumFatalities", "NumAInjuries"},
+            date_column="Date", outcome_columns={"NumFatalities", "NumAInjuries"}, date_unit="ms",
+            geography_column="County", geography_mapper=county_to_fips,
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        del raw, agg
+        gc.collect()
+        time.sleep(1.0)
 
-session.close()
-write_state_manifest_or_raise("NC", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("NC", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No North Carolina data downloaded — aborting.")
-    sys.exit(1)
+    if not parts:
+        log.error("No North Carolina data downloaded — aborting.")
+        sys.exit(1)
 
-nc_panel = pd.concat(parts, ignore_index=True)
-nc_panel["date"] = pd.to_datetime(nc_panel["date"])
-nc_panel = (
-    nc_panel.groupby(["fips", "date"])
-      .agg(nc_fatals=("nc_fatals", "sum"), nc_serious_inj=("nc_serious_inj", "sum"),
-           nc_crashes=("nc_crashes", "sum"))
-      .reset_index()
-)
+    nc_panel = pd.concat(parts, ignore_index=True)
+    nc_panel["date"] = pd.to_datetime(nc_panel["date"])
+    nc_panel = (
+        nc_panel.groupby(["fips", "date"])
+          .agg(nc_fatals=("nc_fatals", "sum"), nc_serious_inj=("nc_serious_inj", "sum"),
+               nc_crashes=("nc_crashes", "sum"))
+          .reset_index()
+    )
 
-log.info("")
-log.info("Final North Carolina NCDOT panel:")
-log.info("  Rows          : %d", len(nc_panel))
-log.info("  Counties      : %d", nc_panel["fips"].nunique())
-log.info("  Date range    : %s – %s", nc_panel["date"].min().date(), nc_panel["date"].max().date())
-log.info("  nc_fatals     : %.0f", nc_panel["nc_fatals"].sum())
-log.info("  nc_serious_inj: %.0f", nc_panel["nc_serious_inj"].sum())
-log.info("  nc_crashes    : %d", int(nc_panel["nc_crashes"].sum()))
+    log.info("")
+    log.info("Final North Carolina NCDOT panel:")
+    log.info("  Rows          : %d", len(nc_panel))
+    log.info("  Counties      : %d", nc_panel["fips"].nunique())
+    log.info("  Date range    : %s – %s", nc_panel["date"].min().date(), nc_panel["date"].max().date())
+    log.info("  nc_fatals     : %.0f", nc_panel["nc_fatals"].sum())
+    log.info("  nc_serious_inj: %.0f", nc_panel["nc_serious_inj"].sum())
+    log.info("  nc_crashes    : %d", int(nc_panel["nc_crashes"].sum()))
 
-nc_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    nc_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

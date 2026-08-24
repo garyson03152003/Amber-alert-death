@@ -81,6 +81,24 @@ FETCH_FAILURES: dict[int, BaseException] = {}
 OUT_FIELDS = "CRASH_DATE,COUNTY_NAME,FATALITIES,MAJINJURY,INJURIES,CRASH_MONTH,CRASH_DAY"
 
 
+def _ia_county_to_fips(name: object) -> str | None:
+    """Callable wrapper over IA_COUNTY_FIPS, for reuse by other builders."""
+    if name is None:
+        return None
+    return IA_COUNTY_FIPS.get(str(name).strip().upper())
+
+
+def fetch_year(session, year: int):
+    """fetch_year(session, year) adapter over the FeatureServer path.
+
+    Iowa's builder exposes fetch_via_featureserver(year) rather than the
+    (session, year) signature the hourly builder expects, and takes no
+    session argument -- it manages its own. This adapter bridges the two so
+    the shared county-hour builder can drive Iowa unchanged.
+    """
+    return fetch_via_featureserver(year)
+
+
 def fetch_via_download_api(retries: int = 2) -> pd.DataFrame | None:
     """Download the full SOR CSV via the opendata download API."""
     import io
@@ -255,61 +273,66 @@ def process_df(df: pd.DataFrame) -> pd.DataFrame | None:
     return agg
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading Iowa DOT crash data (SOR) …")
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ─────────────────────────────────────────────────────────────────────
+    log.info("Downloading Iowa DOT crash data (SOR) …")
 
-# Try full download API first (all years in one shot)
-raw = fetch_via_download_api()
+    # Try full download API first (all years in one shot)
+    raw = fetch_via_download_api()
 
-if raw is None or raw.empty:
-    log.info("Download API failed — falling back to FeatureServer year-by-year …")
-    parts = []
+    if raw is None or raw.empty:
+        log.info("Download API failed — falling back to FeatureServer year-by-year …")
+        parts = []
+        for yr in range(2015, 2025):
+            log.info("Year %d …", yr)
+            part = fetch_via_featureserver(yr)
+            if part is not None:
+                parts.append(part)
+            time.sleep(2.0)
+            gc.collect()
+        raw = pd.concat(parts, ignore_index=True) if parts else None
+
+    if raw is None or raw.empty:
+        log.error("No Iowa data obtained.")
+        import sys; sys.exit(1)
+
+    coverage_rows = []
+    raw_years = pd.to_datetime(raw["CRASH_DATE"], errors="coerce").dt.year
     for yr in range(2015, 2025):
-        log.info("Year %d …", yr)
-        part = fetch_via_featureserver(yr)
-        if part is not None:
-            parts.append(part)
-        time.sleep(2.0)
-        gc.collect()
-    raw = pd.concat(parts, ignore_index=True) if parts else None
+        year_raw = raw.loc[raw_years.eq(yr)].copy()
+        year_raw.attrs["source_checksum"] = raw.attrs.get("source_checksum")
+        coverage_rows.append(validate_source_frame("IA", yr, None if year_raw.empty else year_raw,
+            required_columns={"CRASH_DATE", "COUNTY_NAME", "FATALITIES", "MAJINJURY"},
+            date_column="CRASH_DATE", outcome_columns={"FATALITIES", "MAJINJURY"},
+            geography_column="COUNTY_NAME", geography_mapper=lambda value: IA_COUNTY_FIPS.get(str(value).strip().upper()),
+            source_checksum=raw.attrs.get("source_checksum"), terminal_error=FETCH_FAILURES.get(yr)))
+    write_state_manifest_or_raise("IA", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if raw is None or raw.empty:
-    log.error("No Iowa data obtained.")
-    import sys; sys.exit(1)
+    log.info("Processing %d raw rows …", len(raw))
+    ia_panel = process_df(raw)
 
-coverage_rows = []
-raw_years = pd.to_datetime(raw["CRASH_DATE"], errors="coerce").dt.year
-for yr in range(2015, 2025):
-    year_raw = raw.loc[raw_years.eq(yr)].copy()
-    year_raw.attrs["source_checksum"] = raw.attrs.get("source_checksum")
-    coverage_rows.append(validate_source_frame("IA", yr, None if year_raw.empty else year_raw,
-        required_columns={"CRASH_DATE", "COUNTY_NAME", "FATALITIES", "MAJINJURY"},
-        date_column="CRASH_DATE", outcome_columns={"FATALITIES", "MAJINJURY"},
-        geography_column="COUNTY_NAME", geography_mapper=lambda value: IA_COUNTY_FIPS.get(str(value).strip().upper()),
-        source_checksum=raw.attrs.get("source_checksum"), terminal_error=FETCH_FAILURES.get(yr)))
-write_state_manifest_or_raise("IA", coverage_rows, output_dir=DATA_PROC / "coverage")
+    if ia_panel is None or ia_panel.empty:
+        log.error("Processing returned no data.")
+        import sys; sys.exit(1)
 
-log.info("Processing %d raw rows …", len(raw))
-ia_panel = process_df(raw)
+    # Final de-duplicate
+    ia_panel = (ia_panel.groupby(["fips", "date"])
+                         .agg(ia_fatals     =("ia_fatals",      "sum"),
+                              ia_serious_inj=("ia_serious_inj", "sum"),
+                              ia_all_injured=("ia_all_injured", "sum"),
+                              ia_crashes    =("ia_crashes",     "sum"))
+                         .reset_index())
 
-if ia_panel is None or ia_panel.empty:
-    log.error("Processing returned no data.")
-    import sys; sys.exit(1)
+    log.info("\nFinal Iowa DOT panel:")
+    log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
+             len(ia_panel), ia_panel["fips"].nunique(),
+             ia_panel["date"].min().date(), ia_panel["date"].max().date())
+    log.info("  Total fatals: %.0f  Total serious injuries: %.0f",
+             ia_panel["ia_fatals"].sum(), ia_panel["ia_serious_inj"].sum())
 
-# Final de-duplicate
-ia_panel = (ia_panel.groupby(["fips", "date"])
-                     .agg(ia_fatals     =("ia_fatals",      "sum"),
-                          ia_serious_inj=("ia_serious_inj", "sum"),
-                          ia_all_injured=("ia_all_injured", "sum"),
-                          ia_crashes    =("ia_crashes",     "sum"))
-                     .reset_index())
-
-log.info("\nFinal Iowa DOT panel:")
-log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
-         len(ia_panel), ia_panel["fips"].nunique(),
-         ia_panel["date"].min().date(), ia_panel["date"].max().date())
-log.info("  Total fatals: %.0f  Total serious injuries: %.0f",
-         ia_panel["ia_fatals"].sum(), ia_panel["ia_serious_inj"].sum())
-
-ia_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    ia_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

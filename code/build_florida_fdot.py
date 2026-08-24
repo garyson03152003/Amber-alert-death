@@ -241,75 +241,80 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     return agg
 
 
-# ── Main download loop ────────────────────────────────────────────────────────
-log.info("Downloading Florida FDOT crash data (2013–2019) …")
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main download loop ────────────────────────────────────────────────────────
+    log.info("Downloading Florida FDOT crash data (2013–2019) …")
 
-session = requests.Session()
-session.headers.update(HEADERS)
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
-parts = []
-coverage_rows = []
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("Year %d …", yr)
+    for yr in YEARS:
+        log.info("Year %d …", yr)
 
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("FL", yr, raw,
-        required_columns={"CRASH_DATE", "COUNTY_TXT", "NUMBER_OF_KILLED", "NUMBER_OF_SERIOUS_INJURIES"},
-        date_column="CRASH_DATE", outcome_columns={"NUMBER_OF_KILLED", "NUMBER_OF_SERIOUS_INJURIES"}, date_unit="ms",
-        geography_column="COUNTY_TXT", geography_mapper=FL_COUNTY_FIPS,
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("FL", yr, raw,
+            required_columns={"CRASH_DATE", "COUNTY_TXT", "NUMBER_OF_KILLED", "NUMBER_OF_SERIOUS_INJURIES"},
+            date_column="CRASH_DATE", outcome_columns={"NUMBER_OF_KILLED", "NUMBER_OF_SERIOUS_INJURIES"}, date_unit="ms",
+            geography_column="COUNTY_TXT", geography_mapper=FL_COUNTY_FIPS,
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
 
-    if agg is not None:
-        parts.append(agg)
-    else:
-        log.warning("  Year %d: no usable data", yr)
+        if agg is not None:
+            parts.append(agg)
+        else:
+            log.warning("  Year %d: no usable data", yr)
 
-    del raw, agg
-    time.sleep(SLEEP_YEAR)
-    gc.collect()
+        del raw, agg
+        time.sleep(SLEEP_YEAR)
+        gc.collect()
 
-session.close()
-write_state_manifest_or_raise("FL", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("FL", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Florida data downloaded. Check network access or FDOT service availability.")
+    if not parts:
+        log.error("No Florida data downloaded. Check network access or FDOT service availability.")
+        log.info(
+            "Manual alternative: visit "
+            "https://gis.fdot.gov/arcgis/rest/services/Crashes_All/FeatureServer/0 "
+            "and query per year."
+        )
+        sys.exit(1)
+
+    # ── Combine and de-duplicate across years ─────────────────────────────────────
+    fl_panel = pd.concat(parts, ignore_index=True)
+    fl_panel["date"] = pd.to_datetime(fl_panel["date"])
+
+    # In case any (fips, date) appears in multiple year chunks, sum them
+    fl_panel = (
+        fl_panel.groupby(["fips", "date"])
+        .agg(
+            fl_fatals     =("fl_fatals",      "sum"),
+            fl_serious_inj=("fl_serious_inj", "sum"),
+            fl_crashes    =("fl_crashes",     "sum"),
+        )
+        .reset_index()
+    )
+
+    log.info("\nFinal Florida FDOT panel:")
     log.info(
-        "Manual alternative: visit "
-        "https://gis.fdot.gov/arcgis/rest/services/Crashes_All/FeatureServer/0 "
-        "and query per year."
+        "  Rows: %d  Counties: %d  Date range: %s – %s",
+        len(fl_panel),
+        fl_panel["fips"].nunique(),
+        fl_panel["date"].min().date(),
+        fl_panel["date"].max().date(),
     )
-    sys.exit(1)
-
-# ── Combine and de-duplicate across years ─────────────────────────────────────
-fl_panel = pd.concat(parts, ignore_index=True)
-fl_panel["date"] = pd.to_datetime(fl_panel["date"])
-
-# In case any (fips, date) appears in multiple year chunks, sum them
-fl_panel = (
-    fl_panel.groupby(["fips", "date"])
-    .agg(
-        fl_fatals     =("fl_fatals",      "sum"),
-        fl_serious_inj=("fl_serious_inj", "sum"),
-        fl_crashes    =("fl_crashes",     "sum"),
+    log.info(
+        "  Total fl_fatals: %.0f  Total fl_serious_inj: %.0f",
+        fl_panel["fl_fatals"].sum(),
+        fl_panel["fl_serious_inj"].sum(),
     )
-    .reset_index()
-)
 
-log.info("\nFinal Florida FDOT panel:")
-log.info(
-    "  Rows: %d  Counties: %d  Date range: %s – %s",
-    len(fl_panel),
-    fl_panel["fips"].nunique(),
-    fl_panel["date"].min().date(),
-    fl_panel["date"].max().date(),
-)
-log.info(
-    "  Total fl_fatals: %.0f  Total fl_serious_inj: %.0f",
-    fl_panel["fl_fatals"].sum(),
-    fl_panel["fl_serious_inj"].sum(),
-)
-
-fl_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    fl_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

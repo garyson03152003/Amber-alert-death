@@ -87,6 +87,51 @@ def parse_legacy_vol_line(line: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# "Headerless pipe" format (2021 monthly archives only): FHWA briefly
+# published pipe-delimited records with the same field order/2-digit year as
+# the legacy fixed-width format, but no header row -- distinct from both the
+# pre-2021 fixed-width archives and the 2022+ header+pipe archives. Confirmed
+# directly: a real downloaded 2021 line splits into 35 '|'-fields matching
+# record_type,state,f_system,station,dir,lane,year,month,day,dow,
+# hour_00..hour_23,(partial trailing field).
+# ---------------------------------------------------------------------------
+_HEADERLESS_FIELD_ORDER = [
+    "record_type", "state_fips", "f_system", "station_id",
+    "travel_dir", "travel_lane", "year", "month", "day", "day_of_week",
+]
+
+
+def parse_pipe_headerless_vol_line(line: str) -> dict | None:
+    """Parse one 2021-format headerless pipe-delimited Volume record."""
+    parts = line.split("|")
+    if len(parts) < len(_HEADERLESS_FIELD_ORDER) + _LEGACY_VOL_N_HOURS:
+        return None
+    out: dict[str, object] = dict(zip(_HEADERLESS_FIELD_ORDER, (p.strip() for p in parts)))
+    if out["record_type"] != "3":
+        return None
+    year2 = _to_int(out["year"])
+    if year2 is None:
+        return None
+    out["year"] = 2000 + year2
+    out["month"] = _to_int(out["month"])
+    out["day"] = _to_int(out["day"])
+    out["day_of_week"] = _to_int(out["day_of_week"])
+    hour_fields = parts[len(_HEADERLESS_FIELD_ORDER):len(_HEADERLESS_FIELD_ORDER) + _LEGACY_VOL_N_HOURS]
+    out["hours"] = [_to_int(h) for h in hour_fields]
+    return out
+
+
+def _detect_vol_format(sample_line: str) -> str:
+    """Return "pipe_header", "pipe_headerless", or "legacy" from a raw line."""
+    stripped = sample_line.strip().lower()
+    if stripped.startswith("record_type|") or stripped.startswith("record_type\t"):
+        return "pipe_header"
+    if "|" in sample_line:
+        return "pipe_headerless"
+    return "legacy"
+
+
+# ---------------------------------------------------------------------------
 # Station Description format: unlike Volume data, FHWA has retroactively
 # re-released station-description archives for every year (2010-present) in
 # a single normalized pipe-delimited layout (confirmed directly against a
@@ -152,20 +197,39 @@ def parse_modern_sta_bytes(raw: bytes) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Whole-zip readers: each monthly/annual zip contains one file per state.
 # ---------------------------------------------------------------------------
+def _read_fixed_or_headerless_member(fh) -> list[dict]:
+    """Read one legacy-fixed-width or 2021-headerless-pipe VOL member.
+
+    Format is detected from its first non-blank line -- these two formats
+    share the same field order/2-digit year but differ in delimiter, so a
+    single pass over decoded lines can dispatch per line.
+    """
+    rows: list[dict] = []
+    parser = None
+    for raw_line in io.TextIOWrapper(fh, encoding="latin-1"):
+        line = raw_line.rstrip("\n\r")
+        if not line:
+            continue
+        if parser is None:
+            parser = (
+                parse_pipe_headerless_vol_line if "|" in line else parse_legacy_vol_line
+            )
+        parsed = parser(line)
+        if parsed is not None:
+            rows.append(parsed)
+    return rows
+
+
 def read_legacy_vol_zip(zip_path: Path) -> pd.DataFrame:
+    """Read a VOL zip in either the pre-2021 fixed-width format or the
+    2021-only headerless-pipe format (auto-detected per member)."""
     rows: list[dict] = []
     with zipfile.ZipFile(zip_path) as zf:
         for name in zf.namelist():
             if not name.upper().endswith(".VOL"):
                 continue
             with zf.open(name) as fh:
-                for raw_line in io.TextIOWrapper(fh, encoding="latin-1"):
-                    line = raw_line.rstrip("\n\r")
-                    if not line:
-                        continue
-                    parsed = parse_legacy_vol_line(line)
-                    if parsed is not None:
-                        rows.append(parsed)
+                rows.extend(_read_fixed_or_headerless_member(fh))
     return pd.DataFrame(rows)
 
 
@@ -209,5 +273,31 @@ def read_sta_zip(zip_path: Path) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
-def read_vol_zip(zip_path: Path, *, modern: bool) -> pd.DataFrame:
-    return read_modern_vol_zip(zip_path) if modern else read_legacy_vol_zip(zip_path)
+def _zip_vol_format(zip_path: Path) -> str:
+    """Peek at the first VOL member's first line to pick the parser.
+
+    Do not trust a year cutoff: 2020 archives are still legacy fixed-width,
+    2021 is a distinct headerless-pipe format, and only 2022+ has the
+    documented header+pipe layout -- confirmed by downloading and inspecting
+    each year directly rather than assuming a single format-change year.
+    """
+    with zipfile.ZipFile(zip_path) as zf:
+        for name in zf.namelist():
+            if not name.upper().endswith(".VOL"):
+                continue
+            with zf.open(name) as fh:
+                first_line = fh.readline().decode("latin-1", errors="replace")
+            if first_line.strip():
+                return _detect_vol_format(first_line)
+    return "legacy"
+
+
+def read_vol_zip(zip_path: Path, *, modern: bool | None = None) -> pd.DataFrame:
+    """Read a monthly VOL zip, auto-detecting its format from content.
+
+    ``modern`` is accepted for backwards compatibility but ignored -- format
+    is always detected from the file itself, since the true format boundary
+    does not line up with a clean year cutoff (see ``_zip_vol_format``).
+    """
+    fmt = _zip_vol_format(zip_path)
+    return read_modern_vol_zip(zip_path) if fmt == "pipe_header" else read_legacy_vol_zip(zip_path)

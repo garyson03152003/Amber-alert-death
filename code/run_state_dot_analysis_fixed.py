@@ -245,7 +245,49 @@ def load_validated_state_crashes(*, direct_only: bool = False, flows: pd.DataFra
     return result
 
 
-def load_verified_night_alerts() -> pd.DataFrame:
+NIGHT_START_HOUR = 22   # legacy default; see load_verified_alerts
+NIGHT_END_HOUR = 6      # night runs [night_start, 24) U [0, NIGHT_END_HOUR)
+
+
+def load_verified_alerts(*, window: str = "night", detail: bool = False,
+                         night_start: int = NIGHT_START_HOUR) -> pd.DataFrame:
+    """Verified county-level AMBER-alert exposure in a time-of-day window.
+
+    ``window="night"`` keeps alerts sent ``night_start``:00-05:59 local, and
+    assigns any alert sent at or after ``night_start`` to the *following*
+    calendar date -- the overnight window spans two dates and the driving it
+    could plausibly affect is day D+1's.
+
+    ``night_start`` matters more than it looks. The legacy default of 22
+    excludes the 20:00 and 21:59 hours, which hold 4,982 alerts -- 69% more
+    night exposure than the 22:00 cutoff admits. An evening alert at 20:30 is
+    an overnight alert by any behavioural reading (it reaches drivers before
+    the overnight period and the outcome of interest is the next day), so
+    ``night_start=20`` is the substantively motivated choice and 22 is
+    retained only for continuity with earlier runs.
+
+    ``window="day"`` keeps the complement -- alerts sent 06:00 up to
+    ``night_start`` -- and assigns them to the *same* calendar date, because a
+    daytime alert affects that day's driving and the next-day shift used for
+    overnight alerts would be wrong here.
+
+    This same-day assignment is why the two windows cannot share one flag:
+    they are different exposure timings, not just different hour filters.
+
+    ``detail=False`` returns one row per (fips, effective_crash_date) with a
+    binary treatment flag named ``night_alert`` or ``day_alert``.
+    ``detail=True`` returns the underlying per-alert rows with their local
+    send timestamp/hour, for analyses (e.g. the traffic-volume station-hour
+    panel) that need sub-day alert timing rather than a county-day flag.
+
+    The verification, FIPS-validation, and DST-aware timezone logic is shared
+    across both windows rather than duplicated.
+    """
+    if window not in {"night", "day"}:
+        raise ValueError(f"window must be 'night' or 'day', got {window!r}")
+    if not NIGHT_END_HOUR < night_start <= 23:
+        raise ValueError(
+            f"night_start must be in ({NIGHT_END_HOUR}, 23], got {night_start!r}")
     path = DATA_RAW / "amber" / "foia" / "openfema_ipaws_alerts_2013_2024.csv"
     if not path.exists():
         path = DATA_RAW / "amber" / "foia" / "openfema_ipaws_alerts_2013_2022.csv"
@@ -277,19 +319,34 @@ def load_verified_night_alerts() -> pd.DataFrame:
 
     alerts = alerts.dropna(subset=["sent_local", "hour_local"]).copy()
     alerts["hour_local"] = alerts["hour_local"].astype(int)
-    alerts["is_night"] = (alerts["hour_local"] >= 22) | (alerts["hour_local"] < 6)
-    alerts = alerts[alerts["is_night"]].copy()
+    is_night = (alerts["hour_local"] >= night_start) | (alerts["hour_local"] < NIGHT_END_HOUR)
+    alerts = alerts[is_night if window == "night" else ~is_night].copy()
     alerts["alert_date"] = pd.to_datetime(alerts["sent_local"]).dt.normalize()
     alerts["effective_crash_date"] = alerts["alert_date"]
-    early = alerts["hour_local"] >= 22
-    alerts.loc[early, "effective_crash_date"] += pd.Timedelta(days=1)
+    if window == "night":
+        # An alert sent in the evening belongs to the NEXT day's driving: the
+        # overnight window runs night_start -> 06:00 across a date boundary.
+        evening = alerts["hour_local"] >= night_start
+        alerts.loc[evening, "effective_crash_date"] += pd.Timedelta(days=1)
 
+    if detail:
+        return alerts[[
+            "alert_id", "fips", "state_fips", "tz_name",
+            "sent_local", "hour_local", "effective_crash_date",
+        ]].reset_index(drop=True)
+
+    flag = "night_alert" if window == "night" else "day_alert"
     out = alerts.groupby(["fips", "effective_crash_date"], as_index=False).agg(
         n_alerts=("alert_id", "nunique")
     )
-    out["night_alert"] = 1
-    log.info("Verified county-level night-alert county-dates: %s", f"{len(out):,}")
+    out[flag] = 1
+    log.info("Verified county-level %s-alert county-dates: %s", window, f"{len(out):,}")
     return out
+
+
+def load_verified_night_alerts(*, detail: bool = False) -> pd.DataFrame:
+    """Night-window alerts; thin wrapper preserving the original entry point."""
+    return load_verified_alerts(window="night", detail=detail)
 
 
 def build_panel(*, direct_only: bool = False) -> pd.DataFrame:
@@ -315,12 +372,23 @@ def build_panel(*, direct_only: bool = False) -> pd.DataFrame:
     ]:
         panel[rate] = 100_000 * panel[count] / panel["population"]
 
-    night_alerts = load_verified_night_alerts()
+    night_alerts = load_verified_alerts(window="night")
     panel = panel.merge(
         night_alerts[["fips", "effective_crash_date", "night_alert"]],
         left_on=["fips", "date"], right_on=["fips", "effective_crash_date"], how="left",
     )
     panel["night_alert"] = panel["night_alert"].fillna(0).astype(int)
+    panel = panel.drop(columns=["effective_crash_date"], errors="ignore")
+
+    # Daytime alerts are carried alongside the night flag so a specification
+    # can hold one constant while estimating the other: a county-day can have
+    # both, and attributing such a day to a single window would confound them.
+    day_alerts = load_verified_alerts(window="day")
+    panel = panel.merge(
+        day_alerts[["fips", "effective_crash_date", "day_alert"]],
+        left_on=["fips", "date"], right_on=["fips", "effective_crash_date"], how="left",
+    )
+    panel["day_alert"] = panel["day_alert"].fillna(0).astype(int)
     panel = panel.drop(columns=["effective_crash_date"], errors="ignore")
 
     if not direct_only:

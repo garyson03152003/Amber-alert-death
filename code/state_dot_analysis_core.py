@@ -185,6 +185,89 @@ def build_commuter_spillover(
     return out
 
 
+def build_car_weighted_spillover(
+    night_alerts: pd.DataFrame,
+    flows: pd.DataFrame,
+    car_shares: pd.DataFrame,
+) -> pd.DataFrame:
+    """Spillover exposure weighted by who actually drives.
+
+    ``build_commuter_spillover`` treats every commuter alike, so a rail
+    commuter from an alerted county counts the same as a driver. The
+    mechanism under test is a driver carrying alert exposure onto the road,
+    so the flow is reweighted by each origin county's ACS B08301 car share
+    (drove alone + carpooled, over all workers 16+):
+
+        spillover_driver_share_it =
+            sum_j workers(j->i) * car_share_j * 1{j alerted on t}
+            / sum_j workers(j->i) * car_share_j
+
+    Own-county flows are excluded, as in the unweighted version, because
+    direct exposure is already captured by ``night_alert``.
+
+    The denominator is the county's whole inbound driving workforce, so the
+    result stays bounded in [0, 1] and remains comparable in scale to
+    ``spillover_share`` -- the difference is composition, not units.
+
+    Note this is a *commuting* mode share standing in for driving generally,
+    and a single ACS vintage applied across all years. Counties with no car
+    share available are dropped from the weighting rather than treated as
+    zero, since a missing share is not a claim that nobody drives.
+    """
+    empty = pd.DataFrame(
+        columns=["fips", "effective_crash_date",
+                 "spillover_driver_share", "spillover_drivers"]
+    )
+    if night_alerts.empty or flows.empty or car_shares.empty:
+        return empty
+
+    needed = ["fips_home", "fips_work", "workers"]
+    missing = [c for c in needed if c not in flows.columns]
+    if missing:
+        raise ValueError(f"commuting-flow data missing required columns: {missing}")
+    if not {"fips", "car_share"}.issubset(car_shares.columns):
+        raise ValueError("car_shares must contain fips and car_share")
+
+    fl = flows[needed].copy()
+    fl["fips_home"] = fl["fips_home"].astype(str).str.zfill(5)
+    fl["fips_work"] = fl["fips_work"].astype(str).str.zfill(5)
+    fl["workers"] = pd.to_numeric(fl["workers"], errors="coerce").fillna(0.0)
+    fl = fl[(fl["workers"] > 0) & (fl["fips_home"] != fl["fips_work"])].copy()
+
+    cs = car_shares[["fips", "car_share"]].copy()
+    cs["fips"] = cs["fips"].astype(str).str.zfill(5)
+    cs["car_share"] = pd.to_numeric(cs["car_share"], errors="coerce")
+    cs = cs.dropna(subset=["car_share"])
+
+    fl = fl.merge(cs.rename(columns={"fips": "fips_home"}), on="fips_home", how="inner")
+    fl["driving_workers"] = fl["workers"] * fl["car_share"]
+    denom = fl.groupby("fips_work")["driving_workers"].sum().rename("total_driving_inflow")
+    if denom.empty:
+        return empty
+
+    alerts = night_alerts[["fips", "effective_crash_date"]].drop_duplicates().copy()
+    alerts["fips_home"] = alerts["fips"].astype(str).str.zfill(5)
+    alerts["effective_crash_date"] = pd.to_datetime(
+        alerts["effective_crash_date"]
+    ).dt.normalize()
+
+    exposed = alerts.merge(fl, on="fips_home", how="inner")
+    if exposed.empty:
+        return empty
+
+    out = (
+        exposed.groupby(["fips_work", "effective_crash_date"], as_index=False)
+        .agg(spillover_drivers=("driving_workers", "sum"))
+        .rename(columns={"fips_work": "fips"})
+    )
+    out = out.merge(denom, left_on="fips", right_index=True, how="left")
+    out["spillover_driver_share"] = (
+        out["spillover_drivers"] / out["total_driving_inflow"]
+    ).clip(lower=0.0, upper=1.0)
+    return out[["fips", "effective_crash_date",
+                "spillover_driver_share", "spillover_drivers"]]
+
+
 def validate_analysis_inputs(
     panel: pd.DataFrame,
     manifest: pd.DataFrame,

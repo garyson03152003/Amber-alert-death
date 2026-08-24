@@ -229,61 +229,66 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     return agg
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading Oregon ODOT crash data (2019–2024) …")
-log.info("Source: %s", MAP_SERVER)
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ─────────────────────────────────────────────────────────────────────
+    log.info("Downloading Oregon ODOT crash data (2019–2024) …")
+    log.info("Source: %s", MAP_SERVER)
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("=== Year %d ===", yr)
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("OR", yr, raw,
-        required_columns={"CRASH_DT", "CNTY_NM", "TOT_FATAL_CNT", "TOT_INJ_LVL_A_CNT"},
-        date_column="CRASH_DT", outcome_columns={"TOT_FATAL_CNT", "TOT_INJ_LVL_A_CNT"}, date_unit="ms",
-        geography_column="CNTY_NM", geography_mapper=county_to_fips,
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    del raw, agg
-    gc.collect()
-    time.sleep(1.0)   # be polite between years
+    for yr in YEARS:
+        log.info("=== Year %d ===", yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("OR", yr, raw,
+            required_columns={"CRASH_DT", "CNTY_NM", "TOT_FATAL_CNT", "TOT_INJ_LVL_A_CNT"},
+            date_column="CRASH_DT", outcome_columns={"TOT_FATAL_CNT", "TOT_INJ_LVL_A_CNT"}, date_unit="ms",
+            geography_column="CNTY_NM", geography_mapper=county_to_fips,
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        del raw, agg
+        gc.collect()
+        time.sleep(1.0)   # be polite between years
 
-session.close()
-write_state_manifest_or_raise("OR", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("OR", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Oregon data downloaded — aborting.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Oregon data downloaded — aborting.")
+        sys.exit(1)
 
-# ── Combine and final dedup ───────────────────────────────────────────────────
-or_panel = pd.concat(parts, ignore_index=True)
-or_panel["date"] = pd.to_datetime(or_panel["date"])
+    # ── Combine and final dedup ───────────────────────────────────────────────────
+    or_panel = pd.concat(parts, ignore_index=True)
+    or_panel["date"] = pd.to_datetime(or_panel["date"])
 
-or_panel = (
-    or_panel.groupby(["fips", "date"])
-      .agg(
-          or_fatals     =("or_fatals",      "sum"),
-          or_serious_inj=("or_serious_inj", "sum"),
-          or_crashes    =("or_crashes",     "sum"),
-      )
-      .reset_index()
-)
+    or_panel = (
+        or_panel.groupby(["fips", "date"])
+          .agg(
+              or_fatals     =("or_fatals",      "sum"),
+              or_serious_inj=("or_serious_inj", "sum"),
+              or_crashes    =("or_crashes",     "sum"),
+          )
+          .reset_index()
+    )
 
-# ── Summary ───────────────────────────────────────────────────────────────────
-log.info("")
-log.info("Final Oregon ODOT panel:")
-log.info("  Rows         : %d", len(or_panel))
-log.info("  Counties     : %d", or_panel["fips"].nunique())
-log.info("  Date range   : %s – %s",
-         or_panel["date"].min().date(), or_panel["date"].max().date())
-log.info("  or_fatals    : %.0f", or_panel["or_fatals"].sum())
-log.info("  or_serious_inj: %.0f", or_panel["or_serious_inj"].sum())
-log.info("  or_crashes   : %d", int(or_panel["or_crashes"].sum()))
+    # ── Summary ───────────────────────────────────────────────────────────────────
+    log.info("")
+    log.info("Final Oregon ODOT panel:")
+    log.info("  Rows         : %d", len(or_panel))
+    log.info("  Counties     : %d", or_panel["fips"].nunique())
+    log.info("  Date range   : %s – %s",
+             or_panel["date"].min().date(), or_panel["date"].max().date())
+    log.info("  or_fatals    : %.0f", or_panel["or_fatals"].sum())
+    log.info("  or_serious_inj: %.0f", or_panel["or_serious_inj"].sum())
+    log.info("  or_crashes   : %d", int(or_panel["or_crashes"].sum()))
 
-or_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    or_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

@@ -550,59 +550,64 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     return agg
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-log.info("Downloading Virginia VDOT crash data (2017–2024) …")
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ──────────────────────────────────────────────────────────────────────
+    log.info("Downloading Virginia VDOT crash data (2017–2024) …")
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("Year %d …", yr)
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("VA", yr, raw,
-        required_columns={"CRASH_DT", "PHYSICAL_JURIS", "K_PEOPLE", "PERSONS_INJURED", "CRASH_SEVERITY"},
-        date_column="CRASH_DT", outcome_columns={"K_PEOPLE", "PERSONS_INJURED"}, date_unit="ms",
-        geography_column="PHYSICAL_JURIS", geography_mapper=lambda value: VA_VDOT_FIPS.get(extract_vdot_code(value)),
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    del raw, agg
-    time.sleep(1.0)
-    gc.collect()
+    for yr in YEARS:
+        log.info("Year %d …", yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("VA", yr, raw,
+            required_columns={"CRASH_DT", "PHYSICAL_JURIS", "K_PEOPLE", "PERSONS_INJURED", "CRASH_SEVERITY"},
+            date_column="CRASH_DT", outcome_columns={"K_PEOPLE", "PERSONS_INJURED"}, date_unit="ms",
+            geography_column="PHYSICAL_JURIS", geography_mapper=lambda value: VA_VDOT_FIPS.get(extract_vdot_code(value)),
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        del raw, agg
+        time.sleep(1.0)
+        gc.collect()
 
-session.close()
-write_state_manifest_or_raise("VA", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("VA", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Virginia data downloaded.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Virginia data downloaded.")
+        sys.exit(1)
 
-va_panel = pd.concat(parts, ignore_index=True)
-va_panel["date"] = pd.to_datetime(va_panel["date"])
+    va_panel = pd.concat(parts, ignore_index=True)
+    va_panel["date"] = pd.to_datetime(va_panel["date"])
 
-# Final dedup/sum in case any year overlap at boundaries
-va_panel = (
-    va_panel.groupby(["fips", "date"])
-      .agg(
-          va_fatals     =("va_fatals",      "sum"),
-          va_injury_proxy=("va_injury_proxy", "sum"),
-          va_crashes    =("va_crashes",     "sum"),
-      )
-      .reset_index()
-)
+    # Final dedup/sum in case any year overlap at boundaries
+    va_panel = (
+        va_panel.groupby(["fips", "date"])
+          .agg(
+              va_fatals     =("va_fatals",      "sum"),
+              va_injury_proxy=("va_injury_proxy", "sum"),
+              va_crashes    =("va_crashes",     "sum"),
+          )
+          .reset_index()
+    )
 
-log.info("\nFinal Virginia VDOT panel:")
-log.info("  Rows:       %d", len(va_panel))
-log.info("  Counties:   %d", va_panel["fips"].nunique())
-log.info("  Date range: %s – %s",
-         va_panel["date"].min().date(), va_panel["date"].max().date())
-log.info("  Total va_fatals:      %.0f", va_panel["va_fatals"].sum())
-va_panel["va_serious_inj"] = np.nan
-log.info("  Total va_injury_proxy: %.0f", va_panel["va_injury_proxy"].sum())
-log.info("  Total va_crashes:     %.0f", va_panel["va_crashes"].sum())
+    log.info("\nFinal Virginia VDOT panel:")
+    log.info("  Rows:       %d", len(va_panel))
+    log.info("  Counties:   %d", va_panel["fips"].nunique())
+    log.info("  Date range: %s – %s",
+             va_panel["date"].min().date(), va_panel["date"].max().date())
+    log.info("  Total va_fatals:      %.0f", va_panel["va_fatals"].sum())
+    va_panel["va_serious_inj"] = np.nan
+    log.info("  Total va_injury_proxy: %.0f", va_panel["va_injury_proxy"].sum())
+    log.info("  Total va_crashes:     %.0f", va_panel["va_crashes"].sum())
 
-va_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    va_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

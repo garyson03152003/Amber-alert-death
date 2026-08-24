@@ -126,54 +126,59 @@ def process_year(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
     return agg
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading Idaho COMPASS crash data (2013–2024) …")
-log.info("Source: %s", QUERY_URL)
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ─────────────────────────────────────────────────────────────────────
+    log.info("Downloading Idaho COMPASS crash data (2013–2024) …")
+    log.info("Source: %s", QUERY_URL)
 
-session = requests.Session()
-session.headers.update(HEADERS)
-parts = []
-coverage_rows = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    parts = []
+    coverage_rows = []
 
-for yr in YEARS:
-    log.info("=== Year %d ===", yr)
-    raw = fetch_year(session, yr)
-    coverage_rows.append(validate_source_frame("IDCOMPASS", yr, None if raw.empty else raw,
-        required_columns={"accident_date", "countyname", "fatalities", "injuries", "severity"},
-        date_column="accident_date", outcome_columns={"fatalities", "injuries"}, date_unit="ms",
-        geography_column="countyname", geography_mapper=county_to_fips,
-        terminal_error=FETCH_FAILURES.get(yr)))
-    agg = process_year(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    del raw, agg
-    gc.collect()
-    time.sleep(0.5)
+    for yr in YEARS:
+        log.info("=== Year %d ===", yr)
+        raw = fetch_year(session, yr)
+        coverage_rows.append(validate_source_frame("IDCOMPASS", yr, None if raw.empty else raw,
+            required_columns={"accident_date", "countyname", "fatalities", "injuries", "severity"},
+            date_column="accident_date", outcome_columns={"fatalities", "injuries"}, date_unit="ms",
+            geography_column="countyname", geography_mapper=county_to_fips,
+            terminal_error=FETCH_FAILURES.get(yr)))
+        agg = process_year(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        del raw, agg
+        gc.collect()
+        time.sleep(0.5)
 
-session.close()
-write_state_manifest_or_raise("IDCOMPASS", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("IDCOMPASS", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Idaho COMPASS data downloaded — aborting.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Idaho COMPASS data downloaded — aborting.")
+        sys.exit(1)
 
-panel = pd.concat(parts, ignore_index=True)
-panel["date"] = pd.to_datetime(panel["date"])
-panel = (
-    panel.groupby(["fips", "date"])
-      .agg(idc_crashes=("idc_crashes", "sum"), idc_fatals=("idc_fatals", "sum"),
-           idc_serious_inj=("idc_serious_inj", "sum"))
-      .reset_index()
-)
+    panel = pd.concat(parts, ignore_index=True)
+    panel["date"] = pd.to_datetime(panel["date"])
+    panel = (
+        panel.groupby(["fips", "date"])
+          .agg(idc_crashes=("idc_crashes", "sum"), idc_fatals=("idc_fatals", "sum"),
+               idc_serious_inj=("idc_serious_inj", "sum"))
+          .reset_index()
+    )
 
-log.info("")
-log.info("Final Idaho COMPASS panel:")
-log.info("  Rows            : %d", len(panel))
-log.info("  Counties        : %d", panel["fips"].nunique())
-log.info("  Date range      : %s – %s", panel["date"].min().date(), panel["date"].max().date())
-log.info("  idc_crashes     : %d", int(panel["idc_crashes"].sum()))
-log.info("  idc_fatals      : %.0f", panel["idc_fatals"].sum())
-log.info("  idc_serious_inj : %.0f", panel["idc_serious_inj"].sum())
+    log.info("")
+    log.info("Final Idaho COMPASS panel:")
+    log.info("  Rows            : %d", len(panel))
+    log.info("  Counties        : %d", panel["fips"].nunique())
+    log.info("  Date range      : %s – %s", panel["date"].min().date(), panel["date"].max().date())
+    log.info("  idc_crashes     : %d", int(panel["idc_crashes"].sum()))
+    log.info("  idc_fatals      : %.0f", panel["idc_fatals"].sum())
+    log.info("  idc_serious_inj : %.0f", panel["idc_serious_inj"].sum())
 
-panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

@@ -175,90 +175,95 @@ def fetch_year(year: int, session: requests.Session, retries: int = 3) -> pd.Dat
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-log.info("Downloading New York State crash data (2021–2024) …")
+# Executed only as a script. Without this guard the whole download-and-write
+# pipeline ran on *import*, so merely importing this module (from a test, an
+# audit, or another builder) silently re-downloaded the source and overwrote
+# the processed panel on disk.
+if __name__ == "__main__":
+    # ── Main ─────────────────────────────────────────────────────────────────────
+    log.info("Downloading New York State crash data (2021–2024) …")
 
-session = requests.Session()
-session.headers.update(HEADERS)
+    session = requests.Session()
+    session.headers.update(HEADERS)
 
-# A moving API maximum can be a partial current year.  Validated builds use
-# only the closed source-contract years.
-YEARS = [2021, 2022, 2023, 2024]
-log.info("Fetching years: %s", YEARS)
+    # A moving API maximum can be a partial current year.  Validated builds use
+    # only the closed source-contract years.
+    YEARS = [2021, 2022, 2023, 2024]
+    log.info("Fetching years: %s", YEARS)
 
-all_parts = []
-coverage_rows = []
-for yr in YEARS:
-    log.info("Year %d …", yr)
-    df_yr = fetch_year(yr, session)
-    coverage_rows.append(validate_source_frame("NY", yr,
-        None if FETCH_FAILURES.get(yr) is not None else df_yr,
-        required_columns={"date", "county_name", "accident_descriptor"}, date_column="date", outcome_columns=set(),
-        geography_column="county_name", geography_mapper=lambda value: NY_COUNTY_FIPS.get(str(value).strip().upper()),
-        unresolvable_geography_values=frozenset({"UNKNOWN"}),
-        terminal_error=FETCH_FAILURES.get(yr)))
-    if not df_yr.empty:
-        all_parts.append(df_yr)
-    time.sleep(1.0)
-    gc.collect()
+    all_parts = []
+    coverage_rows = []
+    for yr in YEARS:
+        log.info("Year %d …", yr)
+        df_yr = fetch_year(yr, session)
+        coverage_rows.append(validate_source_frame("NY", yr,
+            None if FETCH_FAILURES.get(yr) is not None else df_yr,
+            required_columns={"date", "county_name", "accident_descriptor"}, date_column="date", outcome_columns=set(),
+            geography_column="county_name", geography_mapper=lambda value: NY_COUNTY_FIPS.get(str(value).strip().upper()),
+            unresolvable_geography_values=frozenset({"UNKNOWN"}),
+            terminal_error=FETCH_FAILURES.get(yr)))
+        if not df_yr.empty:
+            all_parts.append(df_yr)
+        time.sleep(1.0)
+        gc.collect()
 
-session.close()
-write_state_manifest_or_raise("NY", coverage_rows, output_dir=DATA_PROC / "coverage")
+    session.close()
+    write_state_manifest_or_raise("NY", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not all_parts:
-    log.error("No data downloaded.")
-    sys.exit(1)
+    if not all_parts:
+        log.error("No data downloaded.")
+        sys.exit(1)
 
-raw = pd.concat(all_parts, ignore_index=True)
-log.info("Raw rows: %d", len(raw))
+    raw = pd.concat(all_parts, ignore_index=True)
+    log.info("Raw rows: %d", len(raw))
 
-# ── Parse date ────────────────────────────────────────────────────────────────
-raw["crash_date"] = pd.to_datetime(raw["date"], errors="coerce").dt.normalize()
-raw = raw.dropna(subset=["crash_date"])
+    # ── Parse date ────────────────────────────────────────────────────────────────
+    raw["crash_date"] = pd.to_datetime(raw["date"], errors="coerce").dt.normalize()
+    raw = raw.dropna(subset=["crash_date"])
 
-# ── County → FIPS ────────────────────────────────────────────────────────────
-raw["county_upper"] = raw["county_name"].astype(str).str.strip().str.upper()
-raw["fips"] = raw["county_upper"].map(NY_COUNTY_FIPS)
-n_miss = raw["fips"].isna().sum()
-if n_miss:
-    log.warning("%d rows unmapped county: %s", n_miss,
-                raw.loc[raw["fips"].isna(), "county_upper"].value_counts().head(10).to_dict())
-raw = raw.dropna(subset=["fips"])
+    # ── County → FIPS ────────────────────────────────────────────────────────────
+    raw["county_upper"] = raw["county_name"].astype(str).str.strip().str.upper()
+    raw["fips"] = raw["county_upper"].map(NY_COUNTY_FIPS)
+    n_miss = raw["fips"].isna().sum()
+    if n_miss:
+        log.warning("%d rows unmapped county: %s", n_miss,
+                    raw.loc[raw["fips"].isna(), "county_upper"].value_counts().head(10).to_dict())
+    raw = raw.dropna(subset=["fips"])
 
-# ── Severity ─────────────────────────────────────────────────────────────────
-desc = raw["accident_descriptor"].astype(str).str.strip()
-raw["is_fatal"]  = desc == "Fatal Accident"
-raw["is_injury"] = desc.str.contains("Injury", case=False, na=False)
-raw["crashes"]   = 1
+    # ── Severity ─────────────────────────────────────────────────────────────────
+    desc = raw["accident_descriptor"].astype(str).str.strip()
+    raw["is_fatal"]  = desc == "Fatal Accident"
+    raw["is_injury"] = desc.str.contains("Injury", case=False, na=False)
+    raw["crashes"]   = 1
 
-# ── Aggregate to county-day ───────────────────────────────────────────────────
-panel = (
-    raw.groupby(["fips", "crash_date"])
-       .agg(
-           ny_crashes       =("crashes",   "sum"),
-           ny_fatal_crashes =("is_fatal",  "sum"),   # fatal crashes (not fatalities)
-           ny_injury_crashes=("is_injury", "sum"),
-       )
-       .reset_index()
-       .rename(columns={"crash_date": "date"})
-)
+    # ── Aggregate to county-day ───────────────────────────────────────────────────
+    panel = (
+        raw.groupby(["fips", "crash_date"])
+           .agg(
+               ny_crashes       =("crashes",   "sum"),
+               ny_fatal_crashes =("is_fatal",  "sum"),   # fatal crashes (not fatalities)
+               ny_injury_crashes=("is_injury", "sum"),
+           )
+           .reset_index()
+           .rename(columns={"crash_date": "date"})
+    )
 
-# Deduplicate
-panel = (
-    panel.groupby(["fips", "date"])
-         .agg(ny_crashes       =("ny_crashes",       "sum"),
-              ny_fatal_crashes =("ny_fatal_crashes",  "sum"),
-              ny_injury_crashes=("ny_injury_crashes", "sum"))
-         .reset_index()
-)
+    # Deduplicate
+    panel = (
+        panel.groupby(["fips", "date"])
+             .agg(ny_crashes       =("ny_crashes",       "sum"),
+                  ny_fatal_crashes =("ny_fatal_crashes",  "sum"),
+                  ny_injury_crashes=("ny_injury_crashes", "sum"))
+             .reset_index()
+    )
 
-log.info("\nFinal New York panel:")
-log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
-         len(panel), panel["fips"].nunique(),
-         panel["date"].min().date(), panel["date"].max().date())
-log.info("  Total ny_crashes: %.0f  ny_fatal_crashes: %.0f  ny_injury_crashes: %.0f",
-         panel["ny_crashes"].sum(), panel["ny_fatal_crashes"].sum(),
-         panel["ny_injury_crashes"].sum())
+    log.info("\nFinal New York panel:")
+    log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
+             len(panel), panel["fips"].nunique(),
+             panel["date"].min().date(), panel["date"].max().date())
+    log.info("  Total ny_crashes: %.0f  ny_fatal_crashes: %.0f  ny_injury_crashes: %.0f",
+             panel["ny_crashes"].sum(), panel["ny_fatal_crashes"].sum(),
+             panel["ny_injury_crashes"].sum())
 
-panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)

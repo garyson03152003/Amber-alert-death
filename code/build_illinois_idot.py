@@ -334,66 +334,71 @@ def process_idot_df(df: pd.DataFrame, year: int) -> pd.DataFrame | None:
 
 
 # ── Main download loop ────────────────────────────────────────────────────────
-log.info("Downloading Illinois IDOT crash data …")
-parts = []
-coverage_rows = []
+# Executed only as a script. Without this guard the whole download-and-
+# write pipeline ran on *import*, so merely importing this module (from a
+# test, a notebook, or another builder) silently re-downloaded the source
+# and overwrote the Illinois panel on disk.
+if __name__ == "__main__":
+    log.info("Downloading Illinois IDOT crash data …")
+    parts = []
+    coverage_rows = []
 
-for yr in range(2016, 2025):
-    log.info("Year %d …", yr)
-    info = IDOT_ITEMS.get(yr, {})
-    item_id = info.get("item_id")
-    fs_url  = info.get("fs_url")
+    for yr in range(2016, 2025):
+        log.info("Year %d …", yr)
+        info = IDOT_ITEMS.get(yr, {})
+        item_id = info.get("item_id")
+        fs_url  = info.get("fs_url")
 
-    raw = None
-    if item_id:
-        raw = fetch_via_download_api(item_id, yr)
-    # Fall back to FeatureServer if download API fails or returns 0 rows
-    if (raw is None or raw.empty) and fs_url:
-        log.info("  Falling back to FeatureServer pagination …")
-        raw = fetch_via_featureserver(fs_url, yr)
+        raw = None
+        if item_id:
+            raw = fetch_via_download_api(item_id, yr)
+        # Fall back to FeatureServer if download API fails or returns 0 rows
+        if (raw is None or raw.empty) and fs_url:
+            log.info("  Falling back to FeatureServer pagination …")
+            raw = fetch_via_featureserver(fs_url, yr)
 
-    validation_raw = None if raw is None else idot_validation_frame(raw)
-    coverage_rows.append(validate_source_frame("IL", yr, validation_raw,
-        required_columns={"CRASH_DATE", "COUNTY_CODE", "TOTALFATALS", "AINJURIES"},
-        date_column="CRASH_DATE", outcome_columns={"TOTALFATALS", "AINJURIES"},
-        column_aliases=IDOT_COLUMN_ALIASES,
-        geography_column="COUNTY_CODE", geography_mapper=idot_county_to_fips,
-        unresolvable_geography_values=frozenset({"0", "0.0"}),
-        source_checksum=None if raw is None else raw.attrs.get("source_checksum"),
-        terminal_error=FETCH_FAILURES.get(yr)))
+        validation_raw = None if raw is None else idot_validation_frame(raw)
+        coverage_rows.append(validate_source_frame("IL", yr, validation_raw,
+            required_columns={"CRASH_DATE", "COUNTY_CODE", "TOTALFATALS", "AINJURIES"},
+            date_column="CRASH_DATE", outcome_columns={"TOTALFATALS", "AINJURIES"},
+            column_aliases=IDOT_COLUMN_ALIASES,
+            geography_column="COUNTY_CODE", geography_mapper=idot_county_to_fips,
+            unresolvable_geography_values=frozenset({"0", "0.0"}),
+            source_checksum=None if raw is None else raw.attrs.get("source_checksum"),
+            terminal_error=FETCH_FAILURES.get(yr)))
 
-    agg = process_idot_df(raw, yr)
-    if agg is not None:
-        parts.append(agg)
-    else:
-        log.warning("  Year %d: no data obtained", yr)
+        agg = process_idot_df(raw, yr)
+        if agg is not None:
+            parts.append(agg)
+        else:
+            log.warning("  Year %d: no data obtained", yr)
 
-    time.sleep(2.0)
-    gc.collect()
+        time.sleep(2.0)
+        gc.collect()
 
-write_state_manifest_or_raise("IL", coverage_rows, output_dir=DATA_PROC / "coverage")
+    write_state_manifest_or_raise("IL", coverage_rows, output_dir=DATA_PROC / "coverage")
 
-if not parts:
-    log.error("No Illinois data downloaded. Check network access.")
-    log.info("Manual alternative: visit https://gis-idot.opendata.arcgis.com/ "
-             "and download per-year CSV files.")
-    sys.exit(1)
+    if not parts:
+        log.error("No Illinois data downloaded. Check network access.")
+        log.info("Manual alternative: visit https://gis-idot.opendata.arcgis.com/ "
+                 "and download per-year CSV files.")
+        sys.exit(1)
 
-il_panel = pd.concat(parts, ignore_index=True)
-il_panel["date"] = pd.to_datetime(il_panel["date"])
-il_panel = (il_panel.groupby(["fips", "date"])
-                     .agg(il_fatals     =("il_fatals",      "sum"),
-                          il_serious_inj=("il_serious_inj", "sum"),
-                          il_all_injured=("il_all_injured", "sum"),
-                          il_crashes    =("il_crashes",     "sum"))
-                     .reset_index())
+    il_panel = pd.concat(parts, ignore_index=True)
+    il_panel["date"] = pd.to_datetime(il_panel["date"])
+    il_panel = (il_panel.groupby(["fips", "date"])
+                         .agg(il_fatals     =("il_fatals",      "sum"),
+                              il_serious_inj=("il_serious_inj", "sum"),
+                              il_all_injured=("il_all_injured", "sum"),
+                              il_crashes    =("il_crashes",     "sum"))
+                         .reset_index())
 
-log.info("\nFinal Illinois IDOT panel:")
-log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
-         len(il_panel), il_panel["fips"].nunique(),
-         il_panel["date"].min().date(), il_panel["date"].max().date())
-log.info("  Total fatals: %.0f  Total serious injuries: %.0f",
-         il_panel["il_fatals"].sum(), il_panel["il_serious_inj"].sum())
+    log.info("\nFinal Illinois IDOT panel:")
+    log.info("  Rows: %d  Counties: %d  Date range: %s – %s",
+             len(il_panel), il_panel["fips"].nunique(),
+             il_panel["date"].min().date(), il_panel["date"].max().date())
+    log.info("  Total fatals: %.0f  Total serious injuries: %.0f",
+             il_panel["il_fatals"].sum(), il_panel["il_serious_inj"].sum())
 
-il_panel.to_parquet(OUT_PATH, index=False)
-log.info("Saved → %s", OUT_PATH)
+    il_panel.to_parquet(OUT_PATH, index=False)
+    log.info("Saved → %s", OUT_PATH)
