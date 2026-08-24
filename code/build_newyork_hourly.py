@@ -55,16 +55,28 @@ def build() -> pd.DataFrame | None:
         df = df.dropna(subset=["fips"])
         df["date"] = df["_local"].dt.normalize()
         df["hour"] = df["_local"].dt.hour
-        agg = (df.groupby(["fips", "date", "hour"], as_index=False)
-                 .size().rename(columns={"size": "ny_crashes"}))
+
+        desc_col = next((c for c in df.columns if c.lower() == "accident_descriptor"), None)
+        if desc_col:
+            desc = df[desc_col].astype(str)
+            df["_is_fatal"] = (desc == "Fatal Accident").astype(int)
+            df["_is_injury"] = desc.str.contains("Injury", case=False, na=False).astype(int)
+            agg = (df.groupby(["fips", "date", "hour"], as_index=False)
+                     .agg(ny_crashes=("_is_fatal", "size"),
+                          ny_fatal_crashes=("_is_fatal", "sum"),
+                          ny_injury_crashes=("_is_injury", "sum")))
+        else:
+            agg = (df.groupby(["fips", "date", "hour"], as_index=False)
+                     .size().rename(columns={"size": "ny_crashes"}))
         frames.append(agg)
         log.info("[NY] %d -> %s county-hours", year, f"{len(agg):,}")
 
     if not frames:
         log.error("[NY] no data built")
         return None
-    return (pd.concat(frames, ignore_index=True)
-              .groupby(["fips", "date", "hour"], as_index=False)["ny_crashes"].sum())
+    combined = pd.concat(frames, ignore_index=True)
+    sum_cols = [c for c in combined.columns if c not in ("fips", "date", "hour")]
+    return combined.groupby(["fips", "date", "hour"], as_index=False)[sum_cols].sum()
 
 
 def main() -> None:

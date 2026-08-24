@@ -63,7 +63,8 @@ class SourceSpec:
 
     def __init__(self, *, key, module, datetime_col, tz, datetime_kind,
                  county_mapper, years, crash_col, day_panel, day_crash_col,
-                 unpack_first=False, out_fields=None):
+                 unpack_first=False, out_fields=None, severity_fn=None,
+                 fatal_col=None, serious_col=None):
         self.key = key
         self.module = module
         # May be a single column name or several candidates: Massachusetts
@@ -87,6 +88,21 @@ class SourceSpec:
         # column (Iowa fetches CRASH_DATE but not CRASH_DATETIME), so the
         # hourly build widens it for the duration of the fetch.
         self.out_fields = out_fields
+        # Severity: either a callable df -> (fatal_series, serious_series) for
+        # states needing derived logic (e.g. MA's KABCO-from-text), or a pair
+        # of raw numeric column names to sum directly (UT, IA).
+        self.severity_fn = severity_fn
+        self.fatal_col = fatal_col
+        self.serious_col = serious_col
+
+
+def _ma_severity(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    fatals = pd.to_numeric(df["NUMB_FATAL_INJR"], errors="coerce").fillna(0)
+    all_injured = pd.to_numeric(df["NUMB_NONFATAL_INJR"], errors="coerce").fillna(0)
+    is_serious = df["MAX_INJR_SVRTY_CL"].astype(str).str.contains(
+        "Incapacitating", case=False, na=False)
+    serious = all_injured.where(is_serious, 0)
+    return fatals, serious
 
 
 SPECS = {
@@ -97,6 +113,7 @@ SPECS = {
         county_mapper=("county_to_fips", "COUNTY_NAME"),
         years=range(2018, 2025), crash_col="ut_crashes",
         day_panel="utah_udot_county_day.parquet", day_crash_col="ut_crashes",
+        fatal_col="NUMBER_FATALITIES", serious_col="NUMBER_FOUR_INJURIES",
     ),
     # Delaware Socrata serves ISO 8601 with a trailing Z.
     "DE": SourceSpec(
@@ -115,7 +132,7 @@ SPECS = {
         county_mapper=("_ma_county_to_fips", "CNTY_NAME"),
         years=range(2013, 2021), crash_col="ma_crashes",
         day_panel="massachusetts_massdot_county_day.parquet",
-        day_crash_col="ma_crashes",
+        day_crash_col="ma_crashes", severity_fn=_ma_severity,
     ),
     # Connecticut ArcGIS epoch milliseconds. Genuine UTC: the service declares
     # timeZoneIANA America/New_York with DST, and converting moves the peak
@@ -140,6 +157,7 @@ SPECS = {
         day_panel="iowa_dot_county_day.parquet", day_crash_col="ia_crashes",
         out_fields=("CRASH_DATETIME,CRASH_DATE,COUNTY_NAME,FATALITIES,"
                     "MAJINJURY,INJURIES,CRASH_MONTH,CRASH_DAY"),
+        fatal_col="FATALITIES", serious_col="MAJINJURY",
     ),
 }
 
@@ -283,16 +301,34 @@ def build_state(spec: SourceSpec) -> pd.DataFrame | None:
         df = df.dropna(subset=["fips"])
         df["date"] = df["_local"].dt.normalize()
         df["hour"] = df["_local"].dt.hour
-        agg = (df.groupby(["fips", "date", "hour"], as_index=False)
-                 .size().rename(columns={"size": spec.crash_col}))
+
+        has_severity = spec.severity_fn is not None or (
+            spec.fatal_col in df.columns and spec.serious_col in df.columns
+            if spec.fatal_col and spec.serious_col else False)
+        if has_severity:
+            if spec.severity_fn is not None:
+                fatals, serious = spec.severity_fn(df)
+            else:
+                fatals = pd.to_numeric(df[spec.fatal_col], errors="coerce").fillna(0)
+                serious = pd.to_numeric(df[spec.serious_col], errors="coerce").fillna(0)
+            df["_fatals"] = fatals
+            df["_serious"] = serious
+            agg = (df.groupby(["fips", "date", "hour"], as_index=False)
+                     .agg(**{spec.crash_col: ("_fatals", "size"),
+                             f"{spec.key.lower()}_fatals": ("_fatals", "sum"),
+                             f"{spec.key.lower()}_serious_inj": ("_serious", "sum")}))
+        else:
+            agg = (df.groupby(["fips", "date", "hour"], as_index=False)
+                     .size().rename(columns={"size": spec.crash_col}))
         frames.append(agg)
         log.info("[%s] %d -> %s county-hours", spec.key, year, f"{len(agg):,}")
 
     if not frames:
         log.error("[%s] no data built", spec.key)
         return None
-    return (pd.concat(frames, ignore_index=True)
-              .groupby(["fips", "date", "hour"], as_index=False)[spec.crash_col].sum())
+    combined = pd.concat(frames, ignore_index=True)
+    sum_cols = [c for c in combined.columns if c not in ("fips", "date", "hour")]
+    return combined.groupby(["fips", "date", "hour"], as_index=False)[sum_cols].sum()
 
 
 def main(argv: list[str] | None = None) -> None:
