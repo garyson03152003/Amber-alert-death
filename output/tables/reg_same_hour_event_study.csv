@@ -1,0 +1,4 @@
+label,outcome,model,fe,coef,se,pval,nobs,pct_change
+fatals: fips_hour_dow + year_month FE,person_fatals,ols,fips_hour_dow + year_month,0.00024701775174304177,0.0001868427658393071,0.19216399013497565,13219986,
+fatals: fips_hour_dow + year_month FE,person_fatals,ppml,fips_hour_dow + year_month,0.08248810299421962,0.061039150876520676,0.17656841169810922,1596890,8.598575338341629
+serious: fips_hour_dow + year_month FE,serious_inj,ols,fips_hour_dow + year_month,-0.00011882728077940344,7.908769185822316e-05,0.13926442377626613,13219986,
