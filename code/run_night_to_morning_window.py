@@ -41,6 +41,25 @@ p~0.03-0.05 range -- still directionally positive, but a materially weaker
 and more fragile result than the naive spec suggests. Both specs are
 reported; only the robust one should be treated as the headline number.
 
+Commuting spillover
+--------------------
+Also tests exposure via commuting, not just a county's own alert: even a
+county with no alert of its own may see elevated daytime crashes if a large
+share of its workforce commutes in from a county that WAS alerted overnight
+(sleep-disrupted commuters driving into county c the next morning). Reuses
+the same cross-spillover formula already established in 05_analysis.py's
+run_commuting_spillover / _build_cross_spillover:
+
+    cross_spillover_ct = sum_{j != c} w_{j->c} x night_alert_{j,t}
+
+where w_{j->c} = the fraction of county c's workforce that commutes in from
+county j (ACS 2016-2020 5-year county-to-county commuting flows,
+data/processed/commuting/county_commuting_weights.parquet). The only
+difference from the existing implementation is that night_alert_{j,t} here
+uses this script's correctly-dated effective_crash_date (see "Window
+alignment" above) rather than the raw alert date, and the outcome is this
+script's 06:00-23:59 window rather than the full next calendar day.
+
 Data
 ----
 FARS hourly crash counts: data/processed/fars_hourly_county_day.parquet
@@ -49,9 +68,12 @@ FARS hourly crash counts: data/processed/fars_hourly_county_day.parquet
   already exists in data/processed/).
 AMBER alerts: run_state_dot_analysis_fixed.load_verified_alerts(window="night")
   (case-sensitivity-fixed source data, statewide alerts geo-expanded).
+Commuting weights: data/processed/commuting/county_commuting_weights.parquet
+  (built by build_commuting_weights.py if missing).
 
 Output: output/tables/reg_night_to_morning_window.csv
 """
+import importlib.util
 import sys
 import warnings
 from pathlib import Path
@@ -70,6 +92,17 @@ log = get_logger("night_to_morning")
 OUTPUT_TABS.mkdir(parents=True, exist_ok=True)
 
 MIN_FATALS_PER_YEAR = 5  # matches the county restriction used elsewhere in the repo
+COMMUTING_WEIGHTS_PATH = DATA_PROC / "commuting" / "county_commuting_weights.parquet"
+
+
+def _ensure_commuting_weights():
+    if COMMUTING_WEIGHTS_PATH.exists():
+        return
+    log.info("Commuting weights not found — building from ACS data...")
+    spec = importlib.util.spec_from_file_location(
+        "build_weights", Path(__file__).parent / "build_commuting_weights.py")
+    bw = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bw)
 
 
 def build_outcome_grid() -> pd.DataFrame:
@@ -117,13 +150,55 @@ def attach_night_alert(grid: pd.DataFrame) -> pd.DataFrame:
     return grid
 
 
+def attach_cross_spillover(grid: pd.DataFrame) -> pd.DataFrame:
+    """
+    cross_spillover_ct = sum_{j != c} w_{j->c} x night_alert_{j,t}
+
+    Share of county c's workforce commuting in from a county j that had a
+    night alert on the same effective date t (using this script's
+    correctly-dated night_alert column, already attached by
+    attach_night_alert). 0 for counties with no commuting inflow from any
+    alerted county that date.
+    """
+    _ensure_commuting_weights()
+    weights = pd.read_parquet(COMMUTING_WEIGHTS_PATH)  # fips_home, fips_work, weight
+    log.info("Commuting weights: %d OD pairs, %d work counties",
+             len(weights), weights["fips_work"].nunique())
+
+    alert_events = grid.loc[grid["night_alert"] > 0, ["fips", "date"]].copy()
+    alert_events["fips_home"] = alert_events["fips"].astype(int)
+    if alert_events.empty:
+        log.warning("No night-alert events in grid — cross_spillover will be all zeros")
+        grid["cross_spillover"] = 0.0
+        return grid
+
+    fips_in_sample = set(grid["fips"].unique())
+    spill_pairs = alert_events.merge(weights, on="fips_home", how="inner")
+    spill_pairs = spill_pairs[spill_pairs["fips_home"] != spill_pairs["fips_work"]]
+    spill_pairs["fips_work_str"] = spill_pairs["fips_work"].astype(str).str.zfill(5)
+    spill_pairs = spill_pairs[spill_pairs["fips_work_str"].isin(fips_in_sample)]
+    log.info("Spillover pairs: %d (alert events x weight links)", len(spill_pairs))
+
+    spillover = (spill_pairs.groupby(["fips_work_str", "date"])["weight"]
+                 .sum().reset_index()
+                 .rename(columns={"weight": "cross_spillover", "fips_work_str": "fips"}))
+
+    grid = grid.merge(spillover, on=["fips", "date"], how="left")
+    grid["cross_spillover"] = grid["cross_spillover"].fillna(0.0)
+    log.info("cross_spillover: mean=%.5f, max=%.4f, nonzero rows=%d",
+             grid["cross_spillover"].mean(), grid["cross_spillover"].max(),
+             int((grid["cross_spillover"] > 0).sum()))
+    return grid
+
+
 def _sig(p):
     return "***" if p < .01 else "**" if p < .05 else "*" if p < .10 else "n.s."
 
 
-def run(grid, label, outcome, treat, fe, results):
-    sub = grid.dropna(subset=[treat, outcome]).copy()
-    formula = f"{outcome} ~ {treat} | {fe}"
+def run(grid, label, outcome, treat, fe, results, extra_controls=None):
+    controls = [treat] + (extra_controls or [])
+    sub = grid.dropna(subset=controls + [outcome]).copy()
+    formula = f"{outcome} ~ {' + '.join(controls)} | {fe}"
     fit = pf.feols(formula, data=sub, vcov={"CRV1": "state_code"}, lean=True)
     td = fit.tidy()
     row = td.loc[treat]
@@ -137,6 +212,7 @@ def run(grid, label, outcome, treat, fe, results):
 def main():
     grid = build_outcome_grid()
     grid = attach_night_alert(grid)
+    grid = attach_cross_spillover(grid)
     grid["year_str"] = grid["date"].dt.year.astype(str)
     grid["dow"] = grid["date"].dt.dayofweek.astype(str)
     grid["month_str"] = grid["date"].dt.month.astype(str)
@@ -158,6 +234,21 @@ def main():
         "fips_year + fips_dow + month_str", results)
     run(grid, "Combined-dose -> fatals 06:00-23:59", "fatals_0623", "alert_last2nights_dose",
         "fips_year + fips_dow + month_str", results)
+
+    log.info("\n=== Commuting spillover: own alert + share of commuters from an alerted "
+             "county, jointly (naive spec) ===")
+    run(grid, "OWN night_alert (spillover-controlled) -> fatals", "fatals_0623", "night_alert",
+        "fips + year_str + dow + month_str", results, extra_controls=["cross_spillover"])
+    run(grid, "CROSS_SPILLOVER (own-controlled) -> fatals", "fatals_0623", "cross_spillover",
+        "fips + year_str + dow + month_str", results, extra_controls=["night_alert"])
+    run(grid, "CROSS_SPILLOVER (own-controlled) -> serious injuries", "serious_0623", "cross_spillover",
+        "fips + year_str + dow + month_str", results, extra_controls=["night_alert"])
+
+    log.info("\n=== Commuting spillover, robust spec (county x year + county x weekday FE) ===")
+    run(grid, "OWN night_alert (spillover-controlled) -> fatals", "fatals_0623", "night_alert",
+        "fips_year + fips_dow + month_str", results, extra_controls=["cross_spillover"])
+    run(grid, "CROSS_SPILLOVER (own-controlled) -> fatals", "fatals_0623", "cross_spillover",
+        "fips_year + fips_dow + month_str", results, extra_controls=["night_alert"])
 
     out = pd.DataFrame(results)
     out_path = OUTPUT_TABS / "reg_night_to_morning_window.csv"
