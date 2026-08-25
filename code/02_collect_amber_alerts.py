@@ -486,6 +486,72 @@ def explode_counties(df: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def _load_state_county_map() -> dict[str, list[str]]:
+    """state_fips -> list of every real county 5-digit FIPS in that state.
+
+    Built from the Census population-estimates file already checked into
+    data/raw/crosswalks/.
+    """
+    path = CROSSWALK_RAW / "co-est2023-alldata.csv"
+    if not path.exists():
+        log.warning("County crosswalk not found at %s — statewide alerts "
+                    "cannot be expanded to individual counties.", path)
+        return {}
+    cw = pd.read_csv(path, encoding="latin1", usecols=["STATE", "COUNTY"])
+    cw = cw[cw["COUNTY"] != 0]
+    out: dict[str, list[str]] = {}
+    for _, row in cw.iterrows():
+        state_fips = f"{int(row['STATE']):02d}"
+        fips = f"{state_fips}{int(row['COUNTY']):03d}"
+        out.setdefault(state_fips, []).append(fips)
+    return out
+
+
+def expand_statewide_alerts(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Expand alerts whose county_fips is a state-level SAME code (5-digit FIPS
+    ending in "000", e.g. "48000" for "all of Texas") into one row per real
+    county in that state.
+
+    Roughly 65% of AMBER alerts are broadcast statewide rather than to a
+    specific county (verified against the full 2013-2024 archive). Before
+    this fix, such alerts carried a county_fips value ("XX000") that never
+    matches any real county in 04_build_panel's county-day grid, so they
+    were silently excluded from every downstream county-level treatment
+    variable (night_alert, alert_any, etc.) -- the causal analyses were
+    built almost entirely from the minority of alerts issued at exact
+    county granularity. Expanding here restores the missing ~65% of
+    alert-nights to the treatment definition.
+    """
+    df = df.copy()
+    is_statewide = df["county_fips"].astype(str).str.fullmatch(r"\d{2}000")
+    if not is_statewide.any():
+        return df
+
+    state_county_map = _load_state_county_map()
+    statewide_rows = df[is_statewide]
+    other_rows = df[~is_statewide]
+
+    expanded = []
+    for _, row in statewide_rows.iterrows():
+        state_fips = str(row["county_fips"])[:2]
+        counties = state_county_map.get(state_fips, [])
+        for cfips in counties:
+            new_row = row.copy()
+            new_row["county_fips"] = cfips
+            expanded.append(new_row)
+
+    if not expanded:
+        log.warning("No county crosswalk available — %d statewide alert "
+                    "rows dropped rather than expanded.", len(statewide_rows))
+        return other_rows.reset_index(drop=True)
+
+    log.info("Expanded %d statewide alert rows -> %d county-level rows",
+             len(statewide_rows), len(expanded))
+    result = pd.concat([other_rows, pd.DataFrame(expanded)], ignore_index=True)
+    return result
+
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -549,6 +615,10 @@ def main() -> None:
 
     # Explode multi-county alerts (comma-joined county_fips) into one row per county
     combined = explode_counties(combined)
+
+    # Expand statewide alerts (county_fips "XX000") into one row per real
+    # county in that state -- see expand_statewide_alerts docstring.
+    combined = expand_statewide_alerts(combined)
 
     # Dedup on (alert_id, county_fips) to handle both pre-exploded (OpenFEMA)
     # and comma-joined (FOIA/synthetic) sources without losing counties.

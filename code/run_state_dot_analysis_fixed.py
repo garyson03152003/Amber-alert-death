@@ -25,7 +25,7 @@ import pandas as pd
 import pytz
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import DATA_PROC, DATA_RAW, OUTPUT_TABS
+from config import CROSSWALK_RAW, DATA_PROC, DATA_RAW, OUTPUT_TABS
 from utils import get_logger
 from state_dot_analysis_core import (
     normalize_state_outcomes,
@@ -248,6 +248,64 @@ def load_validated_state_crashes(*, direct_only: bool = False, flows: pd.DataFra
 NIGHT_START_HOUR = 22   # legacy default; see load_verified_alerts
 NIGHT_END_HOUR = 6      # night runs [night_start, 24) U [0, NIGHT_END_HOUR)
 
+_STATE_COUNTY_MAP: dict[str, list[str]] | None = None  # lazy-loaded singleton
+
+
+def _state_county_map() -> dict[str, list[str]]:
+    """state_fips -> every real county 5-digit FIPS in that state, built from
+    the Census population-estimates file already in data/raw/crosswalks/."""
+    global _STATE_COUNTY_MAP
+    if _STATE_COUNTY_MAP is not None:
+        return _STATE_COUNTY_MAP
+    path = CROSSWALK_RAW / "co-est2023-alldata.csv"
+    if not path.exists():
+        log.warning("County crosswalk not found at %s — statewide alerts "
+                    "will be dropped instead of expanded.", path)
+        _STATE_COUNTY_MAP = {}
+        return _STATE_COUNTY_MAP
+    cw = pd.read_csv(path, encoding="latin1", usecols=["STATE", "COUNTY"])
+    cw = cw[cw["COUNTY"] != 0]
+    out: dict[str, list[str]] = {}
+    for _, row in cw.iterrows():
+        state_fips = f"{int(row['STATE']):02d}"
+        out.setdefault(state_fips, []).append(f"{state_fips}{int(row['COUNTY']):03d}")
+    _STATE_COUNTY_MAP = out
+    return out
+
+
+def _expand_statewide_rows(alerts: pd.DataFrame) -> pd.DataFrame:
+    """Expand rows whose fips is a state-level SAME code ("XX000") into one
+    row per real county in that state.
+
+    ~65% of AMBER alerts are broadcast statewide rather than to a specific
+    county. A prior version of this function excluded every such row
+    outright (`alerts["fips"].str[2:] != "000"`), so every county-level
+    causal analysis built on load_verified_alerts (the hourly event study,
+    the state-DOT crash-share analyses, the commuting-spillover analyses)
+    was estimated from only the minority of alerts issued at exact county
+    granularity. Expanding restores the missing statewide alert-nights to
+    the treatment definition instead of silently dropping them.
+    """
+    is_statewide = alerts["fips"].str[2:] == "000"
+    if not is_statewide.any():
+        return alerts
+    state_map = _state_county_map()
+    other = alerts[~is_statewide]
+    statewide = alerts[is_statewide]
+    if not state_map:
+        return other
+    expanded = []
+    for _, row in statewide.iterrows():
+        for cfips in state_map.get(row["fips"][:2], []):
+            new_row = row.copy()
+            new_row["fips"] = cfips
+            expanded.append(new_row)
+    if not expanded:
+        return other
+    log.info("Expanded %d statewide alert rows -> %d county-level rows",
+             len(statewide), len(expanded))
+    return pd.concat([other, pd.DataFrame(expanded)], ignore_index=True)
+
 
 def load_verified_alerts(*, window: str = "night", detail: bool = False,
                          night_start: int = NIGHT_START_HOUR) -> pd.DataFrame:
@@ -303,7 +361,7 @@ def load_verified_alerts(*, window: str = "night", detail: bool = False,
     alerts["fips"] = alerts["fips"].astype(str).str.zfill(5)
     alerts = alerts[alerts["fips"].str.match(r"^\d{5}$")].copy()
     alerts["state_fips"] = alerts["fips"].str[:2]
-    alerts = alerts[alerts["fips"].str[2:] != "000"].copy()
+    alerts = _expand_statewide_rows(alerts)
     alerts = alerts[alerts["state_fips"].isin(NATIONWIDE_STATE_TIMEZONE)].copy()
     alerts["tz_name"] = alerts["fips"].map(COUNTY_TIMEZONE_OVERRIDE).fillna(
         alerts["state_fips"].map(NATIONWIDE_STATE_TIMEZONE)

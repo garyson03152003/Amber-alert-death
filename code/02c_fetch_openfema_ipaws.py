@@ -4,13 +4,23 @@ OpenFEMA IPAWS Archived Alerts API.
 
 Strategy
 --------
-* Filter on `contains(originalMessage,'Child Abduction Emergency')` which
-  selects CAP messages with EAS event code "CAE" (Child Abduction Emergency).
+* Filter on `contains(originalMessage,'>CAE<')`, matching the structured CAP
+  eventCode tag rather than the free-text <event> phrase. FEMA's OData
+  backend does case-sensitive matching, and some senders render the <event>
+  text in all-caps ("CHILD ABDUCTION EMERGENCY") -- a prior version of this
+  filter matched only the mixed-case phrase "Child Abduction Emergency" and
+  silently dropped those alerts (verified: a 2018-06 sample showed two
+  all-caps North Carolina multi-county alerts missing under the old filter).
+  The eventCode tag is invariant to <event> text casing.
 * Paginate month-by-month with $top=1000 to keep $skip values small and
   avoid server-side read timeouts that occur at skip ≥ 1000 on wide filters.
 * Extract sent timestamp (UTC), msgType, and county SAME codes from each record.
 * SAME codes are 6 digits (PSSCCC): P=0, SS=2-digit state FIPS, CCC=county.
-  Strip leading zero to get 5-digit county FIPS.
+  Strip leading zero to get 5-digit county FIPS. A small number of senders
+  (chiefly Wisconsin) use non-standard P!=0 prefixes for sub-state EAS zones
+  (e.g. "955000" for a Milwaukee-area zone) -- these do NOT mean "entire
+  state" despite ending in 000, and are resolved downstream via areaDesc
+  text matching against county names, not treated as county FIPS directly.
 * Deduplicate on alert id + fips pair.
 
 msgType note
@@ -45,7 +55,7 @@ import requests
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import AMBER_RAW, STUDY_YEARS
+from config import AMBER_RAW, CROSSWALK_RAW, STUDY_YEARS
 from utils import get_logger
 
 log = get_logger("02c_ipaws")
@@ -64,6 +74,68 @@ MSGTYPE_RE = re.compile(
     r"<msgType>\s*(Alert|Update|Cancel)\s*</msgType>",
     re.IGNORECASE,
 )
+AREADESC_RE = re.compile(r"<areaDesc>(.*?)</areaDesc>", re.IGNORECASE | re.DOTALL)
+
+_COUNTY_NAME_SUFFIXES = (
+    " county", " parish", " borough", " census area", " municipality",
+    " city and borough", " municipio",
+)
+
+
+def _load_county_name_lookup() -> dict[str, dict[str, str]]:
+    """state_fips -> {bare lowercase county name: 5-digit fips}.
+
+    Built from the Census population-estimates file already checked into
+    data/raw/crosswalks/ (has STATE, COUNTY, CTYNAME columns) rather than
+    introducing a new reference file.
+    """
+    path = CROSSWALK_RAW / "co-est2023-alldata.csv"
+    if not path.exists():
+        log.warning("County name crosswalk not found at %s — non-standard "
+                    "SAME-code resolution via areaDesc will be unavailable.", path)
+        return {}
+    df = pd.read_csv(path, encoding="latin1", usecols=["STATE", "COUNTY", "CTYNAME"])
+    df = df[df["COUNTY"] != 0]
+    lookup: dict[str, dict[str, str]] = {}
+    for _, row in df.iterrows():
+        state_fips = f"{int(row['STATE']):02d}"
+        fips = f"{int(row['STATE']):02d}{int(row['COUNTY']):03d}"
+        name = row["CTYNAME"].lower()
+        for suf in _COUNTY_NAME_SUFFIXES:
+            if name.endswith(suf):
+                name = name[: -len(suf)]
+                break
+        lookup.setdefault(state_fips, {})[name] = fips
+    return lookup
+
+
+_COUNTY_NAME_LOOKUP = None  # lazy-loaded singleton
+
+
+def _resolve_nonstandard_same(same: str, area_descs: list[str]) -> str | None:
+    """Resolve a non-standard (P != 0) SAME code to a real county FIPS via
+    areaDesc text matching. Returns None if no match is found -- the caller
+    should skip the row rather than emit a fabricated FIPS.
+
+    Non-standard codes (chiefly Wisconsin's 9SSCCC-style EAS sub-state zone
+    codes, e.g. "955000" for Milwaukee) end in 000 like a real statewide
+    code, but the leading digit should be 0 for "entire county/state" per
+    the SAME spec; a non-zero leading digit marks a special zone, not the
+    whole state, so naively stripping the leading digit (as for standard
+    codes) would fabricate a nonexistent county FIPS.
+    """
+    global _COUNTY_NAME_LOOKUP
+    if _COUNTY_NAME_LOOKUP is None:
+        _COUNTY_NAME_LOOKUP = _load_county_name_lookup()
+    state_fips = same[1:3]
+    names = _COUNTY_NAME_LOOKUP.get(state_fips, {})
+    if not names:
+        return None
+    ad_lower = " | ".join(area_descs).lower()
+    for cname, cfips in names.items():
+        if cname and cname in ad_lower:
+            return cfips
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -131,11 +203,19 @@ def _parse_record(rec: dict) -> list[dict]:
 
     rows = []
     for same in same_codes:
-        # SAME county code: 0SSCCC  →  FIPS = SSCCC
+        # Standard SAME code: 0SSCCC → FIPS = SSCCC (CCC=000 means the
+        # entire state -- kept as-is here; expanding it to individual
+        # counties is a downstream modeling choice, not a raw-data concern).
         if same.startswith("0") and len(same) == 6:
-            fips = same[1:]           # 5-digit county FIPS
+            fips = same[1:]
         else:
-            fips = same.zfill(5)[-5:]
+            # Non-standard prefix (P != 0): not a valid "entire county/state"
+            # code. Resolve to the real county via areaDesc text matching;
+            # skip the row (rather than fabricate a FIPS) if no match.
+            area_descs = AREADESC_RE.findall(orig)
+            fips = _resolve_nonstandard_same(same, area_descs)
+            if fips is None:
+                continue
         state_fips = fips[:2]
         rows.append({
             "alert_id":   alert_id,
@@ -164,7 +244,7 @@ def fetch_month(year: int, month: int, session: requests.Session) -> pd.DataFram
         f"sent gt '{year}-{month:02d}-01T00:00:00Z' and "
         f"sent lt '{next_year}-{next_month:02d}-01T00:00:00Z'"
     )
-    amber_filter = "contains(originalMessage,'Child Abduction Emergency')"
+    amber_filter = "contains(originalMessage,'>CAE<')"
     combined = f"({amber_filter}) and ({date_filter})"
 
     all_rows = []
