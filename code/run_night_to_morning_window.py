@@ -145,31 +145,39 @@ def attach_night_alert(grid: pd.DataFrame) -> pd.DataFrame:
 
     grid = grid.sort_values(["fips", "date"]).reset_index(drop=True)
     grid["night_alert_lag1"] = grid.groupby("fips")["night_alert"].shift(1).fillna(0).astype(int)
+    grid["night_alert_lead1"] = grid.groupby("fips")["night_alert"].shift(-1).fillna(0).astype(int)
     grid["alert_last2nights_any"] = ((grid["night_alert"] + grid["night_alert_lag1"]) > 0).astype(int)
     grid["alert_last2nights_dose"] = grid["night_alert"] + grid["night_alert_lag1"]
     return grid
 
 
-def attach_cross_spillover(grid: pd.DataFrame) -> pd.DataFrame:
+def attach_cross_spillover(grid: pd.DataFrame, home_alert_col: str = "night_alert",
+                          out_col: str = "cross_spillover", weights=None) -> pd.DataFrame:
     """
-    cross_spillover_ct = sum_{j != c} w_{j->c} x night_alert_{j,t}
+    {out_col}_ct = sum_{j != c} w_{j->c} x {home_alert_col}_{j,t}
 
     Share of county c's workforce commuting in from a county j that had a
-    night alert on the same effective date t (using this script's
-    correctly-dated night_alert column, already attached by
-    attach_night_alert). 0 for counties with no commuting inflow from any
-    alerted county that date.
-    """
-    _ensure_commuting_weights()
-    weights = pd.read_parquet(COMMUTING_WEIGHTS_PATH)  # fips_home, fips_work, weight
-    log.info("Commuting weights: %d OD pairs, %d work counties",
-             len(weights), weights["fips_work"].nunique())
+    night alert (per home_alert_col) on the same effective date t. 0 for
+    counties with no commuting inflow from any alerted county that date.
 
-    alert_events = grid.loc[grid["night_alert"] > 0, ["fips", "date"]].copy()
+    Passing home_alert_col="night_alert_lead1" builds a backward-causal
+    placebo version: spillover exposure computed from the HOME county's
+    alert status the *following* night cannot causally affect today's
+    crashes in the work county, so a real effect on this term (once today's
+    real cross_spillover is also controlled for) would indicate confounding
+    rather than a genuine spillover mechanism.
+    """
+    if weights is None:
+        _ensure_commuting_weights()
+        weights = pd.read_parquet(COMMUTING_WEIGHTS_PATH)  # fips_home, fips_work, weight
+        log.info("Commuting weights: %d OD pairs, %d work counties",
+                 len(weights), weights["fips_work"].nunique())
+
+    alert_events = grid.loc[grid[home_alert_col] > 0, ["fips", "date"]].copy()
     alert_events["fips_home"] = alert_events["fips"].astype(int)
     if alert_events.empty:
-        log.warning("No night-alert events in grid — cross_spillover will be all zeros")
-        grid["cross_spillover"] = 0.0
+        log.warning("No %s events in grid — %s will be all zeros", home_alert_col, out_col)
+        grid[out_col] = 0.0
         return grid
 
     fips_in_sample = set(grid["fips"].unique())
@@ -177,17 +185,16 @@ def attach_cross_spillover(grid: pd.DataFrame) -> pd.DataFrame:
     spill_pairs = spill_pairs[spill_pairs["fips_home"] != spill_pairs["fips_work"]]
     spill_pairs["fips_work_str"] = spill_pairs["fips_work"].astype(str).str.zfill(5)
     spill_pairs = spill_pairs[spill_pairs["fips_work_str"].isin(fips_in_sample)]
-    log.info("Spillover pairs: %d (alert events x weight links)", len(spill_pairs))
+    log.info("%s pairs: %d (alert events x weight links)", out_col, len(spill_pairs))
 
     spillover = (spill_pairs.groupby(["fips_work_str", "date"])["weight"]
                  .sum().reset_index()
-                 .rename(columns={"weight": "cross_spillover", "fips_work_str": "fips"}))
+                 .rename(columns={"weight": out_col, "fips_work_str": "fips"}))
 
     grid = grid.merge(spillover, on=["fips", "date"], how="left")
-    grid["cross_spillover"] = grid["cross_spillover"].fillna(0.0)
-    log.info("cross_spillover: mean=%.5f, max=%.4f, nonzero rows=%d",
-             grid["cross_spillover"].mean(), grid["cross_spillover"].max(),
-             int((grid["cross_spillover"] > 0).sum()))
+    grid[out_col] = grid[out_col].fillna(0.0)
+    log.info("%s: mean=%.5f, max=%.4f, nonzero rows=%d", out_col,
+             grid[out_col].mean(), grid[out_col].max(), int((grid[out_col] > 0).sum()))
     return grid
 
 
@@ -249,6 +256,25 @@ def main():
         "fips_year + fips_dow + month_str", results, extra_controls=["cross_spillover"])
     run(grid, "CROSS_SPILLOVER (own-controlled) -> fatals", "fatals_0623", "cross_spillover",
         "fips_year + fips_dow + month_str", results, extra_controls=["night_alert"])
+
+    log.info("\n=== Backward-causal placebo: spillover from a HOME county's alert the "
+             "FOLLOWING night cannot cause today's crashes ===")
+    weights = pd.read_parquet(COMMUTING_WEIGHTS_PATH)
+    grid = attach_cross_spillover(grid, home_alert_col="night_alert_lead1",
+                                 out_col="cross_spillover_placebo", weights=weights)
+    # Controls for today's REAL cross_spillover throughout, since alert
+    # campaigns span consecutive nights (a home county's alert tonight is
+    # correlated with its alert tomorrow night) -- exactly the confound that
+    # made the naive backward placebo on the OWN-alert term look spuriously
+    # significant earlier, before controlling for today's own status fixed it.
+    run(grid, "PLACEBO: spillover from tomorrow's home-county alert -> today's fatals",
+        "fatals_0623", "cross_spillover_placebo",
+        "fips + year_str + dow + month_str", results,
+        extra_controls=["cross_spillover", "night_alert"])
+    run(grid, "PLACEBO: spillover from tomorrow's home-county alert -> today's fatals (robust FE)",
+        "fatals_0623", "cross_spillover_placebo",
+        "fips_year + fips_dow + month_str", results,
+        extra_controls=["cross_spillover", "night_alert"])
 
     out = pd.DataFrame(results)
     out_path = OUTPUT_TABS / "reg_night_to_morning_window.csv"
