@@ -1,15 +1,14 @@
-"""FARS national night-alert effect under both night-window definitions.
+"""FARS national night-alert effect across progressively later night cutoffs.
 
 The overnight exposure window runs night_start -> 06:00 and the outcome is
 day D+1's crashes, which is what the effective_crash_date mapping already
-encodes. What was wrong is where the window STARTS: the legacy cutoff of
-22:00 discards the 20:00 and 21:00 hours, which hold 4,982 alerts. Moving
-the boundary to 20:00 raises night county-dates from 6,072 to 10,430 (+72%)
--- a larger power gain than pooling five states delivered.
+encodes. The purpose of this runner is to show whether the estimated effect
+becomes more pronounced as the treatment window moves deeper into typical
+sleep hours.
 
-Both definitions are run side by side so the choice is visible rather than
-buried, on the national FARS panel (12.6M county-days, and immune to the
-UTC-date bug that affected the state sources).
+The cutoff gradient is 20:00, 21:00, 22:00, and 23:00. Every specification
+uses the same validated national FARS panel and the same PPML/WLS estimators;
+only the earliest included evening alert hour changes.
 """
 from __future__ import annotations
 
@@ -26,10 +25,12 @@ from config import OUTPUT_TABS
 
 log = base.log
 
+NIGHT_STARTS = (20, 21, 22, 23)
+
 
 def main() -> None:
     rows = []
-    for night_start in (22, 20):
+    for night_start in NIGHT_STARTS:
         # build_panel() reaches for load_verified_night_alerts(); point it at
         # the requested window boundary for this pass.
         base_loader = base.load_verified_night_alerts
