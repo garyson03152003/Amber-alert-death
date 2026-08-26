@@ -28,9 +28,19 @@ Reports an empirical (permutation) p-value: the fraction of permuted
 coefficients >= the real coefficient (one-sided, since the maintained
 hypothesis is a positive spillover effect).
 
+Memory note: the naive approach (re-merge a fresh copy of the full 7.3M
+row grid every draw via attach_cross_spillover) OOM-killed after ~9 draws
+-- pandas/pyfixest do not release native allocator arenas back to the OS
+between iterations, so repeated full-frame copies accumulate RSS even
+though each one is individually garbage-collected. This version instead
+mutates ONE grid in place (index-aligned column assignment instead of a
+merge that returns a new frame each time) and explicitly drops+garbage
+collects the per-draw regression inputs.
+
 Output: output/tables/reg_commuting_network_placebo.csv
   (one row per permutation draw, plus the real estimate for reference)
 """
+import gc
 import sys
 import warnings
 from pathlib import Path
@@ -53,12 +63,32 @@ SEED = 20240826
 FE = "fips_year + fips_dow + month_str"
 
 
+def spillover_series(grid_index, alert_events, weights, fips_in_sample):
+    """Same aggregation as attach_cross_spillover, but returns a plain
+    Series aligned to grid_index instead of merging into a full copy of
+    the grid."""
+    spill_pairs = alert_events.merge(weights, on="fips_home", how="inner")
+    spill_pairs = spill_pairs[spill_pairs["fips_home"] != spill_pairs["fips_work"]]
+    spill_pairs["fips_work_str"] = spill_pairs["fips_work"].astype(str).str.zfill(5)
+    spill_pairs = spill_pairs[spill_pairs["fips_work_str"].isin(fips_in_sample)]
+
+    agg = (spill_pairs.groupby(["fips_work_str", "date"])["weight"]
+           .sum().rename("value"))
+    agg.index = agg.index.set_names(["fips", "date"])
+    aligned = agg.reindex(grid_index).fillna(0.0)
+    return aligned.to_numpy(), len(spill_pairs)
+
+
 def fit_spillover(grid: pd.DataFrame, col: str):
-    sub = grid.dropna(subset=[col, "night_alert", "fatals_0623"]).copy()
+    sub = grid.loc[:, [col, "night_alert", "fatals_0623", "fips_year", "fips_dow",
+                        "month_str", ntm.CLUSTER_VARS.split(" + ")[0],
+                        ntm.CLUSTER_VARS.split(" + ")[1]]].dropna()
     formula = f"fatals_0623 ~ {col} + night_alert | {FE}"
     fit = pf.feols(formula, data=sub, vcov={"CRV1": ntm.CLUSTER_VARS}, lean=True)
     row = fit.tidy().loc[col]
-    return float(row["Estimate"]), float(row["Std. Error"]), float(row["Pr(>|t|)"])
+    coef, se, pval = float(row["Estimate"]), float(row["Std. Error"]), float(row["Pr(>|t|)"])
+    del fit, sub
+    return coef, se, pval
 
 
 def main():
@@ -76,10 +106,21 @@ def main():
     log.info("Commuting weights: %d edges, %d home counties, %d work counties",
              len(weights), weights["fips_home"].nunique(), weights["fips_work"].nunique())
 
-    # Real (unpermuted) network -> the headline estimate
-    real_grid = ntm.attach_cross_spillover(grid.copy(), out_col="cross_spillover", weights=weights)
-    real_coef, real_se, real_p = fit_spillover(real_grid, "cross_spillover")
-    log.info("REAL commuting network:   beta=%+.5f se=%.5f p=%.4f", real_coef, real_se, real_p)
+    fips_in_sample = set(grid["fips"].unique())
+    grid_index = pd.MultiIndex.from_frame(grid[["fips", "date"]])
+
+    alert_events = grid.loc[grid["night_alert"] > 0, ["fips", "date"]].copy()
+    alert_events["fips_home"] = alert_events["fips"].astype(int)
+
+    def run_one(w):
+        values, n_pairs = spillover_series(grid_index, alert_events, w, fips_in_sample)
+        grid["_spill"] = values
+        coef, se, pval = fit_spillover(grid, "_spill")
+        return coef, se, pval, n_pairs
+
+    real_coef, real_se, real_p, real_pairs = run_one(weights)
+    log.info("REAL commuting network:   beta=%+.5f se=%.5f p=%.4f (%d edges lit up)",
+             real_coef, real_se, real_p, real_pairs)
 
     home_counties = weights["fips_home"].unique()
     rng = np.random.default_rng(SEED)
@@ -88,16 +129,21 @@ def main():
     perm_coefs = []
     for i in range(1, N_PERM + 1):
         perm_map = dict(zip(home_counties, rng.permutation(home_counties)))
-        w_perm = weights.copy()
+        w_perm = weights[["fips_home", "fips_work", "weight"]].copy()
         w_perm["fips_home"] = w_perm["fips_home"].map(perm_map)
 
-        g_perm = ntm.attach_cross_spillover(grid.copy(), out_col="cross_spillover_perm", weights=w_perm)
-        coef, se, pval = fit_spillover(g_perm, "cross_spillover_perm")
+        coef, se, pval = run_one(w_perm)[:3]
         perm_coefs.append(coef)
         results.append({"draw": i, "coef": coef, "se": se, "pval": pval})
+
+        del w_perm
+        gc.collect()
+
         if i % 10 == 0:
             log.info("  permutation %3d/%d done (running mean beta so far: %+.5f)",
                      i, N_PERM, float(np.mean(perm_coefs)))
+
+    grid.drop(columns=["_spill"], inplace=True, errors="ignore")
 
     perm_coefs = np.array(perm_coefs)
     p_perm_onesided = (np.sum(perm_coefs >= real_coef) + 1) / (N_PERM + 1)
