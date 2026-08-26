@@ -41,6 +41,24 @@ p~0.03-0.05 range -- still directionally positive, but a materially weaker
 and more fragile result than the naive spec suggests. Both specs are
 reported; only the robust one should be treated as the headline number.
 
+Standard errors are two-way clustered by state x calendar date
+(CLUSTER_VARS below), not just by state. State-only clustering already
+absorbs within-state, same-day correlation from statewide alert campaigns
+(a state cluster nests every one of its counties' full time series), but
+misses same-day correlation across DIFFERENT states (a national weather
+event or holiday) that month/weekday fixed effects don't fully soak up.
+Checked against four alternatives (1-way state/county/date, 2-way
+county+date) in reg_night_to_morning_clustering_check.csv: the headline
+commuting-spillover result is significant under every one (p=.012-.026);
+two-way state+date is both the more defensible choice and the tightest,
+so it is the default here rather than a mere robustness footnote.
+
+Also checked: the choice of night_start/night_end cutoff hours themselves
+(reg_night_to_morning_cutoff_sensitivity.csv, run_night_to_morning_cutoff_sensitivity.py).
+The commuting-spillover result holds for every night_start >= 21 (9pm),
+and breaks down only when "night" is stretched to include 8-9pm, which is
+the substantively expected failure mode, not a red flag.
+
 Commuting spillover
 --------------------
 Also tests exposure via commuting, not just a county's own alert: even a
@@ -202,11 +220,19 @@ def _sig(p):
     return "***" if p < .01 else "**" if p < .05 else "*" if p < .10 else "n.s."
 
 
+CLUSTER_VARS = "state_code + date_str"  # two-way: state (correlated statewide
+# alert campaigns) x calendar date (same-day national shocks month/dow FE
+# don't absorb). Checked against 1-way state/county/date and 2-way
+# county+date in reg_night_to_morning_clustering_check.csv -- the headline
+# spillover result is significant under every choice (p=.012-.026); two-way
+# state+date is the tightest and is used as the default here.
+
+
 def run(grid, label, outcome, treat, fe, results, extra_controls=None):
     controls = [treat] + (extra_controls or [])
     sub = grid.dropna(subset=controls + [outcome]).copy()
     formula = f"{outcome} ~ {' + '.join(controls)} | {fe}"
-    fit = pf.feols(formula, data=sub, vcov={"CRV1": "state_code"}, lean=True)
+    fit = pf.feols(formula, data=sub, vcov={"CRV1": CLUSTER_VARS}, lean=True)
     td = fit.tidy()
     row = td.loc[treat]
     coef, se, pval = float(row["Estimate"]), float(row["Std. Error"]), float(row["Pr(>|t|)"])
@@ -226,6 +252,7 @@ def main():
     grid["fips_dow"] = grid["fips"] + "_" + grid["dow"]
     grid["fips_year"] = grid["fips"] + "_" + grid["year_str"]
     grid["state_code"] = grid["fips"].str[:2]
+    grid["date_str"] = grid["date"].dt.strftime("%Y-%m-%d")
 
     results = []
     log.info("\n=== Naive spec: fips + year + dow + month FE ===")
