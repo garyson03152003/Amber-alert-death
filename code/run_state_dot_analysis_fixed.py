@@ -308,7 +308,8 @@ def _expand_statewide_rows(alerts: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_verified_alerts(*, window: str = "night", detail: bool = False,
-                         night_start: int = NIGHT_START_HOUR) -> pd.DataFrame:
+                         night_start: int = NIGHT_START_HOUR,
+                         night_end: int = NIGHT_END_HOUR) -> pd.DataFrame:
     """Verified county-level AMBER-alert exposure in a time-of-day window.
 
     ``window="night"`` keeps alerts sent ``night_start``:00-05:59 local, and
@@ -343,9 +344,9 @@ def load_verified_alerts(*, window: str = "night", detail: bool = False,
     """
     if window not in {"night", "day"}:
         raise ValueError(f"window must be 'night' or 'day', got {window!r}")
-    if not NIGHT_END_HOUR < night_start <= 23:
+    if not night_end < night_start <= 23:
         raise ValueError(
-            f"night_start must be in ({NIGHT_END_HOUR}, 23], got {night_start!r}")
+            f"night_start must be in ({night_end}, 23], got {night_start!r}")
     path = DATA_RAW / "amber" / "foia" / "openfema_ipaws_alerts_2013_2024.csv"
     if not path.exists():
         path = DATA_RAW / "amber" / "foia" / "openfema_ipaws_alerts_2013_2022.csv"
@@ -377,7 +378,7 @@ def load_verified_alerts(*, window: str = "night", detail: bool = False,
 
     alerts = alerts.dropna(subset=["sent_local", "hour_local"]).copy()
     alerts["hour_local"] = alerts["hour_local"].astype(int)
-    is_night = (alerts["hour_local"] >= night_start) | (alerts["hour_local"] < NIGHT_END_HOUR)
+    is_night = (alerts["hour_local"] >= night_start) | (alerts["hour_local"] < night_end)
     alerts = alerts[is_night if window == "night" else ~is_night].copy()
     alerts["alert_date"] = pd.to_datetime(alerts["sent_local"]).dt.normalize()
     alerts["effective_crash_date"] = alerts["alert_date"]
