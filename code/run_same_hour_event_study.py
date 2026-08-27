@@ -223,10 +223,27 @@ def main():
     grid = build_case_crossover_grid(ev, active)
 
     grid["fips_hour_dow"] = grid["fips"] + "_" + grid["hour"].astype(str) + "_" + grid["dow"].astype(str)
+    grid["weekend"] = (grid["dow"] >= 5).astype(int)
+    grid["fips_hour_weekend"] = grid["fips"] + "_" + grid["hour"].astype(str) + "_" + grid["weekend"].astype(str)
+
+    # PEAK/MID/LOW hour tercile, from output/tables/national_hourly_volume_profile.csv
+    # (national crash-volume share by hour): LOW = 22:00-05:00, MID = 06:00-10:00
+    # & 19:00-21:00, PEAK = 11:00-18:00 -- each exactly 8 hours.
+    LOW_HOURS = {0, 1, 2, 3, 4, 5, 22, 23}
+    MID_HOURS = {6, 7, 8, 9, 10, 19, 20, 21}
+    grid["hour_tier"] = np.where(grid["hour"].isin(LOW_HOURS), "LOW",
+                          np.where(grid["hour"].isin(MID_HOURS), "MID", "PEAK"))
+    grid["fips_tier_dow"] = grid["fips"] + "_" + grid["hour_tier"] + "_" + grid["dow"].astype(str)
+    grid["fips_tier_weekend"] = grid["fips"] + "_" + grid["hour_tier"] + "_" + grid["weekend"].astype(str)
+
     grid["year_month"] = grid["year"].astype(str) + "_" + grid["month"].astype(str)
     grid["fips_year"] = grid["fips"] + "_" + grid["year"].astype(str)
     grid["state_code"] = grid["fips"].str[:2]
     grid["date_str"] = grid["date"].dt.strftime("%Y-%m-%d")
+    log.info("FE cell counts: fips_hour_dow=%d, fips_hour_weekend=%d, "
+             "fips_tier_dow=%d, fips_tier_weekend=%d",
+             grid["fips_hour_dow"].nunique(), grid["fips_hour_weekend"].nunique(),
+             grid["fips_tier_dow"].nunique(), grid["fips_tier_weekend"].nunique())
 
     results = []
     log.info("\n=== Same-hour case-crossover (+/- %d days), any alert message ===", WINDOW_DAYS)
@@ -253,6 +270,31 @@ def main():
              "predict TODAY's crashes, controlling for today's real alert? ===")
     run(grid, "fatals: placebo (tomorrow's alert), robust FE", "person_fatals",
         "is_alert_hour_tomorrow", "fips_hour_dow + fips_year + year_month", "ols", results,
+        extra_controls=["is_alert_hour"])
+
+    log.info("\n=== Weekday/weekend FE instead of exact day-of-week (coarser, more obs/cell) ===")
+    run(grid, "fatals: weekend FE", "person_fatals", "is_alert_hour",
+        "fips_hour_weekend + fips_year + year_month", "ols", results)
+    run(grid, "serious: weekend FE", "serious_inj", "is_alert_hour",
+        "fips_hour_weekend + fips_year + year_month", "ols", results)
+    run(grid, "fatals: placebo, weekend FE", "person_fatals", "is_alert_hour_tomorrow",
+        "fips_hour_weekend + fips_year + year_month", "ols", results,
+        extra_controls=["is_alert_hour"])
+
+    log.info("\n=== PEAK/MID/LOW hour tier FE instead of exact hour-of-day (coarser still) ===")
+    run(grid, "fatals: tier+dow FE", "person_fatals", "is_alert_hour",
+        "fips_tier_dow + fips_year + year_month", "ols", results)
+    run(grid, "serious: tier+dow FE", "serious_inj", "is_alert_hour",
+        "fips_tier_dow + fips_year + year_month", "ols", results)
+    run(grid, "fatals: placebo, tier+dow FE", "person_fatals", "is_alert_hour_tomorrow",
+        "fips_tier_dow + fips_year + year_month", "ols", results,
+        extra_controls=["is_alert_hour"])
+    run(grid, "fatals: tier+weekend FE", "person_fatals", "is_alert_hour",
+        "fips_tier_weekend + fips_year + year_month", "ols", results)
+    run(grid, "serious: tier+weekend FE", "serious_inj", "is_alert_hour",
+        "fips_tier_weekend + fips_year + year_month", "ols", results)
+    run(grid, "fatals: placebo, tier+weekend FE", "person_fatals", "is_alert_hour_tomorrow",
+        "fips_tier_weekend + fips_year + year_month", "ols", results,
         extra_controls=["is_alert_hour"])
 
     out = pd.DataFrame(results)
