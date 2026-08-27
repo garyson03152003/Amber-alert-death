@@ -14,3 +14,4 @@ data/processed/traffic/tmas_station_day_outcomes.parquet
 # combined county_pair_lodes_distance.parquet is committed.
 data/processed/commuting/_lodes_checkpoints/
 data/processed/commuting/_lodes_raw_cache/
+data/processed/commuting/_lodes_year_cache/
