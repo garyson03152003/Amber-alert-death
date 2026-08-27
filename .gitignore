@@ -7,3 +7,10 @@ data/raw/tmas/
 
 # Single-file outputs over GitHub's 100MB push limit.
 data/processed/traffic/tmas_station_day_outcomes.parquet
+
+# LODES per-state/per-file checkpoints and raw gz cache: reproducible via
+# code/build_lodes_county_pair_distance.py (resumable, so these are kept
+# on disk only to skip re-downloading), not a deliverable. Only the final
+# combined county_pair_lodes_distance.parquet is committed.
+data/processed/commuting/_lodes_checkpoints/
+data/processed/commuting/_lodes_raw_cache/
