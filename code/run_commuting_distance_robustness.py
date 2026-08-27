@@ -13,8 +13,16 @@ commuting flows matter" from "real geographic proximity matters", since
 the two are highly correlated (most commuters live nearby).
 
 This script instead splits/weights the SAME real network by commuting
-distance (great-circle distance between county centroids,
-data/processed/county_centroids.parquet):
+distance (great-circle distance between county POPULATION-WEIGHTED
+centroids, data/processed/county_pop_centroids.parquet -- the official
+2020 Census mean center of population, built by
+build_county_pop_centroids.py). An earlier version of this script used
+a geometric centroid file (county_centroids.parquet) that only covered
+1,646/3,144 counties and, for large unevenly-populated counties, sat
+60-100+ miles from where people actually live (e.g. Nye County NV was
+108.6 miles off) -- exactly the kind of measurement error that would
+bias a distance-based test. The population-weighted centroid has full
+national coverage and is materially more accurate for this purpose.
 
   1. dist-weighted:  cross_spillover_dist = sum_j w_jc * dist_jc * alert_jt
      -- the same spillover measure, but scaled by how far that commuting
@@ -38,12 +46,11 @@ real evidence against a pure local-shock/adjacency confound. If it only
 shows up in the short-only subset, the commuting story looks more like a
 proximity artifact.
 
-Centroid coverage: data/processed/county_centroids.parquet only covers
-1,646 of 3,144 commuting-network counties (missing mostly rural/small
-counties). Restricting to edges with both endpoints covered keeps 78% of
-edges and 81% of the total exposure weight (verified interactively before
-writing this script) -- good enough for a robustness check, not good
-enough to claim as a full replacement for the main result.
+Centroid coverage: county_pop_centroids.parquet covers 3,221 of 3,144
+commuting-network counties (i.e. essentially all of them; the extra rows
+are county-equivalents outside the commuting network). Coverage of the
+"coverage-matched baseline" below is therefore near-total rather than
+the 62%/44% edges/weight the geometric-centroid version had.
 
 Output: output/tables/reg_commuting_distance_robustness.csv
 """
@@ -83,7 +90,7 @@ def build_weights_with_distance():
     weights["fips_home_s"] = weights["fips_home"].astype(str).str.zfill(5)
     weights["fips_work_s"] = weights["fips_work"].astype(str).str.zfill(5)
 
-    cent = pd.read_parquet(DATA_PROC / "county_centroids.parquet")
+    cent = pd.read_parquet(DATA_PROC / "county_pop_centroids.parquet")
     cent["fips"] = cent["fips"].astype(str).str.zfill(5)
     cm = cent.set_index("fips")
 
