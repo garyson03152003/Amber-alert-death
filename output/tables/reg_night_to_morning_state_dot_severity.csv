@@ -1,0 +1,7 @@
+label,outcome,treatment,coef,se,pval,nobs
+crashes: OWN night_alert (spillover-controlled),crashes,night_alert,0.04854910254280406,0.07452317815996853,0.5229788587245745,5030536
+crashes: CROSS_SPILLOVER (own-controlled),crashes,cross_spillover,-0.13575216455038092,0.14796523746808377,0.3710317975254782,5030536
+fatals: OWN night_alert (spillover-controlled),fatals,night_alert,-0.0018702619445859232,0.0018070059309791327,0.3143720026325172,5030536
+fatals: CROSS_SPILLOVER (own-controlled),fatals,cross_spillover,0.008176320535496015,0.006207752676702708,0.20432230044030297,5030536
+serious_inj: OWN night_alert (spillover-controlled),serious_inj,night_alert,-0.006892944348448629,0.0043444847876686924,0.13001480808401267,5030536
+serious_inj: CROSS_SPILLOVER (own-controlled),serious_inj,cross_spillover,0.018329966077635155,0.008580935428926014,0.0466572630488582,5030536
