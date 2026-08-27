@@ -1,10 +1,16 @@
 label,outcome,treatment,fe,coef,se,pval,nobs
-crashes: any alert message,crashes,is_alert_hour,fips_hour_dow + fips_year + year_month,-0.006461679026175753,0.011807358797559026,0.6222843437754089,1061497
-fatals: any alert message,fatals,is_alert_hour,fips_hour_dow + fips_year + year_month,-0.0019074939823631243,0.0017748669855202463,0.36124297751825885,1061497
-serious_inj: any alert message,serious_inj,is_alert_hour,fips_hour_dow + fips_year + year_month,0.015012352875447091,0.01827847266054138,0.4716561831500403,1061497
-crashes: first-alert-hour only,crashes,is_first_alert_hour,fips_hour_dow + fips_year + year_month,-0.006303217415981582,0.01164310685707943,0.625870509752072,1061497
-fatals: first-alert-hour only,fatals,is_first_alert_hour,fips_hour_dow + fips_year + year_month,-0.0018804523858767747,0.0017527437330825744,0.3619575569041542,1061497
-serious_inj: first-alert-hour only,serious_inj,is_first_alert_hour,fips_hour_dow + fips_year + year_month,0.016130499604593323,0.019597771031911976,0.47079205894570864,1061497
-crashes: placebo (tomorrow's alert),crashes,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.02062436615269587,0.02594200916930746,0.4846920342793015,1061497
-fatals: placebo (tomorrow's alert),fatals,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.0015002851366985193,0.003047072302706116,0.6562386772152893,1061497
-serious_inj: placebo (tomorrow's alert),serious_inj,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.03039089081696074,0.03902145057477896,0.4928706294923133,1061497
+crashes: any alert message,crashes,is_alert_hour,fips_hour_dow + fips_year + year_month,-0.006461679220034426,0.011807184175235083,0.6222794151838713,1061497
+fatals: any alert message,fatals,is_alert_hour,fips_hour_dow + fips_year + year_month,-0.0019074941742543857,0.0017748743660764316,0.3612446487132528,1061497
+serious_inj: any alert message,serious_inj,is_alert_hour,fips_hour_dow + fips_year + year_month,0.015012352682992875,0.01827868048029459,0.4716607637718142,1061497
+crashes: first-alert-hour only,crashes,is_first_alert_hour,fips_hour_dow + fips_year + year_month,-0.006303217594737225,0.011642972010229487,0.6258666751622244,1061497
+fatals: first-alert-hour only,fatals,is_first_alert_hour,fips_hour_dow + fips_year + year_month,-0.0018804525629896667,0.0017527499770304924,0.36195898555717876,1061497
+serious_inj: first-alert-hour only,serious_inj,is_first_alert_hour,fips_hour_dow + fips_year + year_month,0.016130499427493335,0.019597948405914303,0.47079570770363066,1061497
+crashes: placebo (tomorrow's alert),crashes,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.02062436540565602,0.025941921146032977,0.48469069584111546,1061497
+fatals: placebo (tomorrow's alert),fatals,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.0015002843946770735,0.0030470662148895347,0.6562382114153995,1061497
+serious_inj: placebo (tomorrow's alert),serious_inj,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.0303908900773612,0.039021534941374836,0.49287149559865395,1061497
+"crashes: any alert message, weekend FE",crashes,is_alert_hour,fips_hour_weekend + fips_year + year_month,-0.00315079645381524,0.01677363938498724,0.8629876470826603,1061500
+"fatals: any alert message, weekend FE",fatals,is_alert_hour,fips_hour_weekend + fips_year + year_month,-0.0017451227956458088,0.0014542839268218925,0.3162662493019399,1061500
+"serious_inj: any alert message, weekend FE",serious_inj,is_alert_hour,fips_hour_weekend + fips_year + year_month,0.016656411123725734,0.020333233074858025,0.47270649466437376,1061500
+"crashes: placebo, weekend FE",crashes,is_alert_hour_tomorrow,fips_hour_weekend + fips_year + year_month,0.019554303478359406,0.02895558639790916,0.5478647285338409,1061500
+"fatals: placebo, weekend FE",fatals,is_alert_hour_tomorrow,fips_hour_weekend + fips_year + year_month,0.001348467550053473,0.002772131031846545,0.6599784863626719,1061500
+"serious_inj: placebo, weekend FE",serious_inj,is_alert_hour_tomorrow,fips_hour_weekend + fips_year + year_month,0.03134365402444694,0.04002842093472307,0.4907333142246464,1061500

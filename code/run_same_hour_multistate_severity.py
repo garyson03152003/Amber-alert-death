@@ -231,11 +231,16 @@ def main():
     grid = build_case_crossover_grid(ev, hourly_by_state, fips_to_source)
 
     grid["fips_hour_dow"] = grid["fips"] + "_" + grid["hour"].astype(str) + "_" + grid["dow"].astype(str)
+    grid["weekend"] = (grid["dow"] >= 5).astype(int)
+    grid["fips_hour_weekend"] = grid["fips"] + "_" + grid["hour"].astype(str) + "_" + grid["weekend"].astype(str)
     grid["year_month"] = grid["year"].astype(str) + "_" + grid["month"].astype(str)
     grid["fips_year"] = grid["fips"] + "_" + grid["year"].astype(str)
     grid["state_code"] = grid["fips"].str[:2]
     grid["date_str"] = grid["date"].dt.strftime("%Y-%m-%d")
     fe = "fips_hour_dow + fips_year + year_month"
+    fe_weekend = "fips_hour_weekend + fips_year + year_month"
+    log.info("FE cell counts: fips_hour_dow=%d, fips_hour_weekend=%d",
+             grid["fips_hour_dow"].nunique(), grid["fips_hour_weekend"].nunique())
 
     results = []
     log.info("\n=== Pooled 4-state same-hour case-crossover, severity-separated (any alert message) ===")
@@ -249,6 +254,14 @@ def main():
     log.info("\n=== Backward-causal placebo (tomorrow's alert, controlling for today's real one) ===")
     for outcome in OUTCOMES:
         run(grid, f"{outcome}: placebo (tomorrow's alert)", outcome, "is_alert_hour_tomorrow", fe,
+            results, extra_controls=["is_alert_hour"])
+
+    log.info("\n=== Weekday/weekend FE instead of exact day-of-week (coarser, more obs/cell) ===")
+    for outcome in OUTCOMES:
+        run(grid, f"{outcome}: any alert message, weekend FE", outcome, "is_alert_hour", fe_weekend, results)
+    log.info("--- placebo under weekend FE (should stay null if this FE isn't hiding confounding) ---")
+    for outcome in OUTCOMES:
+        run(grid, f"{outcome}: placebo, weekend FE", outcome, "is_alert_hour_tomorrow", fe_weekend,
             results, extra_controls=["is_alert_hour"])
 
     out = pd.DataFrame(results)
