@@ -84,23 +84,46 @@ def haversine_miles(lat1, lon1, lat2, lon2):
     return EARTH_RADIUS_MI * 2 * np.arcsin(np.sqrt(a))
 
 
+LODES_DIST_PATH = DATA_PROC / "commuting" / "county_pair_lodes_distance.parquet"
+
+
 def build_weights_with_distance():
     weights = pd.read_parquet(ntm.COMMUTING_WEIGHTS_PATH)
     weights = weights[weights["fips_home"] != weights["fips_work"]].copy()
     weights["fips_home_s"] = weights["fips_home"].astype(str).str.zfill(5)
     weights["fips_work_s"] = weights["fips_work"].astype(str).str.zfill(5)
 
+    # Population-weighted centroid distance -- a fallback for the small
+    # share of edges LODES doesn't cover, and a sanity cross-check.
     cent = pd.read_parquet(DATA_PROC / "county_pop_centroids.parquet")
     cent["fips"] = cent["fips"].astype(str).str.zfill(5)
     cm = cent.set_index("fips")
-
     lat1 = weights["fips_home_s"].map(cm["lat"]); lon1 = weights["fips_home_s"].map(cm["lon"])
     lat2 = weights["fips_work_s"].map(cm["lat"]); lon2 = weights["fips_work_s"].map(cm["lon"])
-    weights["dist_mi"] = haversine_miles(lat1, lon1, lat2, lon2)
+    weights["dist_mi_centroid"] = haversine_miles(lat1, lon1, lat2, lon2)
+
+    # Primary source: LODES worker-weighted average distance per county
+    # pair (build_lodes_county_pair_distance.py) -- the true average over
+    # every real home-block/work-block pair, not a single centroid-to-
+    # centroid straight line. Falls back to the centroid distance for the
+    # edges LODES doesn't cover.
+    if LODES_DIST_PATH.exists():
+        lodes = pd.read_parquet(LODES_DIST_PATH)[["fips_home", "fips_work", "avg_dist_mi"]]
+        weights = weights.merge(
+            lodes.rename(columns={"fips_home": "fips_home_s", "fips_work": "fips_work_s"}),
+            on=["fips_home_s", "fips_work_s"], how="left")
+        n_lodes = weights["avg_dist_mi"].notna().sum()
+        log.info("LODES distance coverage: %d/%d edges (%.1f%%), %.1f%% of exposure weight",
+                 n_lodes, len(weights), 100 * n_lodes / len(weights),
+                 100 * weights.loc[weights["avg_dist_mi"].notna(), "weight"].sum() / weights["weight"].sum())
+        weights["dist_mi"] = weights["avg_dist_mi"].fillna(weights["dist_mi_centroid"])
+    else:
+        log.warning("LODES distance table not found -- using centroid distance only")
+        weights["dist_mi"] = weights["dist_mi_centroid"]
 
     n_total, w_total = len(weights), weights["weight"].sum()
     covered = weights.dropna(subset=["dist_mi"]).copy()
-    log.info("Centroid coverage: %d/%d edges (%.1f%%), %.1f%% of exposure weight",
+    log.info("Overall distance coverage: %d/%d edges (%.1f%%), %.1f%% of exposure weight",
              len(covered), n_total, 100 * len(covered) / n_total,
              100 * covered["weight"].sum() / w_total)
 
