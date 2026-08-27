@@ -288,6 +288,20 @@ def main():
     run(grid, "serious: first-alert-hour only", "serious_inj", "is_first_alert_hour",
         "fips_hour_dow + fips_year + year_month", "ols", results)
 
+    # Same treatment, but Update-only hours (is_alert_hour==1 & is_first_alert_hour==0
+    # -- a real alert, just not the first message) are dropped from the sample
+    # entirely rather than counted as controls, since they're not truly untreated
+    # and lumping them in could attenuate the estimate toward zero.
+    clean_grid = grid[~((grid["is_alert_hour"] == 1) & (grid["is_first_alert_hour"] == 0))]
+    log.info("  first-alert-only, Update-hours excluded from controls: %d rows (was %d)",
+             len(clean_grid), len(grid))
+    run(clean_grid, "fatals: first-alert-hour only, Update hours excluded", "person_fatals",
+        "is_first_alert_hour", "fips_hour_dow + fips_year + year_month", "ols", results)
+    run(clean_grid, "serious: first-alert-hour only, Update hours excluded", "serious_inj",
+        "is_first_alert_hour", "fips_hour_dow + fips_year + year_month", "ols", results)
+    del clean_grid
+    gc.collect()
+
     log.info("\n=== Backward-causal placebo: does TOMORROW's same-hour alert "
              "predict TODAY's crashes, controlling for today's real alert? ===")
     run(grid, "fatals: placebo (tomorrow's alert), robust FE", "person_fatals",
