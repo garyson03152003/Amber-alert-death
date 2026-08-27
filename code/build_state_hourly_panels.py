@@ -63,7 +63,7 @@ class SourceSpec:
 
     def __init__(self, *, key, module, datetime_col, tz, datetime_kind,
                  county_mapper, years, crash_col, day_panel, day_crash_col,
-                 unpack_first=False, out_fields=None):
+                 unpack_first=False, out_fields=None, severity_fn=None):
         self.key = key
         self.module = module
         # May be a single column name or several candidates: Massachusetts
@@ -87,6 +87,39 @@ class SourceSpec:
         # column (Iowa fetches CRASH_DATE but not CRASH_DATETIME), so the
         # hourly build widens it for the duration of the fetch.
         self.out_fields = out_fields
+        # Optional callable(df) -> (fatals: Series, serious_inj: Series),
+        # applied to the raw per-crash frame (same rows/index as df) once its
+        # severity source columns are confirmed present. None means this
+        # state's raw source has no usable per-crash severity count (e.g.
+        # Delaware is categorical-only) or would need a cross-table join the
+        # generic builder doesn't perform (Connecticut's Person layer) --
+        # such states keep the count-only hourly panel as before.
+        self.severity_fn = severity_fn
+
+
+def _ut_severity(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """UT: direct crash-level count fields, same as build_utah_udot.py."""
+    fatals = pd.to_numeric(df["NUMBER_FATALITIES"], errors="coerce").fillna(0)
+    serious = pd.to_numeric(df["NUMBER_FOUR_INJURIES"], errors="coerce").fillna(0)
+    return fatals, serious
+
+
+def _ia_severity(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """IA: direct crash-level count fields, same as build_iowa_dot.py."""
+    fatals = pd.to_numeric(df["FATALITIES"], errors="coerce").fillna(0)
+    serious = pd.to_numeric(df["MAJINJURY"], errors="coerce").fillna(0)
+    return fatals, serious
+
+
+def _ma_severity(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """MA: fatals is a direct count; serious injuries is the non-fatal-injury
+    count restricted to crashes whose worst injury is KABCO-A
+    ("Incapacitating"), same proxy as build_massachusetts_massdot.py."""
+    fatals = pd.to_numeric(df["NUMB_FATAL_INJR"], errors="coerce").fillna(0)
+    all_injured = pd.to_numeric(df["NUMB_NONFATAL_INJR"], errors="coerce").fillna(0)
+    is_serious = df["MAX_INJR_SVRTY_CL"].astype(str).str.contains("Incapacitating", na=False)
+    serious = all_injured.where(is_serious, 0)
+    return fatals, serious
 
 
 SPECS = {
@@ -97,6 +130,7 @@ SPECS = {
         county_mapper=("county_to_fips", "COUNTY_NAME"),
         years=range(2018, 2025), crash_col="ut_crashes",
         day_panel="utah_udot_county_day.parquet", day_crash_col="ut_crashes",
+        severity_fn=_ut_severity,
     ),
     # Delaware Socrata serves ISO 8601 with a trailing Z.
     "DE": SourceSpec(
@@ -116,6 +150,7 @@ SPECS = {
         years=range(2013, 2021), crash_col="ma_crashes",
         day_panel="massachusetts_massdot_county_day.parquet",
         day_crash_col="ma_crashes",
+        severity_fn=_ma_severity,
     ),
     # Connecticut ArcGIS epoch milliseconds. Genuine UTC: the service declares
     # timeZoneIANA America/New_York with DST, and converting moves the peak
@@ -140,6 +175,7 @@ SPECS = {
         day_panel="iowa_dot_county_day.parquet", day_crash_col="ia_crashes",
         out_fields=("CRASH_DATETIME,CRASH_DATE,COUNTY_NAME,FATALITIES,"
                     "MAJINJURY,INJURIES,CRASH_MONTH,CRASH_DAY"),
+        severity_fn=_ia_severity,
     ),
 }
 
@@ -234,7 +270,23 @@ def reconcile_with_day_panel(hourly: pd.DataFrame, spec: SourceSpec) -> dict:
     agree = float((diff < 1e-6).mean())
     log.info("[%s] county-day reconciliation: %.4f of overlapping county-days match",
              spec.key, agree)
-    return {"reconciled": agree, "n_compared": int(len(joined))}
+    result = {"reconciled": agree, "n_compared": int(len(joined))}
+
+    if spec.severity_fn is not None:
+        for sev_col in (f"{spec.key.lower()}_fatals", f"{spec.key.lower()}_serious_inj"):
+            if sev_col not in day.columns or sev_col not in hourly.columns:
+                continue
+            lhs_s = hourly.groupby(["fips", "date"])[sev_col].sum()
+            rhs_s = day.set_index(["fips", pd.to_datetime(day["date"]).dt.normalize()])[sev_col]
+            rhs_s.index.names = ["fips", "date"]
+            joined_s = pd.concat([lhs_s.rename("hourly"), rhs_s.rename("daily")], axis=1).dropna()
+            if joined_s.empty:
+                continue
+            agree_s = float(((joined_s["hourly"] - joined_s["daily"]).abs() < 1e-6).mean())
+            log.info("[%s] %s reconciliation: %.4f of overlapping county-days match",
+                     spec.key, sev_col, agree_s)
+            result[f"{sev_col}_reconciled"] = agree_s
+    return result
 
 
 def build_state(spec: SourceSpec) -> pd.DataFrame | None:
@@ -283,16 +335,28 @@ def build_state(spec: SourceSpec) -> pd.DataFrame | None:
         df = df.dropna(subset=["fips"])
         df["date"] = df["_local"].dt.normalize()
         df["hour"] = df["_local"].dt.hour
-        agg = (df.groupby(["fips", "date", "hour"], as_index=False)
-                 .size().rename(columns={"size": spec.crash_col}))
+        if spec.severity_fn is not None:
+            fatals_col = f"{spec.key.lower()}_fatals"
+            serious_col = f"{spec.key.lower()}_serious_inj"
+            df[fatals_col], df[serious_col] = spec.severity_fn(df)
+            agg = (df.groupby(["fips", "date", "hour"], as_index=False)
+                     .agg(**{spec.crash_col: (fatals_col, "count"),
+                             fatals_col: (fatals_col, "sum"),
+                             serious_col: (serious_col, "sum")}))
+        else:
+            agg = (df.groupby(["fips", "date", "hour"], as_index=False)
+                     .size().rename(columns={"size": spec.crash_col}))
         frames.append(agg)
         log.info("[%s] %d -> %s county-hours", spec.key, year, f"{len(agg):,}")
 
     if not frames:
         log.error("[%s] no data built", spec.key)
         return None
+    sum_cols = [spec.crash_col]
+    if spec.severity_fn is not None:
+        sum_cols += [f"{spec.key.lower()}_fatals", f"{spec.key.lower()}_serious_inj"]
     return (pd.concat(frames, ignore_index=True)
-              .groupby(["fips", "date", "hour"], as_index=False)[spec.crash_col].sum())
+              .groupby(["fips", "date", "hour"], as_index=False)[sum_cols].sum())
 
 
 def main(argv: list[str] | None = None) -> None:
