@@ -29,6 +29,7 @@ Output: output/tables/reg_hours_since_wake_dose_response.csv
   + a slope-test summary logged at the end (not written to CSV, since
   it is two numbers derived from the table above, not a new regression)
 """
+import gc
 import sys
 import warnings
 from pathlib import Path
@@ -80,6 +81,8 @@ def fit(grid, label, treat, extra_controls, results, hours_since_wake):
     results.append({"label": label, "hour": hours_since_wake + WAKE_HOUR,
                     "hours_since_wake": hours_since_wake, "coef": coef, "se": se, "pval": pval,
                     "nobs": int(fit_._N)})
+    del fit_, sub
+    gc.collect()
 
 
 def weighted_slope_test(df: pd.DataFrame, label: str):
@@ -140,6 +143,12 @@ def main():
             ["cross_spillover"], results, hsw)
         fit(grid, "CROSS_SPILLOVER (own-controlled)", "cross_spillover",
             ["night_alert"], results, hsw)
+
+        del grid
+        gc.collect()
+        # Checkpoint after every hour so a crash doesn't lose all progress
+        # (this script OOM-killed once already without this).
+        pd.DataFrame(results).to_csv(OUTPUT_TABS / "reg_hours_since_wake_dose_response.csv", index=False)
 
     out = pd.DataFrame(results)
     out_path = OUTPUT_TABS / "reg_hours_since_wake_dose_response.csv"
