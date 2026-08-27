@@ -5,15 +5,50 @@ Does the exact clock hour an AMBER alert is issued show elevated fatal
 crashes (the "immediate distraction" / H1 mechanism), compared to the
 same county/hour/weekday on nearby dates without an alert?
 
-Design: case-crossover. For each alert-hour event, the control set is the
-same county, same hour-of-day, same day-of-week, on dates within +/- 4
-weeks of the alert (excluding the alert date itself). This is a tighter
-local-time match than comparing against the entire multi-year history: it
-controls for seasonal drift and county-specific trends directly, at the
-cost of a smaller (but still large) control pool, and avoids materialising
-a full national county x date x hour panel (which does not fit in memory
-at this county count -- see the random-subsample fallback below for
-environments too memory-constrained even for the windowed version).
+Design: proper time-stratified case-crossover referent sampling. For
+every alert-hour event, the control/referent set is the SAME county and
+SAME exact hour-of-day, on OTHER nearby dates that match on day type, one
+of two ways:
+
+  day_match="dow": the exact same day-of-week, at offsets of
+    +/-7,+/-14,+/-21,+/-28 days (the classic case-crossover "time-
+    stratified" referent scheme -- up to 8 referent dates per event).
+    This is the primary spec (fips_hour_dow FE).
+  day_match="weekend": any date in the +/-28-day window whose
+    weekend/weekday classification matches the event's own -- a looser
+    day match (many more referent dates per event) that trades exact
+    weekday matching for a larger, still-relevant control pool. Reported
+    as a secondary spec (fips_hour_weekend FE).
+
+Both hold the HOUR fixed exactly; only the day-matching criterion differs
+between them. A third possibility -- coarsening the HOUR dimension too
+(e.g. to a PEAK/MID/LOW tercile) -- was tried in an earlier round of this
+analysis and dropped: it does not hold "same time" in any meaningful
+sense, made precision worse rather than better (hour-of-day carries far
+more signal than day-of-week -- PEAK hours run ~7x LOW-hour crash volume),
+and a version combining it with a coarsened day match held NEITHER
+dimension exact. What that earlier round is kept for is the tier
+BREAKDOWN below: splitting the (exact-hour, exact-weekday-matched) sample
+by which tier the alert hour itself falls into, to test whether the
+effect differs by time of day -- this preserves exact hour+weekday
+matching throughout; only the sample is subset, not the FE.
+
+Why this replaced the original grid construction
+--------------------------------------------------
+The original version crossed every date in a county's +/-28-day alert
+window with ALL 24 hours, then kept every alert-hour row plus a random
+20% subsample of everything else, to keep the national grid from
+exceeding memory (13.2M rows). But under fips_hour_dow FE, only cells
+that actually contain an alert can identify the treatment coefficient --
+checking directly, just 25.7% of that grid's (fips, hour, dow) cells
+(72,323 of 281,254) ever contained one. The other ~74% of cells, and most
+of the rows in them, were dead weight for this coefficient: present only
+because of the "cross with all 24 hours" construction, not because they
+were ever a relevant comparison. Building referent dates directly --
+only for the (fips, hour) pairs and day-types that alerts actually
+touched -- removes that dead weight and the need for random subsampling
+entirely, while also being the textbook-correct case-crossover design
+rather than an approximation of one.
 
 Robustness additions (matching the standard set for the sleep-channel
 analysis elsewhere in this repo):
@@ -21,34 +56,24 @@ analysis elsewhere in this repo):
      clustering absorbs within-state correlation from statewide alert
      campaigns, but misses same-day correlation across DIFFERENT states.
   2. fips_year FE added alongside fips_hour_dow + year_month, so each
-     county can trend independently of the national year-month effect
-     (fips_hour_dow + a NATIONAL year_month doesn't let one county's
-     crash rate drift up or down relative to the nation over 2013-2024).
+     county can trend independently of the national year-month effect.
   3. "First alert of a campaign only" as a sharper treatment definition
      (msg_type == "Alert", excluding "Update" follow-ups) alongside the
-     original "any alert message" definition -- if the immediate-
-     distraction reaction is a one-time response to the first alert
-     someone sees, lumping in repeat Update-message hours dilutes it.
-  4. A backward-causal placebo done the way this repo learned to do it
-     correctly: does a FUTURE alert hour "predict" THIS hour's crashes,
-     jointly controlling for whether this hour's own alert status is
-     real (alert campaigns are serially correlated across hours/days,
-     so a naive placebo without that control can look spuriously
-     significant -- this bit us on the sleep-channel own-alert term
-     earlier in this project and was fixed by controlling for the real
-     contemporaneous exposure).
+     original "any alert message" definition.
+  4. A backward-causal placebo: does a FUTURE alert hour "predict" THIS
+     hour's crashes, jointly controlling for whether this hour's own
+     alert status is real (alert campaigns are serially correlated
+     across hours/days, so a naive placebo without that control can look
+     spuriously significant).
 
 Not attempted here: same-day weather matching, DUI-crash exclusion, and
 a station-hour traffic-volume control (the last would require building
-an entirely new FHWA TMAS pipeline per TRAFFIC_VOLUME_INSTRUCTIONS.md --
-a separate, much larger undertaking than a quick addition to this script,
-and out of scope for this round).
+an entirely new FHWA TMAS pipeline per TRAFFIC_VOLUME_INSTRUCTIONS.md).
 
-Reports both OLS (linear probability/count) and PPML (Poisson) -- PPML is
-the more standard model for rare-count crash outcomes, but suffers heavy
-"separation" data loss here (most county-hour-weekday cells have zero
-fatalities across the whole window), so OLS is reported as the primary,
-better-powered estimate and PPML as a check.
+Reports both OLS (linear probability/count) and PPML (Poisson) on the
+primary spec -- PPML is the more standard model for rare-count crash
+outcomes, but suffers heavy "separation" data loss here, so OLS is the
+primary, better-powered estimate and PPML a check.
 
 Data
 ----
@@ -78,10 +103,14 @@ log = get_logger("same_hour_event_study")
 OUTPUT_TABS.mkdir(parents=True, exist_ok=True)
 
 WINDOW_DAYS = 28
-CONTROL_SAMPLE_FRAC = 0.2  # subsample of non-alert control hours, per county
 MIN_FATALS_PER_YEAR = 5
-SEED = 42
 CLUSTER_VARS = "state_code + date_str"
+
+# PEAK/MID/LOW hour tercile, from output/tables/national_hourly_volume_profile.csv
+# (national crash-volume share by hour): LOW = 22:00-05:00, MID = 06:00-10:00
+# & 19:00-21:00, PEAK = 11:00-18:00 -- each exactly 8 hours.
+LOW_HOURS = {0, 1, 2, 3, 4, 5, 22, 23}
+MID_HOURS = {6, 7, 8, 9, 10, 19, 20, 21}
 
 
 def active_counties() -> set[str]:
@@ -115,79 +144,82 @@ def load_any_time_alert_hours(active: set[str]) -> pd.DataFrame:
     return alerts
 
 
-def build_case_crossover_grid(ev: pd.DataFrame, active: set[str]) -> pd.DataFrame:
+def build_matched_referent_grid(ev: pd.DataFrame, *, day_match: str) -> pd.DataFrame:
+    """Time-stratified case-crossover referent grid: same county, same
+    exact hour, on OTHER dates matching the event's day type.
+
+    day_match="dow": referent dates are the exact same day-of-week, at
+      offsets of +/-7,+/-14,+/-21,+/-28 days (8 referents/event).
+    day_match="weekend": referent dates are any date in +/-28 days whose
+      weekend/weekday classification matches the event's own.
+    """
     hourly = pd.read_parquet(DATA_PROC / "fars_hourly_county_day.parquet")
     hourly["date"] = pd.to_datetime(hourly["date"])
-    hourly_by_fips = {f: g for f, g in hourly[hourly["fips"].isin(active)].groupby("fips")}
-    ev_by_fips = {f: g for f, g in ev.groupby("fips")}
 
-    rng = np.random.default_rng(SEED)
-    hour_df = pd.DataFrame({"hour": np.arange(24, dtype="int8")})
+    ev = ev.copy()
+    ev["dow"] = ev["date"].dt.dayofweek.astype("int8")
+    ev["weekend"] = (ev["dow"] >= 5).astype("int8")
     full_lo, full_hi = pd.Timestamp("2013-01-01"), pd.Timestamp("2024-12-30")
 
-    chunks = []
-    for fips5, erows in ev_by_fips.items():
-        alert_dates = erows["date"].unique()
-        keep_dates = set()
-        for d in alert_dates:
-            d = pd.Timestamp(d)
-            lo = max(d - pd.Timedelta(days=WINDOW_DAYS), full_lo)
-            hi = min(d + pd.Timedelta(days=WINDOW_DAYS), full_hi)
-            keep_dates.update(pd.date_range(lo, hi, freq="D"))
+    if day_match == "dow":
+        offsets = [-28, -21, -14, -7, 0, 7, 14, 21, 28]
+    elif day_match == "weekend":
+        offsets = list(range(-WINDOW_DAYS, WINDOW_DAYS + 1))
+    else:
+        raise ValueError(day_match)
 
-        dd = pd.DataFrame({"date": sorted(keep_dates)})
-        g = dd.merge(hour_df, how="cross")
-        g["dow"] = g["date"].dt.dayofweek.astype("int8")
-        g["month"] = g["date"].dt.month.astype("int8")
-        g["year"] = g["date"].dt.year.astype("int16")
-        g["fips"] = fips5
+    frames = []
+    for off in offsets:
+        tmp = ev[["fips", "hour", "weekend", "date"]].copy()
+        tmp["date"] = tmp["date"] + pd.Timedelta(days=off)
+        frames.append(tmp)
+    referent = pd.concat(frames, ignore_index=True)
+    referent = referent[(referent["date"] >= full_lo) & (referent["date"] <= full_hi)]
+    referent["dow"] = referent["date"].dt.dayofweek.astype("int8")
 
-        hrows = hourly_by_fips.get(fips5)
-        if hrows is not None:
-            g = g.merge(hrows[["date", "hour", "person_fatals", "serious_inj"]],
-                       on=["date", "hour"], how="left")
-        else:
-            g["person_fatals"] = np.nan
-            g["serious_inj"] = np.nan
-        g["person_fatals"] = g["person_fatals"].fillna(0).astype("float32")
-        g["serious_inj"] = g["serious_inj"].fillna(0).astype("float32")
+    if day_match == "weekend":
+        cand_weekend = (referent["dow"] >= 5).astype("int8")
+        referent = referent[cand_weekend == referent["weekend"]]
+    # For day_match=="dow" the offsets are multiples of 7, so every
+    # candidate date automatically shares the event's exact weekday --
+    # no filter needed.
 
-        g["is_alert_hour"] = 0
-        g = g.merge(erows[["date", "hour"]].assign(_flag=1).drop_duplicates(["date", "hour"]),
-                   on=["date", "hour"], how="left")
-        g["is_alert_hour"] = g["_flag"].fillna(0).astype("int8")
-        g = g.drop(columns="_flag")
+    referent = referent.drop(columns="weekend").drop_duplicates(subset=["fips", "hour", "date"])
+    referent["month"] = referent["date"].dt.month.astype("int8")
+    referent["year"] = referent["date"].dt.year.astype("int16")
 
-        if "msg_type" in erows.columns:
-            first_only = erows.loc[erows["msg_type"] == "Alert", ["date", "hour"]].drop_duplicates()
-            first_only["_flag2"] = 1
-            g = g.merge(first_only, on=["date", "hour"], how="left")
-            g["is_first_alert_hour"] = g["_flag2"].fillna(0).astype("int8")
-            g = g.drop(columns="_flag2")
-        else:
-            g["is_first_alert_hour"] = g["is_alert_hour"]
+    referent = referent.merge(hourly[["fips", "date", "hour", "person_fatals", "serious_inj"]],
+                               on=["fips", "date", "hour"], how="left")
+    referent["person_fatals"] = referent["person_fatals"].fillna(0).astype("float32")
+    referent["serious_inj"] = referent["serious_inj"].fillna(0).astype("float32")
 
-        # Future-hour placebo: shift the alert flag back by 24h (i.e. this
-        # row's placebo flag = 1 if the SAME hour tomorrow had a real
-        # alert). Built from the full alert-hour set (not the +/-28-day
-        # windowed one) so a placebo date isn't spuriously dropped just
-        # because it falls outside this county's own kept-dates window.
-        placebo_dates = (erows[["date", "hour"]].drop_duplicates()
-                        .assign(date=lambda d: d["date"] - pd.Timedelta(days=1), _flag3=1))
-        g = g.merge(placebo_dates, on=["date", "hour"], how="left")
-        g["is_alert_hour_tomorrow"] = g["_flag3"].fillna(0).astype("int8")
-        g = g.drop(columns="_flag3")
+    alert_set = ev[["fips", "date", "hour"]].drop_duplicates()
+    alert_set["_flag"] = 1
+    referent = referent.merge(alert_set, on=["fips", "date", "hour"], how="left")
+    referent["is_alert_hour"] = referent["_flag"].fillna(0).astype("int8")
+    referent = referent.drop(columns="_flag")
 
-        mask_alert = g["is_alert_hour"] == 1
-        mask_keep = rng.random(len(g)) < CONTROL_SAMPLE_FRAC
-        chunks.append(g[mask_alert | mask_keep].copy())
+    if "msg_type" in ev.columns:
+        first_only = ev.loc[ev["msg_type"] == "Alert", ["fips", "date", "hour"]].drop_duplicates()
+        first_only["_flag2"] = 1
+        referent = referent.merge(first_only, on=["fips", "date", "hour"], how="left")
+        referent["is_first_alert_hour"] = referent["_flag2"].fillna(0).astype("int8")
+        referent = referent.drop(columns="_flag2")
+    else:
+        referent["is_first_alert_hour"] = referent["is_alert_hour"]
 
-    grid = pd.concat(chunks, ignore_index=True)
-    log.info("Case-crossover grid (+/- %d days, %.0f%% control subsample): "
-             "%d rows, %d alert-hour rows, %d first-alert-hour rows",
-             WINDOW_DAYS, 100 * CONTROL_SAMPLE_FRAC, len(grid),
-             int(grid["is_alert_hour"].sum()), int(grid["is_first_alert_hour"].sum()))
-    return grid
+    placebo = alert_set[["fips", "hour", "date"]].copy()
+    placebo["date"] = placebo["date"] - pd.Timedelta(days=1)
+    placebo["_flag3"] = 1
+    referent = referent.merge(placebo, on=["fips", "hour", "date"], how="left")
+    referent["is_alert_hour_tomorrow"] = referent["_flag3"].fillna(0).astype("int8")
+    referent = referent.drop(columns="_flag3")
+
+    log.info("Matched-referent grid (day_match=%s, +/-%d days): %d rows, "
+             "%d alert-hour rows, %d first-alert-hour rows",
+             day_match, WINDOW_DAYS, len(referent), int(referent["is_alert_hour"].sum()),
+             int(referent["is_first_alert_hour"].sum()))
+    return referent
 
 
 def _sig(p):
@@ -220,33 +252,23 @@ def main():
     active = active_counties()
     log.info("Active (>=%d fatals/yr) counties: %d", MIN_FATALS_PER_YEAR, len(active))
     ev = load_any_time_alert_hours(active)
-    grid = build_case_crossover_grid(ev, active)
 
+    results = []
+
+    # ------------------------------------------------------------------
+    # Primary spec: exact hour + exact day-of-week referent matching.
+    # ------------------------------------------------------------------
+    grid = build_matched_referent_grid(ev, day_match="dow")
     grid["fips_hour_dow"] = grid["fips"] + "_" + grid["hour"].astype(str) + "_" + grid["dow"].astype(str)
-    grid["weekend"] = (grid["dow"] >= 5).astype(int)
-    grid["fips_hour_weekend"] = grid["fips"] + "_" + grid["hour"].astype(str) + "_" + grid["weekend"].astype(str)
-
-    # PEAK/MID/LOW hour tercile, from output/tables/national_hourly_volume_profile.csv
-    # (national crash-volume share by hour): LOW = 22:00-05:00, MID = 06:00-10:00
-    # & 19:00-21:00, PEAK = 11:00-18:00 -- each exactly 8 hours.
-    LOW_HOURS = {0, 1, 2, 3, 4, 5, 22, 23}
-    MID_HOURS = {6, 7, 8, 9, 10, 19, 20, 21}
-    grid["hour_tier"] = np.where(grid["hour"].isin(LOW_HOURS), "LOW",
-                          np.where(grid["hour"].isin(MID_HOURS), "MID", "PEAK"))
-    grid["fips_tier_dow"] = grid["fips"] + "_" + grid["hour_tier"] + "_" + grid["dow"].astype(str)
-    grid["fips_tier_weekend"] = grid["fips"] + "_" + grid["hour_tier"] + "_" + grid["weekend"].astype(str)
-
     grid["year_month"] = grid["year"].astype(str) + "_" + grid["month"].astype(str)
     grid["fips_year"] = grid["fips"] + "_" + grid["year"].astype(str)
     grid["state_code"] = grid["fips"].str[:2]
     grid["date_str"] = grid["date"].dt.strftime("%Y-%m-%d")
-    log.info("FE cell counts: fips_hour_dow=%d, fips_hour_weekend=%d, "
-             "fips_tier_dow=%d, fips_tier_weekend=%d",
-             grid["fips_hour_dow"].nunique(), grid["fips_hour_weekend"].nunique(),
-             grid["fips_tier_dow"].nunique(), grid["fips_tier_weekend"].nunique())
+    grid["hour_tier"] = np.where(grid["hour"].isin(LOW_HOURS), "LOW",
+                          np.where(grid["hour"].isin(MID_HOURS), "MID", "PEAK"))
+    log.info("FE cell count: fips_hour_dow=%d", grid["fips_hour_dow"].nunique())
 
-    results = []
-    log.info("\n=== Same-hour case-crossover (+/- %d days), any alert message ===", WINDOW_DAYS)
+    log.info("\n=== Same-hour case-crossover (exact hour + exact dow referents), any alert message ===")
     run(grid, "fatals: fips_hour_dow + year_month FE", "person_fatals", "is_alert_hour",
         "fips_hour_dow + year_month", "ols", results)
     run(grid, "fatals: fips_hour_dow + year_month FE", "person_fatals", "is_alert_hour",
@@ -272,29 +294,43 @@ def main():
         "is_alert_hour_tomorrow", "fips_hour_dow + fips_year + year_month", "ols", results,
         extra_controls=["is_alert_hour"])
 
-    log.info("\n=== Weekday/weekend FE instead of exact day-of-week (coarser, more obs/cell) ===")
-    run(grid, "fatals: weekend FE", "person_fatals", "is_alert_hour",
-        "fips_hour_weekend + fips_year + year_month", "ols", results)
-    run(grid, "serious: weekend FE", "serious_inj", "is_alert_hour",
-        "fips_hour_weekend + fips_year + year_month", "ols", results)
-    run(grid, "fatals: placebo, weekend FE", "person_fatals", "is_alert_hour_tomorrow",
-        "fips_hour_weekend + fips_year + year_month", "ols", results,
-        extra_controls=["is_alert_hour"])
+    log.info("\n=== Heterogeneity: does the alert-hour effect differ across PEAK/MID/LOW "
+             "hours? (subsample by hour_tier; exact hour+dow matching preserved) ===")
+    for tier in ("PEAK", "MID", "LOW"):
+        sub_grid = grid[grid["hour_tier"] == tier]
+        n_alert = int(sub_grid["is_alert_hour"].sum())
+        log.info("  [%s] %d rows, %d alert-hours", tier, len(sub_grid), n_alert)
+        run(sub_grid, f"fatals: {tier}-hour subsample, robust FE", "person_fatals", "is_alert_hour",
+            "fips_hour_dow + fips_year + year_month", "ols", results)
+        run(sub_grid, f"serious: {tier}-hour subsample, robust FE", "serious_inj", "is_alert_hour",
+            "fips_hour_dow + fips_year + year_month", "ols", results)
+        del sub_grid
+        gc.collect()
 
-    log.info("\n=== PEAK/MID/LOW hour tier FE instead of exact hour-of-day (coarser still) ===")
-    run(grid, "fatals: tier+dow FE", "person_fatals", "is_alert_hour",
-        "fips_tier_dow + fips_year + year_month", "ols", results)
-    run(grid, "serious: tier+dow FE", "serious_inj", "is_alert_hour",
-        "fips_tier_dow + fips_year + year_month", "ols", results)
-    run(grid, "fatals: placebo, tier+dow FE", "person_fatals", "is_alert_hour_tomorrow",
-        "fips_tier_dow + fips_year + year_month", "ols", results,
-        extra_controls=["is_alert_hour"])
-    run(grid, "fatals: tier+weekend FE", "person_fatals", "is_alert_hour",
-        "fips_tier_weekend + fips_year + year_month", "ols", results)
-    run(grid, "serious: tier+weekend FE", "serious_inj", "is_alert_hour",
-        "fips_tier_weekend + fips_year + year_month", "ols", results)
-    run(grid, "fatals: placebo, tier+weekend FE", "person_fatals", "is_alert_hour_tomorrow",
-        "fips_tier_weekend + fips_year + year_month", "ols", results,
+    del grid
+    gc.collect()
+
+    # ------------------------------------------------------------------
+    # Secondary spec: exact hour + weekend/weekday referent matching
+    # (looser day match, larger referent pool per event).
+    # ------------------------------------------------------------------
+    grid_wk = build_matched_referent_grid(ev, day_match="weekend")
+    grid_wk["weekend"] = (grid_wk["dow"] >= 5).astype(int)
+    grid_wk["fips_hour_weekend"] = (grid_wk["fips"] + "_" + grid_wk["hour"].astype(str) + "_"
+                                     + grid_wk["weekend"].astype(str))
+    grid_wk["year_month"] = grid_wk["year"].astype(str) + "_" + grid_wk["month"].astype(str)
+    grid_wk["fips_year"] = grid_wk["fips"] + "_" + grid_wk["year"].astype(str)
+    grid_wk["state_code"] = grid_wk["fips"].str[:2]
+    grid_wk["date_str"] = grid_wk["date"].dt.strftime("%Y-%m-%d")
+    log.info("FE cell count: fips_hour_weekend=%d", grid_wk["fips_hour_weekend"].nunique())
+
+    log.info("\n=== Secondary spec: exact hour + weekend/weekday referents, robust FE ===")
+    run(grid_wk, "fatals: weekend-matched FE", "person_fatals", "is_alert_hour",
+        "fips_hour_weekend + fips_year + year_month", "ols", results)
+    run(grid_wk, "serious: weekend-matched FE", "serious_inj", "is_alert_hour",
+        "fips_hour_weekend + fips_year + year_month", "ols", results)
+    run(grid_wk, "fatals: placebo, weekend-matched FE", "person_fatals", "is_alert_hour_tomorrow",
+        "fips_hour_weekend + fips_year + year_month", "ols", results,
         extra_controls=["is_alert_hour"])
 
     out = pd.DataFrame(results)
