@@ -1,4 +1,9 @@
 label,outcome,model,fe,coef,se,pval,nobs,pct_change
-fatals: fips_hour_dow + year_month FE,person_fatals,ols,fips_hour_dow + year_month,0.00024701775174304177,0.0001868427658393071,0.19216399013497565,13219986,
-fatals: fips_hour_dow + year_month FE,person_fatals,ppml,fips_hour_dow + year_month,0.08248810299421962,0.061039150876520676,0.17656841169810922,1596890,8.598575338341629
-serious: fips_hour_dow + year_month FE,serious_inj,ols,fips_hour_dow + year_month,-0.00011882728077940344,7.908769185822316e-05,0.13926442377626613,13219986,
+fatals: fips_hour_dow + year_month FE,person_fatals,ols,fips_hour_dow + year_month,0.00024701775174304177,0.00018762653145548355,0.1939961169837403,13219986,
+fatals: fips_hour_dow + year_month FE,person_fatals,ppml,fips_hour_dow + year_month,0.08248810299421962,0.06128524647739593,0.17831219289361888,1596890,8.598575338341629
+serious: fips_hour_dow + year_month FE,serious_inj,ols,fips_hour_dow + year_month,-0.00011882728077940344,7.936082310903435e-05,0.14060085515824916,13219986,
+fatals: robust FE,person_fatals,ols,fips_hour_dow + fips_year + year_month,0.00023906071105520384,0.00018913905345552075,0.21211197212704325,13219983,
+serious: robust FE,serious_inj,ols,fips_hour_dow + fips_year + year_month,-0.00011754745237163149,8.090100836111076e-05,0.15247719965736617,13219983,
+fatals: first-alert-hour only,person_fatals,ols,fips_hour_dow + fips_year + year_month,0.00018213969428807763,0.00021678607921200212,0.4048062913204489,13219983,
+serious: first-alert-hour only,serious_inj,ols,fips_hour_dow + fips_year + year_month,-0.00012276573287865993,8.435870300243255e-05,0.1518412007439156,13219983,
+"fatals: placebo (tomorrow's alert), robust FE",person_fatals,ols,fips_hour_dow + fips_year + year_month,-0.00043313554925610687,0.0004027898253487348,0.287384818133386,13219983,

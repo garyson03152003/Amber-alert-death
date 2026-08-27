@@ -389,7 +389,8 @@ def load_verified_alerts(*, window: str = "night", detail: bool = False,
         alerts.loc[evening, "effective_crash_date"] += pd.Timedelta(days=1)
 
     if detail:
-        return alerts[[
+        msg_type_col = ["msg_type"] if "msg_type" in alerts.columns else []
+        return alerts[msg_type_col + [
             "alert_id", "fips", "state_fips", "tz_name",
             "sent_local", "hour_local", "effective_crash_date",
         ]].reset_index(drop=True)
