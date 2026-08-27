@@ -73,8 +73,16 @@ def load_own_county_factors() -> pd.DataFrame:
     self_d = lodes[lodes["fips_home"] == lodes["fips_work"]].copy()
     self_d = self_d.rename(columns={"fips_home": "fips", "avg_dist_mi": "own_dist_mi"})[["fips", "own_dist_mi"]]
 
+    # TRUE tract-preserved joint car_share x distance for the self-loop
+    # (intra-county) rows -- see build_lodes_tract_car_dosage.py.
+    lodes_car = pd.read_parquet(DATA_PROC / "commuting" / "county_pair_lodes_car_dosage.parquet")
+    self_car_dist = lodes_car[lodes_car["fips_home"] == lodes_car["fips_work"]].copy()
+    self_car_dist = self_car_dist.rename(
+        columns={"fips_home": "fips", "avg_car_x_dist": "own_car_x_dist"})[["fips", "own_car_x_dist"]]
+
     out = self_w.merge(car[["fips", "car_share"]], on="fips", how="outer") \
-                .merge(self_d, on="fips", how="outer")
+                .merge(self_d, on="fips", how="outer") \
+                .merge(self_car_dist, on="fips", how="outer")
     # NHTS distance-adjusted car share, evaluated at each county's own
     # (short, intra-county) average commute distance -- see
     # build_nhts_car_share_by_distance.py. The flat ACS car_share applies
@@ -86,10 +94,13 @@ def load_own_county_factors() -> pd.DataFrame:
     # car-dependent county's intra-county trips of the same distance).
     out["car_share_msa_adj"] = car_share_from_distance_by_county(
         out["own_dist_mi"].fillna(out["own_dist_mi"].mean()), out["fips"])
+    out["own_car_x_dist"] = out["own_car_x_dist"].fillna(
+        out["car_share_dist_adj"] * out["own_dist_mi"])  # fallback for uncovered counties
     log.info("Own-county factors: %d counties, own_weight mean=%.3f, car_share mean=%.3f, "
-             "own_dist_mi mean=%.2f, car_share_dist_adj mean=%.3f, car_share_msa_adj mean=%.3f",
+             "own_dist_mi mean=%.2f, car_share_dist_adj mean=%.3f, car_share_msa_adj mean=%.3f, "
+             "own_car_x_dist (TRUE joint) mean=%.3f",
              len(out), out["own_weight"].mean(), out["car_share"].mean(), out["own_dist_mi"].mean(),
-             out["car_share_dist_adj"].mean(), out["car_share_msa_adj"].mean())
+             out["car_share_dist_adj"].mean(), out["car_share_msa_adj"].mean(), out["own_car_x_dist"].mean())
     return out
 
 
@@ -125,7 +136,7 @@ def main():
 
     # Fill missing factors with the national mean so a handful of
     # uncovered counties don't drop out of the FE regression entirely.
-    for col in ["own_weight", "car_share", "own_dist_mi", "car_share_msa_adj"]:
+    for col in ["own_weight", "car_share", "own_dist_mi", "car_share_msa_adj", "own_car_x_dist"]:
         grid[col] = grid[col].fillna(grid[col].mean())
 
     grid["own_weight_dosage"] = grid["own_weight"] * grid["night_alert"]
@@ -134,6 +145,7 @@ def main():
     grid["own_full_dosage"] = grid["own_weight"] * grid["car_share"] * grid["own_dist_mi"] * grid["night_alert"]
     grid["own_full_dosage_msa_adj"] = (grid["own_weight"] * grid["car_share_msa_adj"] *
                                        grid["own_dist_mi"] * grid["night_alert"])
+    grid["own_true_joint_dosage"] = grid["own_weight"] * grid["own_car_x_dist"] * grid["night_alert"]
 
     results = []
     log.info("=== Own-county dosage variants (all jointly controlled for cross_spillover) ===")
@@ -144,6 +156,8 @@ def main():
     fit(grid, "own_weight x car_share x own_dist_mi x night_alert (full dosage)", "own_full_dosage", results)
     fit(grid, "own_weight x car_share_METRO+DIST-ADJUSTED x own_dist_mi x night_alert (NYC!=LA)",
         "own_full_dosage_msa_adj", results)
+    fit(grid, "own_weight x TRUE-JOINT car_x_dist x night_alert (tract-preserved LODES)",
+        "own_true_joint_dosage", results)
 
     out = pd.DataFrame(results)
     out_path = OUTPUT_TABS / "reg_own_county_dosage.csv"

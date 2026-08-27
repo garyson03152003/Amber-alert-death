@@ -118,6 +118,25 @@ def main():
     weights_dist["weight_x_car_msa_adj"] = weights_dist["weight"] * weights_dist["car_share_msa_adj"]
     weights_dist["weight_x_car_msa_adj_x_dist"] = weights_dist["weight_x_car_msa_adj"] * weights_dist["dist_mi"]
 
+    # TRUE tract-preserved joint car_share x distance (build_lodes_tract_car_dosage.py):
+    # every variant above applies ONE car-share number (flat/distance-
+    # curve/metro-bucket) to a whole county pair. This instead computes
+    # E[car_share x dist] directly from tract-level LODES flows before
+    # collapsing to county pairs, so it reflects the TRUE within-pair
+    # correlation between which tracts are short/high-car vs long/low-car
+    # -- not the product of two separately-averaged marginals.
+    lodes_car = pd.read_parquet(DATA_PROC / "commuting" / "county_pair_lodes_car_dosage.parquet")
+    weights_dist = weights_dist.merge(
+        lodes_car[["fips_home", "fips_work", "avg_car_x_dist"]].rename(
+            columns={"fips_home": "fips_home_s", "fips_work": "fips_work_s"}),
+        on=["fips_home_s", "fips_work_s"], how="left")
+    n_missing_true = weights_dist["avg_car_x_dist"].isna().sum()
+    log.info("TRUE joint car_x_dist coverage: %d/%d edges missing (%.1f%%)",
+             n_missing_true, len(weights_dist), 100 * n_missing_true / len(weights_dist))
+    weights_dist["avg_car_x_dist"] = weights_dist["avg_car_x_dist"].fillna(
+        weights_dist["car_share_dist_adj"] * weights_dist["dist_mi"])  # fallback for uncovered edges
+    weights_dist["weight_x_TRUE_car_x_dist"] = weights_dist["weight"] * weights_dist["avg_car_x_dist"]
+
     variants = {
         "full_network: weight only (headline reference)": (weights_full, "weight"),
         "full_network: weight x car_share_home": (weights_full, "weight_x_car"),
@@ -129,6 +148,7 @@ def main():
         "coverage_matched: weight x car_share_DIST-ADJUSTED x dist": (weights_dist, "weight_x_car_dist_adj_x_dist"),
         "coverage_matched: weight x car_share_METRO+DIST-ADJUSTED (NYC!=LA)": (weights_dist, "weight_x_car_msa_adj"),
         "coverage_matched: weight x car_share_METRO+DIST-ADJUSTED x dist": (weights_dist, "weight_x_car_msa_adj_x_dist"),
+        "coverage_matched: weight x TRUE-JOINT car_x_dist (tract-preserved LODES)": (weights_dist, "weight_x_TRUE_car_x_dist"),
     }
 
     results = []
