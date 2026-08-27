@@ -4,3 +4,4 @@ own_weight x night_alert,own_weight_dosage,-0.003372088597431031,0.0033297255269
 own_weight x car_share x night_alert,own_weight_car_dosage,-0.0031393921484927077,0.003616951613450834,0.38955970124648864,7348614
 own_dist_mi x night_alert (distance only),own_dist_only_dosage,-0.0007846258992053174,0.0006946791680606961,0.26408530104813677,7348614
 own_weight x car_share x own_dist_mi x night_alert (full dosage),own_full_dosage,-0.0009900162946596452,0.0008814084319824704,0.2667080890182192,7348614
+own_weight x car_share_METRO+DIST-ADJUSTED x own_dist_mi x night_alert (NYC!=LA),own_full_dosage_msa_adj,-0.0009545906043162525,0.0008274923007936507,0.2541511318691254,7348614

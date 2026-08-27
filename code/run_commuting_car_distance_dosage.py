@@ -41,6 +41,7 @@ import pyfixest as pf
 sys.path.insert(0, str(Path(__file__).parent))
 import run_night_to_morning_window as ntm
 import run_commuting_distance_robustness as dist_mod
+from build_nhts_car_share_by_distance import car_share_from_distance, car_share_from_distance_by_county
 from config import DATA_PROC, OUTPUT_TABS
 from utils import get_logger
 
@@ -97,6 +98,26 @@ def main():
     weights_dist["weight_x_dist"] = weights_dist["weight"] * weights_dist["dist_mi"]
     weights_dist["weight_x_car_x_dist"] = weights_dist["weight_x_car"] * weights_dist["dist_mi"]
 
+    # NHTS-derived, DISTANCE-ADJUSTED car share (car_share_from_distance.py):
+    # car mode share is not flat across trip distance -- it dips for very
+    # short (walkable) trips, peaks around 20-30mi, and dips again for
+    # long-haul trips that substitute to bus/rail/air. Using this instead
+    # of the flat county-level ACS average corrects for exactly the bias
+    # the flat number introduces: understating car use on short intra-
+    # county hops relative to longer cross-county commutes.
+    weights_dist["car_share_dist_adj"] = car_share_from_distance(weights_dist["dist_mi"])
+    weights_dist["weight_x_car_dist_adj"] = weights_dist["weight"] * weights_dist["car_share_dist_adj"]
+    weights_dist["weight_x_car_dist_adj_x_dist"] = weights_dist["weight_x_car_dist_adj"] * weights_dist["dist_mi"]
+
+    # Same distance adjustment, but stratified by the HOME county's own
+    # metro type (NYC's short trips are far more transit-substitutable
+    # than a car-dependent Sunbelt metro's) -- see
+    # build_nhts_car_share_by_distance.py's MSASIZE bucketing.
+    weights_dist["car_share_msa_adj"] = car_share_from_distance_by_county(
+        weights_dist["dist_mi"], weights_dist["fips_home_s"])
+    weights_dist["weight_x_car_msa_adj"] = weights_dist["weight"] * weights_dist["car_share_msa_adj"]
+    weights_dist["weight_x_car_msa_adj_x_dist"] = weights_dist["weight_x_car_msa_adj"] * weights_dist["dist_mi"]
+
     variants = {
         "full_network: weight only (headline reference)": (weights_full, "weight"),
         "full_network: weight x car_share_home": (weights_full, "weight_x_car"),
@@ -104,6 +125,10 @@ def main():
         "coverage_matched: weight x car_share_home": (weights_dist, "weight_x_car"),
         "coverage_matched: weight x dist (no car)": (weights_dist, "weight_x_dist"),
         "coverage_matched: weight x car_share_home x dist (full pair dosage)": (weights_dist, "weight_x_car_x_dist"),
+        "coverage_matched: weight x car_share_DIST-ADJUSTED (NHTS)": (weights_dist, "weight_x_car_dist_adj"),
+        "coverage_matched: weight x car_share_DIST-ADJUSTED x dist": (weights_dist, "weight_x_car_dist_adj_x_dist"),
+        "coverage_matched: weight x car_share_METRO+DIST-ADJUSTED (NYC!=LA)": (weights_dist, "weight_x_car_msa_adj"),
+        "coverage_matched: weight x car_share_METRO+DIST-ADJUSTED x dist": (weights_dist, "weight_x_car_msa_adj_x_dist"),
     }
 
     results = []

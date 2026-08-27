@@ -47,6 +47,7 @@ import pyfixest as pf
 
 sys.path.insert(0, str(Path(__file__).parent))
 import run_night_to_morning_window as ntm
+from build_nhts_car_share_by_distance import car_share_from_distance, car_share_from_distance_by_county
 from config import DATA_PROC, OUTPUT_TABS
 from utils import get_logger
 
@@ -74,9 +75,21 @@ def load_own_county_factors() -> pd.DataFrame:
 
     out = self_w.merge(car[["fips", "car_share"]], on="fips", how="outer") \
                 .merge(self_d, on="fips", how="outer")
+    # NHTS distance-adjusted car share, evaluated at each county's own
+    # (short, intra-county) average commute distance -- see
+    # build_nhts_car_share_by_distance.py. The flat ACS car_share applies
+    # the SAME number here as to cross-county pairs, which understates
+    # how much car use differs at short intra-county distances.
+    out["car_share_dist_adj"] = car_share_from_distance(out["own_dist_mi"].fillna(out["own_dist_mi"].mean()))
+    # Same, but stratified by the county's OWN metro type (NYC's intra-
+    # borough commutes are far more transit-substitutable than a small
+    # car-dependent county's intra-county trips of the same distance).
+    out["car_share_msa_adj"] = car_share_from_distance_by_county(
+        out["own_dist_mi"].fillna(out["own_dist_mi"].mean()), out["fips"])
     log.info("Own-county factors: %d counties, own_weight mean=%.3f, car_share mean=%.3f, "
-             "own_dist_mi mean=%.2f", len(out), out["own_weight"].mean(),
-             out["car_share"].mean(), out["own_dist_mi"].mean())
+             "own_dist_mi mean=%.2f, car_share_dist_adj mean=%.3f, car_share_msa_adj mean=%.3f",
+             len(out), out["own_weight"].mean(), out["car_share"].mean(), out["own_dist_mi"].mean(),
+             out["car_share_dist_adj"].mean(), out["car_share_msa_adj"].mean())
     return out
 
 
@@ -112,13 +125,15 @@ def main():
 
     # Fill missing factors with the national mean so a handful of
     # uncovered counties don't drop out of the FE regression entirely.
-    for col in ["own_weight", "car_share", "own_dist_mi"]:
+    for col in ["own_weight", "car_share", "own_dist_mi", "car_share_msa_adj"]:
         grid[col] = grid[col].fillna(grid[col].mean())
 
     grid["own_weight_dosage"] = grid["own_weight"] * grid["night_alert"]
     grid["own_weight_car_dosage"] = grid["own_weight"] * grid["car_share"] * grid["night_alert"]
     grid["own_dist_only_dosage"] = grid["own_dist_mi"] * grid["night_alert"]
     grid["own_full_dosage"] = grid["own_weight"] * grid["car_share"] * grid["own_dist_mi"] * grid["night_alert"]
+    grid["own_full_dosage_msa_adj"] = (grid["own_weight"] * grid["car_share_msa_adj"] *
+                                       grid["own_dist_mi"] * grid["night_alert"])
 
     results = []
     log.info("=== Own-county dosage variants (all jointly controlled for cross_spillover) ===")
@@ -127,6 +142,8 @@ def main():
     fit(grid, "own_weight x car_share x night_alert", "own_weight_car_dosage", results)
     fit(grid, "own_dist_mi x night_alert (distance only)", "own_dist_only_dosage", results)
     fit(grid, "own_weight x car_share x own_dist_mi x night_alert (full dosage)", "own_full_dosage", results)
+    fit(grid, "own_weight x car_share_METRO+DIST-ADJUSTED x own_dist_mi x night_alert (NYC!=LA)",
+        "own_full_dosage_msa_adj", results)
 
     out = pd.DataFrame(results)
     out_path = OUTPUT_TABS / "reg_own_county_dosage.csv"
