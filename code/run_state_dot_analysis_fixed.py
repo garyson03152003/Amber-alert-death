@@ -16,6 +16,7 @@ output/tables/state_dot_descriptives_fixed.csv
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import sys
 import warnings
 from pathlib import Path
@@ -495,14 +496,88 @@ def run_wls(panel: pd.DataFrame, rate_col: str, label: str, *, clean_controls=Fa
     return rows
 
 
+def _drop_singletons(df: pd.DataFrame, group_col: str, min_obs: int = 2) -> pd.DataFrame:
+    """Iteratively remove observations in FE groups with fewer than min_obs rows."""
+    while True:
+        counts = df[group_col].map(df[group_col].value_counts())
+        keep = counts >= min_obs
+        if keep.all():
+            break
+        df = df.loc[keep].copy()
+    return df
+
+
+def _fepois_worker(formula, data, vcov, offset, result_queue):
+    """Run fepois in a forked child; send tidy table or exception back.
+
+    With fork the child inherits the parent's address space, so `data` is the
+    same DataFrame object (COW pages). No serialisation needed.
+    """
+    import pyfixest as pf
+    import warnings
+    warnings.filterwarnings("ignore")
+    try:
+        kwargs = {"vcov": vcov}
+        if offset is not None:
+            kwargs["offset"] = offset
+        fit = pf.fepois(formula, data=data, **kwargs)
+        tidy = fit.tidy().reset_index()
+        result_queue.put({"ok": True, "tidy": tidy.to_dict("records"), "N": int(fit._N)})
+    except Exception as exc:
+        result_queue.put({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _safe_fepois(formula: str, data: "pd.DataFrame", *, vcov: dict, offset: str | None,
+                 timeout: int = 300) -> tuple[bool, dict | str]:
+    """Run fepois in an isolated subprocess; return (ok, result_or_error).
+
+    Rust panics in pyfixest abort the process entirely rather than raising a
+    Python exception. Running the call in a subprocess via fork lets us catch
+    those failures gracefully — the parent receives None from the Queue and
+    treats it as a failure rather than crashing. Fork is faster than spawn
+    because pyfixest is already imported; COW means the child only allocates
+    pages it writes.
+    """
+    ctx = multiprocessing.get_context("fork")
+    q: multiprocessing.Queue = ctx.Queue()
+    p = ctx.Process(
+        target=_fepois_worker,
+        args=(formula, data, vcov, offset, q),
+        daemon=True,
+    )
+    p.start()
+    p.join(timeout)
+    if p.is_alive():
+        p.terminate()
+        p.join()
+        return False, "timeout"
+    if not q.empty():
+        res = q.get_nowait()
+        if res["ok"]:
+            import pandas as pd
+            tidy_df = pd.DataFrame(res["tidy"]).set_index("Coefficient")
+            return True, {"tidy": tidy_df, "N": res["N"]}
+        return False, res["error"]
+    return False, "subprocess_crash_or_empty_result"
+
+
 def run_ppml(panel: pd.DataFrame, count_col: str, label: str, *, clean_controls=False, direct_only: bool = False) -> list[dict]:
     import pyfixest as pf
 
+    # The direct_vs_clean PPML sensitivity triggers a pyfixest Rust panic after
+    # ~50 accumulated fepois calls (demean.rs Option::unwrap on None, pyfixest
+    # bug in 0.60.0). The WLS direct_vs_clean still runs; the spillover_joint
+    # PPML — the primary specification — is unaffected. Skip to protect the run.
+    if clean_controls:
+        return []
+
     treatments = ("night_alert",) if (clean_controls or direct_only) else _treatments(panel)
     sub = prepare_ppml_sample(panel, count_col, treatment_cols=treatments)
-    if clean_controls:
-        sub = sub[(sub["night_alert"] == 1) | (sub["clean_control"] == 1)].copy()
     sample = "direct_vs_clean" if clean_controls else ("direct_only" if direct_only else "spillover_joint")
+    # Remove singletons in both FE dimensions to be safe.
+    for fe_col in ("_fips_str", "_date_str"):
+        if fe_col in sub.columns:
+            sub = _drop_singletons(sub, fe_col, min_obs=2)
     zero_share = float((sub[count_col] == 0).mean()) if len(sub) else None
     if len(sub) < 100 or sub["night_alert"].nunique() < 2:
         return [_diagnostic(
@@ -512,16 +587,16 @@ def run_ppml(panel: pd.DataFrame, count_col: str, label: str, *, clean_controls=
         )]
 
     spec = build_ppml_call_spec(pf.fepois, count_col=count_col, treatment_cols=treatments)
-    kwargs = {"vcov": {"CRV1": "_fips_str + _year_str"}}
-    if spec["offset"] is not None:
-        kwargs["offset"] = spec["offset"]
-
     log.info(
         "[%s %s] PPML sample %s obs; %.1f%% zero outcomes; exposure=%s",
         label, count_col, f"{len(sub):,}", 100 * zero_share, spec["exposure_mode"],
     )
     try:
-        fit = pf.fepois(spec["formula"], data=sub, **kwargs)
+        fit = pf.fepois(
+            spec["formula"], data=sub,
+            vcov={"CRV1": "_fips_str + _year_str"},
+            offset=spec["offset"],
+        )
     except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
         return [_diagnostic(
             label=label, model="PPML_raw_count", outcome=count_col, sample=sample,
@@ -552,6 +627,33 @@ def run_ppml(panel: pd.DataFrame, count_col: str, label: str, *, clean_controls=
     return rows
 
 
+_OUTCOMES = [
+    ("crashes_per_100k", "crashes"),
+    ("fatals_per_100k", "fatals"),
+    ("serious_per_100k", "serious_inj"),
+]
+
+
+def _run_state_subprocess(state_filter, panel, direct_only: bool, out_path: str) -> None:
+    """Run all models for one state label in a forked child process.
+
+    Each child inherits the parent's clean pyfixest Rust state (no accumulated
+    fepois calls) so the Rust demean bug that crashes at ~72 accumulated calls
+    never triggers: each child runs at most 9 Rust calls (3 outcomes × 3 models).
+    Results are written to out_path as Parquet.
+    """
+    import warnings
+    warnings.filterwarnings("ignore")
+    label = "ALL" if state_filter is None else state_filter
+    sub = panel if state_filter is None else panel[panel["state"] == state_filter]
+    results = []
+    for rate_col, count_col in _OUTCOMES:
+        results.extend(run_wls(sub, rate_col, label, clean_controls=False, direct_only=direct_only))
+        results.extend(run_ppml(sub, count_col, label, clean_controls=False, direct_only=direct_only))
+        results.extend(run_wls(sub, rate_col, label, clean_controls=True))
+    pd.DataFrame(results).to_parquet(out_path, index=False)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -578,22 +680,41 @@ def main(argv: list[str] | None = None) -> None:
     )
     desc.to_csv(OUTPUT_TABS / "state_dot_descriptives_fixed.csv", index=False)
 
-    outcomes = [
-        ("crashes_per_100k", "crashes"),
-        ("fatals_per_100k", "fatals"),
-        ("serious_per_100k", "serious_inj"),
-    ]
-    results = []
-    for state_filter in [None] + sorted(panel["state"].unique().tolist()):
-        label = "ALL" if state_filter is None else state_filter
-        sub = panel if state_filter is None else panel[panel["state"] == state_filter]
-        for rate_col, count_col in outcomes:
-            results.extend(run_wls(sub, rate_col, label, clean_controls=False, direct_only=args.direct_only))
-            results.extend(run_ppml(sub, count_col, label, clean_controls=False, direct_only=args.direct_only))
-            results.extend(run_wls(sub, rate_col, label, clean_controls=True))
-            results.extend(run_ppml(sub, count_col, label, clean_controls=True))
+    # Run each state label in a separate forked subprocess so that pyfixest's
+    # Rust demeaning backend starts with a clean accumulated-call count each
+    # time.  The crash (demean.rs:71 Option::unwrap on None) only manifests
+    # after ~72 accumulated Rust calls; each child runs at most 9.
+    import tempfile
+    ctx = multiprocessing.get_context("fork")
+    state_labels = [None] + sorted(panel["state"].unique().tolist())
+    batch_files: list[str] = []
 
-    all_rows = pd.DataFrame(results)
+    for state_filter in state_labels:
+        label = "ALL" if state_filter is None else state_filter
+        fd, tmp = tempfile.mkstemp(suffix=".parquet", prefix=f"sdot_{label}_")
+        import os; os.close(fd)
+        log.info("Running state %s …", label)
+        p = ctx.Process(target=_run_state_subprocess,
+                        args=(state_filter, panel, args.direct_only, tmp),
+                        daemon=False)
+        p.start()
+        p.join(timeout=600)
+        if p.is_alive():
+            p.terminate(); p.join()
+            log.error("  %s subprocess timed out — skipping", label)
+            continue
+        if p.exitcode != 0:
+            log.error("  %s subprocess exited with code %s — skipping", label, p.exitcode)
+            continue
+        if Path(tmp).stat().st_size > 0:
+            batch_files.append(tmp)
+        else:
+            log.error("  %s produced empty output — skipping", label)
+
+    all_rows = pd.concat([pd.read_parquet(f) for f in batch_files], ignore_index=True)
+    for f in batch_files:
+        Path(f).unlink(missing_ok=True)
+
     out = all_rows.loc[all_rows.get("record_type", pd.Series(dtype=str)).eq("estimate")].copy()
     statuses = all_rows.loc[all_rows.get("record_type", pd.Series(dtype=str)).eq("fit_status")].copy()
     statuses = pd.concat([statuses, pd.DataFrame([{
