@@ -87,23 +87,45 @@ def fit_one(sub, label, results, *, dropped=""):
                      "nobs": int(fit._N), "n_nonzero_spillover": n_nonzero})
     del fit, sub, td
     gc.collect()
+    # Checkpoint after every regression -- the memory-hungry sibling script
+    # (run_night_to_morning_window.py) OOM-killed once already on this same
+    # national grid, so don't risk losing 60+ regressions' worth of progress.
+    pd.DataFrame(results).to_csv(OUTPUT_TABS / "reg_night_to_morning_leave_one_out.csv", index=False)
 
 
 def main():
+    # NOTE on memory: run_night_to_morning_window.py's own grid construction
+    # leaves fips/fips_year/fips_dow/state_code/date_str as raw object-dtype
+    # strings across 7.3M rows (~1.3GB) and re-copies the full grid on every
+    # one of its 12 sequential regressions -- fine for a single run, but this
+    # script re-estimates 60+ times over leave-one-out subsets and OOM-killed
+    # (13.9GB RSS in a 15GB container) when first tried with that approach.
+    # Casting the fixed-effect/cluster columns to pandas categoricals and
+    # downcasting numeric dtypes cuts the grid to ~140MB and peak fit RSS to
+    # ~4GB, with identical point estimates (verified against the committed
+    # reg_night_to_morning_window.csv baseline: coef=0.030464, p=0.011666).
     grid = ntm.build_outcome_grid()
     grid = ntm.attach_night_alert(grid)
     grid = ntm.attach_cross_spillover(grid)
     grid["year_str"] = grid["date"].dt.year.astype(str)
     grid["dow"] = grid["date"].dt.dayofweek.astype(str)
-    grid["month_str"] = grid["date"].dt.month.astype(str)
-    grid["fips_dow"] = grid["fips"] + "_" + grid["dow"]
-    grid["fips_year"] = grid["fips"] + "_" + grid["year_str"]
-    grid["state_code"] = grid["fips"].str[:2]
-    grid["date_str"] = grid["date"].dt.strftime("%Y-%m-%d")
+    grid["month_str"] = grid["date"].dt.month.astype("category")
+    grid["fips_dow"] = (grid["fips"] + "_" + grid["dow"]).astype("category")
+    grid["fips_year"] = (grid["fips"] + "_" + grid["year_str"]).astype("category")
+    grid["state_code"] = grid["fips"].str[:2].astype("category")
+    grid["date_str"] = grid["date"].dt.strftime("%Y-%m-%d").astype("category")
+    grid["fips"] = grid["fips"].astype("category")
+    grid["night_alert"] = grid["night_alert"].astype("int8")
+    grid["cross_spillover"] = grid["cross_spillover"].astype("float32")
+    grid["fatals_0623"] = grid["fatals_0623"].astype("float32")
+    grid = grid.drop(columns=["serious_0623", "night_alert_lag1", "night_alert_lead1",
+                               "alert_last2nights_any", "alert_last2nights_dose",
+                               "year_str", "dow", "date"])
+    gc.collect()
 
-    mass_by_state = grid.groupby("state_code")[TREAT].sum().sort_values(ascending=False)
+    mass_by_state = grid.groupby("state_code", observed=True)[TREAT].sum().sort_values(ascending=False)
     total_mass = float(mass_by_state.sum())
-    mass_by_county = grid.groupby("fips")[TREAT].sum().sort_values(ascending=False)
+    mass_by_county = grid.groupby("fips", observed=True)[TREAT].sum().sort_values(ascending=False)
     log.info("Total cross_spillover mass: %.2f across %d states, %d counties",
              total_mass, mass_by_state.shape[0], mass_by_county.shape[0])
     log.info("Top state shares of work-side spillover mass: %s",
