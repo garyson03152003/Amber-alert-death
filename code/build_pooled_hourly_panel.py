@@ -36,6 +36,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -54,6 +55,14 @@ SOURCES = {
     "ma_county_hour.parquet":              ("MA", "ma_crashes"),
     "ct_county_hour.parquet":              ("CT", "ct_crashes"),
     "ia_county_hour.parquet":              ("IA", "ia_crashes"),
+    "ny_county_hour.parquet":              ("NY", "ny_crashes"),
+    "il_county_hour.parquet":              ("IL", "il_crashes"),
+}
+
+# Severity column names that don't follow the `{key}_fatals`/`{key}_serious_inj`
+# convention (NY only has crash-level fatal/injury flags, not person counts).
+SEVERITY_COL_OVERRIDES = {
+    "NY": ("ny_fatal_crashes", "ny_injury_crashes"),
 }
 
 
@@ -71,13 +80,27 @@ def load_pooled() -> pd.DataFrame:
             if col is None:
                 log.warning("[%s] no crash column found, skipping", key)
                 continue
-        out = d[["fips", "date", "hour", col]].rename(columns={col: "crashes"}).copy()
+        keep = ["fips", "date", "hour", col]
+        rename = {col: "crashes"}
+        fatal_col, serious_col = SEVERITY_COL_OVERRIDES.get(
+            key, (f"{key.lower()}_fatals", f"{key.lower()}_serious_inj"))
+        has_severity = fatal_col in d.columns and serious_col in d.columns
+        if has_severity:
+            keep += [fatal_col, serious_col]
+            rename[fatal_col] = "fatals"
+            rename[serious_col] = "serious_inj"
+        out = d[keep].rename(columns=rename).copy()
         out["date"] = pd.to_datetime(out["date"]).dt.normalize()
         out["source"] = key
+        if not has_severity:
+            out["fatals"] = np.nan
+            out["serious_inj"] = np.nan
         parts.append(out)
-        log.info("[%s] %s county-hours, %s crashes, %s-%s",
+        sev_note = (f", fatals={int(out['fatals'].sum()):,}, serious={int(out['serious_inj'].sum()):,}"
+                    if has_severity else ", no severity data")
+        log.info("[%s] %s county-hours, %s crashes, %s-%s%s",
                  key, f"{len(out):,}", f"{int(out['crashes'].sum()):,}",
-                 out["date"].dt.year.min(), out["date"].dt.year.max())
+                 out["date"].dt.year.min(), out["date"].dt.year.max(), sev_note)
 
     if not parts:
         raise FileNotFoundError("no state county-hour panels available to pool")
@@ -89,7 +112,8 @@ def load_pooled() -> pd.DataFrame:
         log.warning("%s duplicated county-hours across sources -- summing",
                     f"{int(dupes.sum()):,}")
         pooled = pooled.groupby(["fips", "date", "hour"], as_index=False).agg(
-            crashes=("crashes", "sum"), source=("source", "first"))
+            crashes=("crashes", "sum"), fatals=("fatals", "sum"),
+            serious_inj=("serious_inj", "sum"), source=("source", "first"))
     return pooled
 
 
