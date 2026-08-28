@@ -46,10 +46,22 @@ weather products). Downloading a whole year to disk before filtering it
 would mean tens of GB of transient raw data for no benefit -- this
 streams the response line-by-line (requests' iter_lines(), one JSON
 object per line) and only ever writes MATCHING rows to disk, discarding
-each non-matching line immediately. One HTTP request per calendar year
-(bounded by a `sent` date range), not per day/month, to minimize
-connection-setup overhead and avoid whatever's triggering the paginated
-API's per-request throttling.
+each non-matching line immediately.
+
+Per-MONTH requests, not per-year: a first version of this script used
+one HTTP request per calendar year to minimize connection-setup
+overhead. In practice, sustained streams reliably died with
+"Response ended prematurely" around 68-80 minutes in, REGARDLESS of how
+many records had been scanned by then (observed directly: 2014 failed
+three times in a row, always in that same ~70-80min window, having
+scanned anywhere from 232k to 282k records depending on the attempt) --
+a server/proxy-side connection duration limit, not something retries
+can work around, since a naive whole-year retry just restarts from
+record 0 and burns another 70-80 minutes before dying again in the same
+place. Chunking to one month per request keeps each individual stream
+comfortably under that limit (a month completes in single-digit
+minutes at observed throughput) and checkpoints per month, so a
+transient failure costs at most one month's work, not up to a full year.
 
 Keywords
 --------
@@ -61,8 +73,8 @@ program names and the descriptive language these alerts typically use
 "Missing Adult Alert", etc.) and the message body itself often names the
 underlying condition even when the program-name phrase is absent.
 
-Checkpointed per year so an interruption doesn't lose progress; safe to
-re-run (skips years whose checkpoint file already exists).
+Checkpointed per month so an interruption doesn't lose progress; safe to
+re-run (skips months whose checkpoint file already exists).
 
 Output
 ------
@@ -136,15 +148,20 @@ def screen_line(line: str, year: int) -> dict | None:
     }
 
 
-def fetch_year(year: int, session: requests.Session) -> pd.DataFrame:
-    date_filter = f"sent gt '{year}-01-01T00:00:00Z' and sent lt '{year + 1}-01-01T00:00:00Z'"
+def fetch_month(year: int, month: int, session: requests.Session) -> pd.DataFrame:
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+    date_filter = (
+        f"sent gt '{year}-{month:02d}-01T00:00:00Z' and "
+        f"sent lt '{next_year}-{next_month:02d}-01T00:00:00Z'"
+    )
     params = {
         "$filter": date_filter,
         "$select": "id,sent,msgType,originalMessage",
     }
     for attempt, delay in enumerate([0] + RETRY_DELAYS, start=1):
         if delay:
-            log.warning("  [%d] retrying year %d in %ds...", attempt, year, delay)
+            log.warning("    [%d] retrying %d-%02d in %ds...", attempt, year, month, delay)
             time.sleep(delay)
         rows = []
         n_scanned = 0
@@ -159,16 +176,13 @@ def fetch_year(year: int, session: requests.Session) -> pd.DataFrame:
                     hit = screen_line(raw_line, year)
                     if hit is not None:
                         rows.append(hit)
-                    if n_scanned % 50_000 == 0:
-                        log.info("  year %d: %d scanned so far (%.0fs elapsed, %d hits)",
-                                 year, n_scanned, time.time() - t0, len(rows))
-            log.info("  year %d: DONE -- %d scanned, %d hits, %.0fs",
-                     year, n_scanned, len(rows), time.time() - t0)
+            log.info("  %d-%02d: DONE -- %d scanned, %d hits, %.0fs",
+                     year, month, n_scanned, len(rows), time.time() - t0)
             return pd.DataFrame(rows)
         except Exception as exc:
-            log.warning("  year %d: stream failed after %d records (%.0fs): %s",
-                        year, n_scanned, time.time() - t0, exc)
-    log.error("  year %d: giving up after %d attempts", year, len(RETRY_DELAYS) + 1)
+            log.warning("  %d-%02d: stream failed after %d records (%.0fs): %s",
+                        year, month, n_scanned, time.time() - t0, exc)
+    log.error("  %d-%02d: giving up after %d attempts", year, month, len(RETRY_DELAYS) + 1)
     return pd.DataFrame()
 
 
@@ -180,14 +194,22 @@ def main():
         "Accept": "application/jsonl+json",
     })
 
-    for year in STUDY_YEARS:
-        ckpt = CHECKPOINT_DIR / f"{year}.parquet"
+    # Migrate any already-completed full-year checkpoints from the earlier
+    # per-year version of this script (safe to keep as-is -- a completed
+    # year need not be re-split into months).
+    done_years = {int(p.stem) for p in CHECKPOINT_DIR.glob("[0-9][0-9][0-9][0-9].parquet")}
+
+    months = [(y, m) for y in STUDY_YEARS if y not in done_years for m in range(1, 13)]
+    log.info("Screening %d months (%d years already fully done: %s)",
+             len(months), len(done_years), sorted(done_years))
+
+    for year, month in months:
+        ckpt = CHECKPOINT_DIR / f"{year}_{month:02d}.parquet"
         if ckpt.exists():
-            log.info("Year %d already done -- skipping", year)
             continue
-        log.info("Streaming year %d ...", year)
-        df_y = fetch_year(year, session)
-        df_y.to_parquet(ckpt, index=False)
+        log.info("Streaming %d-%02d ...", year, month)
+        df_m = fetch_month(year, month, session)
+        df_m.to_parquet(ckpt, index=False)
 
     parts = sorted(CHECKPOINT_DIR.glob("*.parquet"))
     if not parts:
