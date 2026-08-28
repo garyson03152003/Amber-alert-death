@@ -1,0 +1,10 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+NV_NDOT,32,2016,,,0,0,0,0,0,,,False,False,terminal_page_error|request_incomplete|missing_required_columns,Nevada NDOT CrashData_OpenData FeatureServer,,0,0,0
+NV_NDOT,32,2017,,,0,0,0,0,0,,,False,False,terminal_page_error|request_incomplete|missing_required_columns,Nevada NDOT CrashData_OpenData FeatureServer,,0,0,0
+NV_NDOT,32,2018,,,0,0,0,0,0,,,False,False,terminal_page_error|request_incomplete|missing_required_columns,Nevada NDOT CrashData_OpenData FeatureServer,,0,0,0
+NV_NDOT,32,2019,,,0,0,0,0,0,,,False,False,terminal_page_error|request_incomplete|missing_required_columns,Nevada NDOT CrashData_OpenData FeatureServer,,0,0,0
+NV_NDOT,32,2020,,,0,0,0,0,0,,,False,False,terminal_page_error|request_incomplete|missing_required_columns,Nevada NDOT CrashData_OpenData FeatureServer,,0,0,0
+NV_NDOT,32,2021,,,0,0,0,0,0,,,False,False,terminal_page_error|request_incomplete|missing_required_columns,Nevada NDOT CrashData_OpenData FeatureServer,,0,0,0
+NV_NDOT,32,2022,,,0,0,0,0,0,,,False,False,terminal_page_error|request_incomplete|missing_required_columns,Nevada NDOT CrashData_OpenData FeatureServer,,0,0,0
+NV_NDOT,32,2023,,,0,0,0,0,0,,,False,False,terminal_page_error|request_incomplete|missing_required_columns,Nevada NDOT CrashData_OpenData FeatureServer,,0,0,0
+NV_NDOT,32,2024,,,0,0,0,0,0,,,False,False,terminal_page_error|request_incomplete|missing_required_columns,Nevada NDOT CrashData_OpenData FeatureServer,,0,0,0

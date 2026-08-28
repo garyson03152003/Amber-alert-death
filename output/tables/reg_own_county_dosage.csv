@@ -1,0 +1,8 @@
+label,treatment,coef,se,pval,nobs
+raw binary night_alert (headline reference),night_alert,-0.003395380222810369,0.0028534087957123705,0.23969026887527534,7348614
+own_weight x night_alert,own_weight_dosage,-0.0033720885974311485,0.0033297255269655137,0.31606843882740243,7348614
+own_weight x car_share x night_alert,own_weight_car_dosage,-0.0031393921484928326,0.003616951613430945,0.3895597012438823,7348614
+own_dist_mi x night_alert (distance only),own_dist_only_dosage,-0.0007846258992053385,0.0006946791680587016,0.26408530104676986,7348614
+own_weight x car_share x own_dist_mi x night_alert (full dosage),own_full_dosage,-0.0009900162946596652,0.0008814084319793201,0.26670808901652165,7348614
+own_weight x car_share_METRO+DIST-ADJUSTED x own_dist_mi x night_alert (NYC!=LA),own_full_dosage_msa_adj,-0.0009545906043162502,0.0008274923007906995,0.25415113186745497,7348614
+own_weight x TRUE-JOINT car_x_dist x night_alert (tract-preserved LODES),own_true_joint_dosage,-0.000979738207623938,0.0008751297469188792,0.26826136562201075,7348614

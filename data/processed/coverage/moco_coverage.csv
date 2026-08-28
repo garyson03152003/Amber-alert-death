@@ -1,0 +1,12 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+MOCO_MCPD,24031,2015,,11470,11470,11470,0,0,0,2015-01-01,2015-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2016,,12103,12103,12103,0,0,0,2016-01-01,2016-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2017,,12104,12104,12104,0,0,0,2017-01-01,2017-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2018,,11869,11869,11869,0,0,0,2018-01-01,2018-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2019,,11665,11665,11665,0,0,0,2019-01-01,2019-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2020,,8070,8070,8070,0,0,0,2020-01-01,2020-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2021,,9353,9353,9353,0,0,0,2021-01-01,2021-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2022,,10056,10056,10056,0,0,0,2022-01-01,2022-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2023,,10776,10776,10776,0,0,0,2023-01-01,2023-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2024,,10629,10629,10629,0,0,0,2024-01-01,2024-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0
+MOCO_MCPD,24031,2025,,10311,10311,10311,0,0,0,2025-01-01,2025-12-31,True,True,,Montgomery County MD Crash Reporting (data.montgomerycountymd.gov Socrata),,0,0,0

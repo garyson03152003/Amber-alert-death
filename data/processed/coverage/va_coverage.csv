@@ -1,0 +1,9 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count
+VA_VDOT,51,2017,,127375,127375,127375,0,0,0,2017-01-01,2017-12-31,True,True,,VDOT CrashData FeatureServer,,0,0
+VA_VDOT,51,2018,,131848,131848,131848,0,0,0,2018-01-01,2018-12-31,True,True,,VDOT CrashData FeatureServer,,0,0
+VA_VDOT,51,2019,,128172,128172,128172,0,0,0,2019-01-01,2019-12-31,True,True,,VDOT CrashData FeatureServer,,0,0
+VA_VDOT,51,2020,,105600,105600,105600,0,0,0,2020-01-01,2020-12-31,True,True,,VDOT CrashData FeatureServer,,0,0
+VA_VDOT,51,2021,,118498,118498,118498,0,0,0,2021-01-01,2021-12-31,True,True,,VDOT CrashData FeatureServer,,0,0
+VA_VDOT,51,2022,,122434,122434,122434,0,0,0,2022-01-01,2022-12-31,True,True,,VDOT CrashData FeatureServer,,0,0
+VA_VDOT,51,2023,,127597,127597,127597,0,0,0,2023-01-01,2023-12-31,True,True,,VDOT CrashData FeatureServer,,0,0
+VA_VDOT,51,2024,,129244,129244,129244,0,0,0,2024-01-01,2024-12-31,True,True,,VDOT CrashData FeatureServer,,0,0

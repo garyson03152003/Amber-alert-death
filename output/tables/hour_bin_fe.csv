@@ -1,0 +1,3 @@
+spec,beta,se,pvalue
+Baseline (no hour-bin FE),-0.002927,0.00183,0.1408
+With 2h alert-hour FE,4.131448,18099.870653,0.9998

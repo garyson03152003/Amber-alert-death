@@ -1,0 +1,7 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count
+OR_ODOT,41,2019,,50128,50128,50128,0,0,0,2019-01-01,2019-12-31,True,True,,ODOT OTSDE_Crash MapServer,,0
+OR_ODOT,41,2020,,38141,38141,38141,0,0,0,2020-01-01,2020-12-31,True,True,,ODOT OTSDE_Crash MapServer,,0
+OR_ODOT,41,2021,,45295,45295,45295,0,0,0,2021-01-01,2021-12-31,True,True,,ODOT OTSDE_Crash MapServer,,0
+OR_ODOT,41,2022,,45070,45070,45070,0,0,0,2022-01-01,2022-12-31,True,True,,ODOT OTSDE_Crash MapServer,,0
+OR_ODOT,41,2023,,46762,46762,46762,0,0,0,2023-01-01,2023-12-31,True,True,,ODOT OTSDE_Crash MapServer,,0
+OR_ODOT,41,2024,,48414,48414,48414,0,0,0,2024-01-01,2024-12-31,True,True,,ODOT OTSDE_Crash MapServer,,0

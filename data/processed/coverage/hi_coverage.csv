@@ -1,0 +1,6 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+HI_FATALCRASH,15,2019,,102,102,101,0,0,0,2019-01-02,2019-12-30,True,True,,Hawaii statewide FatalCrash FeatureServer,,0,1,0
+HI_FATALCRASH,15,2021,,94,94,94,0,0,0,2021-01-02,2021-12-30,True,True,,Hawaii statewide FatalCrash FeatureServer,,0,0,0
+HI_FATALCRASH,15,2022,,111,111,111,0,0,0,2022-01-02,2022-12-27,True,True,,Hawaii statewide FatalCrash FeatureServer,,0,0,0
+HI_FATALCRASH,15,2023,,90,90,90,0,0,0,2023-01-02,2023-12-31,True,True,,Hawaii statewide FatalCrash FeatureServer,,0,0,0
+HI_FATALCRASH,15,2024,,97,97,97,0,0,0,2024-01-04,2024-12-30,True,True,,Hawaii statewide FatalCrash FeatureServer,,0,0,0

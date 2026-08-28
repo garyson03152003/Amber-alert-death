@@ -1,0 +1,5 @@
+group,beta,se,pvalue,n_treated
+Weekday (Mon–Thu),-0.00094,0.003359,0.7854,343.0
+Weekend (Fri–Sun),-0.006032,0.00327,0.0655,111.0
+interaction:night_alert,-0.000851,0.003515,0.8135,
+interaction:alert_x_wknd,-0.004987,0.002817,0.107,

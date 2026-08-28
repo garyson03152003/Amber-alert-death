@@ -1,0 +1,10 @@
+label,outcome,treatment,fe,coef,se,pval,nobs
+ca_crashes: any alert message,ca_crashes,is_alert_hour,fips_hour_dow + fips_year + year_month,0.05046796340404309,0.08425424741819539,0.5515488244006295,285199
+ca_fatals: any alert message,ca_fatals,is_alert_hour,fips_hour_dow + fips_year + year_month,-0.008996102328712795,0.0063613241760427305,0.16274610215917962,285199
+ca_serious_inj: any alert message,ca_serious_inj,is_alert_hour,fips_hour_dow + fips_year + year_month,0.11419091882849097,0.0873147803034794,0.19618878397053452,285199
+ca_crashes: first-alert-hour only,ca_crashes,is_first_alert_hour,fips_hour_dow + fips_year + year_month,0.051436593832843436,0.08607880318507603,0.5525052908563302,285199
+ca_fatals: first-alert-hour only,ca_fatals,is_first_alert_hour,fips_hour_dow + fips_year + year_month,-0.00884091872692184,0.006497273439616424,0.1789609809706869,285199
+ca_serious_inj: first-alert-hour only,ca_serious_inj,is_first_alert_hour,fips_hour_dow + fips_year + year_month,0.12197844541315105,0.0859882205895624,0.16147550404174282,285199
+ca_crashes: placebo (tomorrow's alert),ca_crashes,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,-0.05954158097225819,0.11677352722134776,0.6120976857990068,285199
+ca_fatals: placebo (tomorrow's alert),ca_fatals,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.0202723921764239,0.014918958048106758,0.17955203419501142,285199
+ca_serious_inj: placebo (tomorrow's alert),ca_serious_inj,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.09862534999328754,0.11433700112115756,0.39198061182262256,285199

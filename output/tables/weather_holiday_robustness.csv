@@ -1,0 +1,3 @@
+spec,beta,se,pvalue
+County + Date FE (baseline),-0.002927,0.00183,0.1408
+County + Date + State×YearMon FE,-0.001891,0.00154,0.2475

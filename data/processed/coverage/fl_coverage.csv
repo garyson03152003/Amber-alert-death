@@ -1,0 +1,7 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count
+FL_FDOT,12,2013,,521259,521259,521259,0,0,0,2013-01-01,2013-12-31,True,True,,FDOT Crashes_All FeatureServer,,0,0
+FL_FDOT,12,2014,,364991,364991,364991,0,0,0,2014-01-01,2014-12-31,True,True,,FDOT Crashes_All FeatureServer,,0,0
+FL_FDOT,12,2015,,402964,402964,402964,0,0,0,2015-01-01,2015-12-31,True,True,,FDOT Crashes_All FeatureServer,,0,0
+FL_FDOT,12,2016,,429964,429964,429964,0,0,0,2016-01-01,2016-12-31,True,True,,FDOT Crashes_All FeatureServer,,0,0
+FL_FDOT,12,2017,,439110,439110,439110,0,0,0,2017-01-01,2017-12-31,True,True,,FDOT Crashes_All FeatureServer,,0,0
+FL_FDOT,12,2018,,440304,440304,440304,0,0,0,2018-01-01,2018-12-31,True,True,,FDOT Crashes_All FeatureServer,,0,0

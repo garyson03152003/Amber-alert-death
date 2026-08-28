@@ -1,0 +1,17 @@
+label,coef,se,pval,nobs
+highway | morning_commute (06-10) -> OWN night_alert (spillover-controlled),-0.000642925309492034,0.00075398593958294,0.3978908610451142,7348614
+highway | morning_commute (06-10) -> CROSS_SPILLOVER (own-controlled),0.005379468577751647,0.003260224023580267,0.10520572489252977,7348614
+highway | midday_non_commute (10-16) -> OWN night_alert (spillover-controlled),-0.0009511032743572046,0.0006867196966240427,0.1722028483032818,7348614
+highway | midday_non_commute (10-16) -> CROSS_SPILLOVER (own-controlled),0.00303551559080301,0.003345188141117425,0.3685335879260432,7348614
+highway | evening_commute (16-19) -> OWN night_alert (spillover-controlled),-0.00040512465316035515,0.00036754083430633324,0.2756272547769605,7348614
+highway | evening_commute (16-19) -> CROSS_SPILLOVER (own-controlled),0.0036770293605416903,0.0019762048246495354,0.06867909464348831,7348614
+highway | evening_night_non_commute (19-24) -> OWN night_alert (spillover-controlled),-0.0011205484598986208,0.0011270263454831691,0.32488755792778345,7348614
+highway | evening_night_non_commute (19-24) -> CROSS_SPILLOVER (own-controlled),0.011808398346237156,0.005460172346421822,0.03537723527180292,7348614
+non_highway | morning_commute (06-10) -> OWN night_alert (spillover-controlled),0.0006460551554302166,0.0011279592942768936,0.5693709540043441,7348614
+non_highway | morning_commute (06-10) -> CROSS_SPILLOVER (own-controlled),-0.004653513780016148,0.004388720133265592,0.2940874877408306,7348614
+non_highway | midday_non_commute (10-16) -> OWN night_alert (spillover-controlled),-0.0003676179226292465,0.0015048306830850206,0.8080044743742127,7348614
+non_highway | midday_non_commute (10-16) -> CROSS_SPILLOVER (own-controlled),0.005293709924716959,0.00479598969372652,0.2749731967217728,7348614
+non_highway | evening_commute (16-19) -> OWN night_alert (spillover-controlled),-0.0005541636043682974,0.0008973988191678145,0.5396927757578776,7348614
+non_highway | evening_commute (16-19) -> CROSS_SPILLOVER (own-controlled),0.0030861674025818193,0.003589501167639778,0.394016175419591,7348614
+non_highway | evening_night_non_commute (19-24) -> OWN night_alert (spillover-controlled),4.7845665276056004e-08,0.0011153686682106494,0.9999659440585338,7348614
+non_highway | evening_night_non_commute (19-24) -> CROSS_SPILLOVER (own-controlled),0.002837338523093873,0.0050033719190671015,0.57319351916553,7348614

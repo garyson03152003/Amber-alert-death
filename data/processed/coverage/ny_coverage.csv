@@ -1,0 +1,5 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count
+NY_DOT,36,2021,,372159,372159,372154,0,0,0,2021-01-01,2021-12-31,True,True,,NY Open Data e8ky-4vqe Socrata,,5
+NY_DOT,36,2022,,390855,390855,390851,0,0,0,2022-01-01,2022-12-31,True,True,,NY Open Data e8ky-4vqe Socrata,,4
+NY_DOT,36,2023,,381290,381290,381283,0,0,0,2023-01-01,2023-12-31,True,True,,NY Open Data e8ky-4vqe Socrata,,7
+NY_DOT,36,2024,,380819,380819,380819,0,0,0,2024-01-01,2024-12-31,True,True,,NY Open Data e8ky-4vqe Socrata,,0

@@ -1,0 +1,13 @@
+label,outcome,treatment,fe,coef,se,pval,nobs
+Combined-any -> fatals 06:00-23:59,fatals_0623,alert_last2nights_any,fips + year_str + dow + month_str,0.0014146829441898765,0.0014112089198479408,0.320947575288135,7348614
+Combined-dose -> fatals 06:00-23:59,fatals_0623,alert_last2nights_dose,fips + year_str + dow + month_str,0.0013040822998691983,0.0014070016352960813,0.35845584714989,7348614
+Combined-any -> serious injuries,serious_0623,alert_last2nights_any,fips + year_str + dow + month_str,-0.0002808474449816235,0.0006873197235050409,0.6845688682496036,7348614
+Combined-any -> fatals 06:00-23:59,fatals_0623,alert_last2nights_any,fips_year + fips_dow + month_str,0.001183395783570804,0.0013415037046145075,0.38192176320062354,7348614
+Combined-dose -> fatals 06:00-23:59,fatals_0623,alert_last2nights_dose,fips_year + fips_dow + month_str,0.0010747588782802986,0.0013406619849355643,0.4265416081474913,7348614
+OWN night_alert (spillover-controlled) -> fatals,fatals_0623,night_alert,fips + year_str + dow + month_str,-0.003248221325143445,0.0031803034052219838,0.31200240471690455,7348614
+CROSS_SPILLOVER (own-controlled) -> fatals,fatals_0623,cross_spillover,fips + year_str + dow + month_str,0.03067096276389006,0.012814243131430524,0.02048255473802585,7348614
+CROSS_SPILLOVER (own-controlled) -> serious injuries,serious_0623,cross_spillover,fips + year_str + dow + month_str,0.01737458616807733,0.006656110203855242,0.011905307563628842,7348614
+OWN night_alert (spillover-controlled) -> fatals,fatals_0623,night_alert,fips_year + fips_dow + month_str,-0.003395380222810369,0.0028534087957123705,0.23969026887527534,7348614
+CROSS_SPILLOVER (own-controlled) -> fatals,fatals_0623,cross_spillover,fips_year + fips_dow + month_str,0.030464113945710428,0.011635431002087339,0.011666275583628094,7348614
+PLACEBO: spillover from tomorrow's home-county alert -> today's fatals,fatals_0623,cross_spillover_placebo,fips + year_str + dow + month_str,0.001919671556187062,0.006255119641826988,0.7601970074937234,7348614
+PLACEBO: spillover from tomorrow's home-county alert -> today's fatals (robust FE),fatals_0623,cross_spillover_placebo,fips_year + fips_dow + month_str,0.0008130241214760897,0.006281867431071096,0.8975414431673236,7348614

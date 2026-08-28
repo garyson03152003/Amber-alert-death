@@ -1,0 +1,226 @@
+11:50:44  INFO      state_dot_analysis_fixed — CA: 164,861 county-days; available crash/fatal/serious rows = 164,861 / 164,861 / 164,861
+11:50:47  INFO      state_dot_analysis_fixed — FL: 84,823 county-days; available crash/fatal/serious rows = 84,823 / 84,823 / 84,823
+11:50:54  INFO      state_dot_analysis_fixed — IL: 227,485 county-days; available crash/fatal/serious rows = 227,485 / 227,485 / 227,485
+11:51:00  INFO      state_dot_analysis_fixed — IA: 177,698 county-days; available crash/fatal/serious rows = 177,698 / 177,698 / 177,698
+11:51:02  INFO      state_dot_analysis_fixed — MA: 37,318 county-days; available crash/fatal/serious rows = 37,318 / 37,318 / 37,318
+11:51:02  INFO      state_dot_analysis_fixed — NV: 26,814 county-days; available crash/fatal/serious rows = 26,814 / 26,814 / 26,814
+11:51:05  INFO      state_dot_analysis_fixed — NY: 87,155 county-days; available crash/fatal/serious rows = 87,155 / 0 / 0
+11:51:07  INFO      state_dot_analysis_fixed — OR: 52,294 county-days; available crash/fatal/serious rows = 52,294 / 52,294 / 52,294
+11:51:10  INFO      state_dot_analysis_fixed — TN: 101,327 county-days; available crash/fatal/serious rows = 101,327 / 101,327 / 101,327
+11:51:15  INFO      state_dot_analysis_fixed — TX: 145,968 county-days; available crash/fatal/serious rows = 145,968 / 145,968 / 145,968
+11:51:22  INFO      state_dot_analysis_fixed — VA: 244,089 county-days; available crash/fatal/serious rows = 244,089 / 244,089 / 244,089
+11:51:30  INFO      state_dot_analysis_fixed — WI: 249,365 county-days; available crash/fatal/serious rows = 249,365 / 249,365 / 249,365
+11:51:30  INFO      state_dot_analysis_fixed — Verified county-level night-alert county-dates: 2,867
+11:51:31  INFO      state_dot_analysis_fixed — Commuter spillover exposure merged from /Users/beibei/Documents/GitHub/Amber-alert-death/data/processed/commuting/county_commuting_weights.parquet
+11:51:31  INFO      state_dot_analysis_fixed — Panel: 1,429,955 rows; 455 direct-alert days; 6,712 spillover-only days; 1,422,788 clean controls
+11:51:31  INFO      state_dot_analysis_fixed — Positive spillover share: median 0.000, p90 0.024, max 0.876
+11:51:36  INFO      state_dot_analysis_fixed — [ALL crashes] PPML 1,429,955 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[ALL crashes] PPML 1,429,955 obs; 0.0% zero outcomes; log(population) offset
+11:51:43  INFO      state_dot_analysis_fixed — [ALL crashes] PPML 1,423,243 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[ALL crashes] PPML 1,423,243 obs; 0.0% zero outcomes; log(population) offset
+11:51:51  INFO      state_dot_analysis_fixed — [ALL fatals] PPML 1,364,684 obs; 94.8% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[ALL fatals] PPML 1,364,684 obs; 94.8% zero outcomes; log(population) offset
+11:51:58  INFO      state_dot_analysis_fixed — [ALL fatals] PPML 1,358,416 obs; 94.8% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[ALL fatals] PPML 1,358,416 obs; 94.8% zero outcomes; log(population) offset
+11:52:06  INFO      state_dot_analysis_fixed — [ALL serious_inj] PPML 1,364,684 obs; 75.4% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[ALL serious_inj] PPML 1,364,684 obs; 75.4% zero outcomes; log(population) offset
+11:52:16  INFO      state_dot_analysis_fixed — [ALL serious_inj] PPML 1,358,416 obs; 75.5% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[ALL serious_inj] PPML 1,358,416 obs; 75.5% zero outcomes; log(population) offset
+11:52:20  INFO      state_dot_analysis_fixed — [CA crashes] PPML 146,599 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[CA crashes] PPML 146,599 obs; 0.0% zero outcomes; log(population) offset
+11:52:20  INFO      state_dot_analysis_fixed — [CA crashes] PPML 144,935 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[CA crashes] PPML 144,935 obs; 0.0% zero outcomes; log(population) offset
+11:52:21  INFO      state_dot_analysis_fixed — [CA fatals] PPML 146,599 obs; 84.5% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[CA fatals] PPML 146,599 obs; 84.5% zero outcomes; log(population) offset
+11:52:21  INFO      state_dot_analysis_fixed — [CA fatals] PPML 144,935 obs; 84.6% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[CA fatals] PPML 144,935 obs; 84.6% zero outcomes; log(population) offset
+11:52:22  INFO      state_dot_analysis_fixed — [CA serious_inj] PPML 146,599 obs; 15.9% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[CA serious_inj] PPML 146,599 obs; 15.9% zero outcomes; log(population) offset
+11:52:22  INFO      state_dot_analysis_fixed — [CA serious_inj] PPML 144,935 obs; 16.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[CA serious_inj] PPML 144,935 obs; 16.0% zero outcomes; log(population) offset
+11:52:23  INFO      state_dot_analysis_fixed — [FL crashes] PPML 84,823 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[FL crashes] PPML 84,823 obs; 0.0% zero outcomes; log(population) offset
+11:52:23  WARNING   state_dot_analysis_fixed — Skipping FL crashes_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping FL crashes_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:23  INFO      state_dot_analysis_fixed — [FL crashes] PPML 84,343 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[FL crashes] PPML 84,343 obs; 0.0% zero outcomes; log(population) offset
+11:52:23  WARNING   state_dot_analysis_fixed — Skipping FL crashes PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping FL crashes PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:23  INFO      state_dot_analysis_fixed — [FL fatals] PPML 84,823 obs; 90.6% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[FL fatals] PPML 84,823 obs; 90.6% zero outcomes; log(population) offset
+11:52:24  WARNING   state_dot_analysis_fixed — Skipping FL fatals_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping FL fatals_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:24  INFO      state_dot_analysis_fixed — [FL fatals] PPML 84,343 obs; 90.6% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[FL fatals] PPML 84,343 obs; 90.6% zero outcomes; log(population) offset
+11:52:24  WARNING   state_dot_analysis_fixed — Skipping FL fatals PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping FL fatals PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:24  INFO      state_dot_analysis_fixed — [FL serious_inj] PPML 84,823 obs; 65.6% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[FL serious_inj] PPML 84,823 obs; 65.6% zero outcomes; log(population) offset
+11:52:24  WARNING   state_dot_analysis_fixed — Skipping FL serious_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping FL serious_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:24  INFO      state_dot_analysis_fixed — [FL serious_inj] PPML 84,343 obs; 65.8% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[FL serious_inj] PPML 84,343 obs; 65.8% zero outcomes; log(population) offset
+11:52:24  WARNING   state_dot_analysis_fixed — Skipping FL serious_inj PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping FL serious_inj PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:25  INFO      state_dot_analysis_fixed — [IA crashes] PPML 159,972 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IA crashes] PPML 159,972 obs; 0.0% zero outcomes; log(population) offset
+11:52:25  WARNING   state_dot_analysis_fixed — Skipping IA crashes_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping IA crashes_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:25  INFO      state_dot_analysis_fixed — [IA crashes] PPML 159,613 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IA crashes] PPML 159,613 obs; 0.0% zero outcomes; log(population) offset
+11:52:25  WARNING   state_dot_analysis_fixed — Skipping IA crashes PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping IA crashes PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:25  INFO      state_dot_analysis_fixed — [IA fatals] PPML 159,972 obs; 98.3% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IA fatals] PPML 159,972 obs; 98.3% zero outcomes; log(population) offset
+11:52:26  WARNING   state_dot_analysis_fixed — Skipping IA fatals_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping IA fatals_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:26  INFO      state_dot_analysis_fixed — [IA fatals] PPML 159,613 obs; 98.3% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IA fatals] PPML 159,613 obs; 98.3% zero outcomes; log(population) offset
+11:52:26  WARNING   state_dot_analysis_fixed — Skipping IA fatals PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping IA fatals PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:26  INFO      state_dot_analysis_fixed — [IA serious_inj] PPML 159,972 obs; 93.4% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IA serious_inj] PPML 159,972 obs; 93.4% zero outcomes; log(population) offset
+11:52:26  WARNING   state_dot_analysis_fixed — Skipping IA serious_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping IA serious_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:27  INFO      state_dot_analysis_fixed — [IA serious_inj] PPML 159,613 obs; 93.4% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IA serious_inj] PPML 159,613 obs; 93.4% zero outcomes; log(population) offset
+11:52:27  WARNING   state_dot_analysis_fixed — Skipping IA serious_inj PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping IA serious_inj PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:27  INFO      state_dot_analysis_fixed — [IL crashes] PPML 202,962 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IL crashes] PPML 202,962 obs; 0.0% zero outcomes; log(population) offset
+11:52:28  INFO      state_dot_analysis_fixed — [IL crashes] PPML 202,172 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IL crashes] PPML 202,172 obs; 0.0% zero outcomes; log(population) offset
+11:52:28  INFO      state_dot_analysis_fixed — [IL fatals] PPML 202,962 obs; 96.3% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IL fatals] PPML 202,962 obs; 96.3% zero outcomes; log(population) offset
+11:52:29  INFO      state_dot_analysis_fixed — [IL fatals] PPML 202,172 obs; 96.4% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IL fatals] PPML 202,172 obs; 96.4% zero outcomes; log(population) offset
+11:52:30  INFO      state_dot_analysis_fixed — [IL serious_inj] PPML 202,962 obs; 82.6% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IL serious_inj] PPML 202,962 obs; 82.6% zero outcomes; log(population) offset
+11:52:30  INFO      state_dot_analysis_fixed — [IL serious_inj] PPML 202,172 obs; 82.7% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[IL serious_inj] PPML 202,172 obs; 82.7% zero outcomes; log(population) offset
+11:52:31  INFO      state_dot_analysis_fixed — [NV crashes] PPML 25,620 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[NV crashes] PPML 25,620 obs; 0.0% zero outcomes; log(population) offset
+11:52:31  WARNING   state_dot_analysis_fixed — Skipping NV crashes_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping NV crashes_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:31  INFO      state_dot_analysis_fixed — [NV crashes] PPML 25,431 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[NV crashes] PPML 25,431 obs; 0.0% zero outcomes; log(population) offset
+11:52:31  WARNING   state_dot_analysis_fixed — Skipping NV crashes PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping NV crashes PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:31  INFO      state_dot_analysis_fixed — [NV fatals] PPML 25,620 obs; 91.6% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[NV fatals] PPML 25,620 obs; 91.6% zero outcomes; log(population) offset
+11:52:31  WARNING   state_dot_analysis_fixed — Skipping NV fatals_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping NV fatals_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:31  INFO      state_dot_analysis_fixed — [NV fatals] PPML 25,431 obs; 91.7% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[NV fatals] PPML 25,431 obs; 91.7% zero outcomes; log(population) offset
+11:52:31  WARNING   state_dot_analysis_fixed — Skipping NV fatals PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping NV fatals PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:31  INFO      state_dot_analysis_fixed — [NV serious_inj] PPML 25,620 obs; 82.5% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[NV serious_inj] PPML 25,620 obs; 82.5% zero outcomes; log(population) offset
+11:52:31  WARNING   state_dot_analysis_fixed — Skipping NV serious_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping NV serious_per_100k WLS_TWFE direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:31  INFO      state_dot_analysis_fixed — [NV serious_inj] PPML 25,431 obs; 82.7% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[NV serious_inj] PPML 25,431 obs; 82.7% zero outcomes; log(population) offset
+11:52:32  WARNING   state_dot_analysis_fixed — Skipping NV serious_inj PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+WARNING:state_dot_analysis_fixed:Skipping NV serious_inj PPML_raw_count direct_vs_clean: 
+            All variables are collinear. Maybe your model specification introduces multicollinearity? If not, please reach out to the package authors!.
+            
+11:52:32  INFO      state_dot_analysis_fixed — [NY crashes] PPML 65,271 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[NY crashes] PPML 65,271 obs; 0.0% zero outcomes; log(population) offset
+11:52:32  INFO      state_dot_analysis_fixed — [NY crashes] PPML 64,827 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[NY crashes] PPML 64,827 obs; 0.0% zero outcomes; log(population) offset
+11:52:32  INFO      state_dot_analysis_fixed — [VA crashes] PPML 212,984 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[VA crashes] PPML 212,984 obs; 0.0% zero outcomes; log(population) offset
+11:52:33  INFO      state_dot_analysis_fixed — [VA crashes] PPML 212,283 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[VA crashes] PPML 212,283 obs; 0.0% zero outcomes; log(population) offset
+11:52:34  INFO      state_dot_analysis_fixed — [VA fatals] PPML 212,984 obs; 97.3% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[VA fatals] PPML 212,984 obs; 97.3% zero outcomes; log(population) offset
+11:52:35  INFO      state_dot_analysis_fixed — [VA fatals] PPML 212,283 obs; 97.3% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[VA fatals] PPML 212,283 obs; 97.3% zero outcomes; log(population) offset
+11:52:35  INFO      state_dot_analysis_fixed — [VA serious_inj] PPML 212,984 obs; 83.2% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[VA serious_inj] PPML 212,984 obs; 83.2% zero outcomes; log(population) offset
+11:52:37  INFO      state_dot_analysis_fixed — [VA serious_inj] PPML 212,283 obs; 83.2% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[VA serious_inj] PPML 212,283 obs; 83.2% zero outcomes; log(population) offset
+11:52:38  INFO      state_dot_analysis_fixed — [WI crashes] PPML 228,904 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[WI crashes] PPML 228,904 obs; 0.0% zero outcomes; log(population) offset
+11:52:38  INFO      state_dot_analysis_fixed — [WI crashes] PPML 228,076 obs; 0.0% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[WI crashes] PPML 228,076 obs; 0.0% zero outcomes; log(population) offset
+11:52:39  INFO      state_dot_analysis_fixed — [WI fatals] PPML 228,904 obs; 97.6% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[WI fatals] PPML 228,904 obs; 97.6% zero outcomes; log(population) offset
+11:52:40  INFO      state_dot_analysis_fixed — [WI fatals] PPML 228,076 obs; 97.6% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[WI fatals] PPML 228,076 obs; 97.6% zero outcomes; log(population) offset
+11:52:41  INFO      state_dot_analysis_fixed — [WI serious_inj] PPML 228,904 obs; 88.8% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[WI serious_inj] PPML 228,904 obs; 88.8% zero outcomes; log(population) offset
+11:52:42  INFO      state_dot_analysis_fixed — [WI serious_inj] PPML 228,076 obs; 88.8% zero outcomes; log(population) offset
+INFO:state_dot_analysis_fixed:[WI serious_inj] PPML 228,076 obs; 88.8% zero outcomes; log(population) offset
+11:52:42  INFO      state_dot_analysis_fixed — Saved 125 result rows -> /Users/beibei/Documents/GitHub/Amber-alert-death/output/tables/state_dot_analysis_share.csv
+INFO:state_dot_analysis_fixed:Saved 125 result rows -> /Users/beibei/Documents/GitHub/Amber-alert-death/output/tables/state_dot_analysis_share.csv

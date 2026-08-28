@@ -1,0 +1,8 @@
+record_type,status,sample,state,model,outcome,term,beta,se,pvalue,irr,pct_change,ci_low_pct,ci_high_pct,n_obs,zero_share_input,exposure_mode,cluster,input_n,fitted_n,terms_requested,terms_produced,error_reason,ci_low,ci_high,expected_fits,produced_fits,expected_terms,produced_terms
+fit_status,ok,day_vs_night_joint,ALL,PPML_raw_count,crashes,,,,,,,,,,0.3122439055383886,,,2408047.0,2408047.0,day_alert|night_alert,day_alert|night_alert,,,,,,,
+fit_status,ok,day_vs_night_joint,ALL,WLS_TWFE,crashes_per_100k,,,,,,,,,,0.3122439055383886,,,2408047.0,2408047.0,day_alert|night_alert,day_alert|night_alert,,,,,,,
+fit_status,ok,day_vs_night_joint,ALL,PPML_raw_count,fatals,,,,,,,,,,0.9629935901009812,,,2349647.0,2330275.0,day_alert|night_alert,day_alert|night_alert,,,,,,,
+fit_status,ok,day_vs_night_joint,ALL,WLS_TWFE,fatals_per_100k,,,,,,,,,,0.9629935901009812,,,2349647.0,2349647.0,day_alert|night_alert,day_alert|night_alert,,,,,,,
+fit_status,ok,day_vs_night_joint,ALL,PPML_raw_count,serious_inj,,,,,,,,,,0.8834282345316148,,,1502791.0,1502535.0,day_alert|night_alert,day_alert|night_alert,,,,,,,
+fit_status,ok,day_vs_night_joint,ALL,WLS_TWFE,serious_per_100k,,,,,,,,,,0.8834282345316148,,,1502791.0,1502791.0,day_alert|night_alert,day_alert|night_alert,,,,,,,
+model_count_summary,,,,,,,,,,,,,,,,,,,,,,,,,6.0,6.0,12.0,12.0

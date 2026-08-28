@@ -1,0 +1,8 @@
+source,state,year,county_fips,expected_records,fetched_records,retained_records,duplicate_records,invalid_date_count,invalid_geography_count,observed_min_date,observed_max_date,request_complete,coverage_valid,failure_reasons,source_url,source_checksum,unresolvable_geography_count,unresolvable_date_count,unresolvable_outcome_count
+INMPO_ARCGIS,18,2018,,919,919,919,0,0,0,2018-01-01,2018-12-31,True,True,,Indianapolis MPO 8-county Fatal/SSI Crash Data FeatureServer,,0,0,0
+INMPO_ARCGIS,18,2019,,911,911,911,0,0,0,2019-01-01,2019-12-31,True,True,,Indianapolis MPO 8-county Fatal/SSI Crash Data FeatureServer,,0,0,0
+INMPO_ARCGIS,18,2020,,1090,1090,1090,0,0,0,2020-01-01,2020-12-31,True,True,,Indianapolis MPO 8-county Fatal/SSI Crash Data FeatureServer,,0,0,0
+INMPO_ARCGIS,18,2021,,1224,1224,1224,0,0,0,2021-01-01,2021-12-31,True,True,,Indianapolis MPO 8-county Fatal/SSI Crash Data FeatureServer,,0,0,0
+INMPO_ARCGIS,18,2022,,1170,1170,1170,0,0,0,2022-01-01,2022-12-31,True,True,,Indianapolis MPO 8-county Fatal/SSI Crash Data FeatureServer,,0,0,0
+INMPO_ARCGIS,18,2023,,1270,1270,1270,0,0,0,2023-01-01,2023-12-31,True,True,,Indianapolis MPO 8-county Fatal/SSI Crash Data FeatureServer,,0,0,0
+INMPO_ARCGIS,18,2024,,1303,1303,1303,0,0,0,2024-01-01,2024-12-31,True,True,,Indianapolis MPO 8-county Fatal/SSI Crash Data FeatureServer,,0,0,0

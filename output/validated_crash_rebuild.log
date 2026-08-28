@@ -1,0 +1,49 @@
+2026-08-15 strict rebuild status
+
+Pinned dependency file created: requirements-analysis.txt
+Attempted command:
+  /tmp/amber-validated-venv/bin/pip install --disable-pip-version-check -r requirements-analysis.txt
+Result: blocked. The package index could not be resolved (DNS error), and the
+approved-network retry was unavailable because the account had reached its
+usage limit. The existing verified /tmp/amber-alert-analysis-venv environment
+remains available for local tests only.
+
+Local-source inventory:
+  - no FARS annual NationalCSV ZIP archive is present under data/, /tmp/, or
+    /private/tmp/;
+  - data/raw/ contains Amber/IPAWS inputs and Census population crosswalks,
+    but no raw state-DOT crash extracts;
+  - data/processed/ contains only legacy sparse state outputs and the stale
+    2013-2022 FARS aggregate, neither of which can establish strict coverage.
+
+The failed strict FARS build emitted diagnostic manifests at
+`data/processed/coverage/fars_coverage.csv` and `.parquet`.  The 12
+`FARS_NHTSA` rows for 2013–2024 are all invalid, each with
+`request_incomplete|terminal_page_error` and no source checksum.  The files
+also contain 12 invalid Connecticut-policy rows.  No **valid** coverage
+manifest, canonical panel, fatality comparison, validated panel, regression,
+or coverage allowlist decision was emitted from these incomplete local inputs.
+Existing legacy outputs were deliberately not overwritten.
+
+Local verification completed with the existing environment:
+  /tmp/amber-alert-analysis-venv/bin/pytest \
+    tests/test_crash_coverage.py tests/test_crash_download.py \
+    tests/test_fars_builder.py tests/test_state_dot_sources.py -q
+  Result: 51 passed in 1.91s
+
+  /tmp/amber-alert-analysis-venv/bin/pytest \
+    tests/test_validated_crash_pipeline.py tests/test_state_dot_analysis_core.py -q
+  Result: 21 passed in 1.01s
+
+  /tmp/amber-alert-analysis-venv/bin/python -m py_compile \
+    code/build_fars_county_day.py
+  Result: passed
+
+  git diff --check
+  Result: passed
+
+Validated-runner guard check:
+  /tmp/amber-alert-analysis-venv/bin/python code/run_validated_fars_share.py --direct-only
+  Result: exited 1 with the expected fail-fast message that
+  data/processed/fars_balanced_county_day.parquet is absent.  No analysis
+  output was written from a legacy FARS panel.
