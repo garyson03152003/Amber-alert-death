@@ -1,0 +1,6 @@
+check,outcome,fe,coef,se,pval,nobs
+"pooled (night_alert==0 or 1), robust FE",fatals_0623,fips_year + fips_dow + month_str,0.030464113777368445,0.011635430932280123,0.011666275546446059,7348614
+"pooled (night_alert==0 or 1), naive FE",fatals_0623,fips + year_str + dow + month_str,0.03067096259730374,0.012814242987772024,0.020482554047184243,7348614
+"night_alert==0 only, robust FE",fatals_0623,fips_year + fips_dow + month_str,0.02838737501798221,0.03845996693951683,0.46390287439263345,7328096
+"night_alert==0 only, naive FE",fatals_0623,fips + year_str + dow + month_str,0.02973780152709173,0.039451808838205746,0.454519269132976,7328096
+"night_alert==0 only, robust FE, serious injuries",serious_0623,fips_year + fips_dow + month_str,0.027442518235549315,0.02207313730028442,0.21957242917065445,7328096
