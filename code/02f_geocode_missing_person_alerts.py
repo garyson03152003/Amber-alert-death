@@ -1,8 +1,9 @@
 """
-02f_geocode_missing_person_alerts.py — Attach county FIPS to the Silver
-Alert / missing-endangered-person text-screening hits found by
-02e_fetch_missing_person_text_screen.py, and drop the two categories of
-hit that shouldn't be treated as new records.
+02f_geocode_missing_person_alerts.py — Attach county FIPS (and an
+extracted age, where mentioned) to the Silver Alert / missing-
+endangered-person text-screening hits found by
+02e_fetch_missing_person_text_screen.py, and drop the event codes that
+shouldn't be treated as new, genuine, elderly-relevant records.
 
 Why this second pass is needed
 --------------------------------
@@ -10,24 +11,44 @@ Why this second pass is needed
 (enough to confirm the keyword match and pull the <event>/<eventCode>
 tags near the top of the CAP message, but not enough to reach the
 <info><area><geocode> block the SAME/county code lives in -- verified
-directly: 0 of 1,428 kept snippets contain the string "SAME"). Getting
-county geography requires the full message body, which means
-re-streaming -- but only for the specific (year, month) periods that
-actually contain a kept hit, not the full 132-month archive again.
+directly: 0 of 1,428 kept snippets contain the string "SAME" -- or the
+<parameter><valueName>CMAMlongtext</valueName> field the actual WEA
+message text lives in for most of these records, needed for age
+extraction below). Getting county geography and age requires the full
+message body, which means re-streaming -- but only for the specific
+(year, month) periods that actually contain a kept hit, not the full
+132-month archive again.
 
 Dropped before re-fetching (see missing_person_text_screen_2013_2024.csv
-and its commit message for the full breakdown):
-  - event_code == 'ADR' (Administrative Message): FEMA's own NWEM event
-    code glossary marks this EAS & NWEM only -- not WEA-eligible, so it
-    doesn't carry the phone-alert mechanism this repo's analyses are
-    built around.
-  - event_code == 'CAE' (Child Abduction Emergency): these are AMBER
-    alerts that happen to also contain one of the missing-person
-    keywords (plausible, since real AMBER text describes a missing
-    child using similar language) -- they are already in
-    02c_fetch_openfema_ipaws.py's dataset, not a new population, and
-    keeping them here would double-count the same events under a
-    different label.
+and its commit message for counts; all five confirmed by manually
+pulling and reading the full message text, not assumed from the code
+alone):
+  - 'ADR' (Administrative Message): FEMA's own NWEM event code glossary
+    marks this EAS & NWEM only -- not WEA-eligible, so it doesn't carry
+    the phone-alert mechanism this repo's analyses are built around.
+  - 'CAE' (Child Abduction Emergency): these are AMBER alerts that
+    happen to also contain one of the missing-person keywords
+    (plausible, since real AMBER text describes a missing child using
+    similar language) -- they are already in 02c_fetch_openfema_ipaws.py's
+    dataset, not a new population, and keeping them here would
+    double-count the same events under a different label.
+  - 'NWS', 'RWT', 'TOE': spot-checked individually (only 1-2 hits each)
+    and confirmed as coincidental keyword collisions in unrelated
+    messages -- a Wind Chill Advisory that happened to contain
+    "dementia", Required Weekly Test (routine system test) messages
+    that happened to contain "silver/golden alert", and a 911 Telephone
+    Outage notice that happened to contain "silver alert".
+
+NOT dropped, despite generic-sounding matched keywords: a manual review
+of "missing endangered" / "endangered missing" / "endangered adult" /
+"at risk missing" hits found a genuinely mixed population -- real
+elderly/dementia cases (a 73yo Alzheimer's case, an 89yo dementia case)
+alongside missing children (an 11yo, a 14yo autistic juvenile) and a
+non-elderly adult (44yo). Rather than keep or drop these broader
+keyword categories wholesale, this pass extracts a mentioned age (see
+AGE_RE below) so the final analysis can filter to an actual elderly
+threshold directly, instead of trusting the keyword category as a proxy
+for age.
 
 Geocoding method
 -----------------
@@ -50,7 +71,8 @@ Output
 ------
 data/raw/amber/foia/missing_person_alerts_geocoded_2013_2024.csv
   Columns: alert_id, sent_utc, fips, state_fips, msg_type, event_code,
-  event_text, matched_keyword
+  event_text, matched_keyword, mentioned_age (nullable int; no age
+  reliably parsed out of the message text for that record)
   (one row per alert x county, same shape as 02c's AMBER output --
   statewide alerts appear as a single COUNTY=000 row here, same as
   02c's raw output; expansion to individual counties is a downstream
@@ -81,7 +103,33 @@ KEYWORDS = fetch_screen.KEYWORDS
 EVENT_RE = fetch_screen.EVENT_RE
 EVENTCODE_RE = fetch_screen.EVENTCODE_RE
 
-DROP_EVENT_CODES = {"ADR", "CAE"}
+DROP_EVENT_CODES = {
+    "ADR",  # Administrative Message: EAS/NWEM only per FEMA's glossary, not WEA
+    "CAE",  # Child Abduction Emergency: these ARE existing AMBER alerts, not new records
+    "NWS",  # spot-checked: a Wind Chill Advisory that coincidentally matched "dementia"
+    "RWT",  # spot-checked: Required Weekly Test messages, not real alerts
+    "TOE",  # spot-checked: a 911 Telephone Outage notice, unrelated to missing persons
+}
+
+# Loose age-mention extractor, run over the full CAP message text ("73YO",
+# "89 YO", "67 years old", "44YEAR OLD", "73 y/o", "14 years old" all seen
+# in real hits during manual review). Not meant to be exact -- it exists
+# because a spot check of the initial keyword screen found the broader
+# keywords ("missing endangered", "endangered adult", "at risk missing",
+# etc.) catch a genuinely mixed population: real elderly/dementia cases,
+# but also missing children (including a 14-year-old with autism, an
+# 11-year-old child) and non-elderly adults (a 44-year-old woman). The
+# narrower keywords (dementia, alzheimer, "silver/golden/senior alert",
+# "missing elderly/senior") are much safer bets for being elderly-
+# specific on their own, but this extracted age lets the broader
+# categories be filtered to an actual elderly threshold too, rather than
+# either keeping everything indiscriminately or discarding hits (like the
+# 73yo Roberta Hart and 89yo Parma dementia cases) that the generic
+# keywords legitimately did catch.
+AGE_RE = re.compile(
+    r"\b(\d{1,3})[\s-]*(?:y\s*/?\s*o\.?\b|yo\b|yrs?[\s.-]*old\b|years?[\s.-]*old\b)",
+    re.IGNORECASE,
+)
 
 SCREEN_CSV = AMBER_RAW / "foia" / "missing_person_text_screen_2013_2024.csv"
 CHECKPOINT_DIR = AMBER_RAW / "foia" / "_missing_person_geocode_checkpoints"
@@ -94,8 +142,8 @@ def target_months() -> list[tuple[int, int]]:
     keep["sent_dt"] = pd.to_datetime(keep["sent"], utc=True, errors="coerce")
     keep = keep.dropna(subset=["sent_dt"])
     pairs = sorted({(d.year, d.month) for d in keep["sent_dt"]})
-    log.info("Kept %d of %d screened records (dropped ADR/CAE) across %d target months",
-             len(keep), len(df), len(pairs))
+    log.info("Kept %d of %d screened records (dropped %s) across %d target months",
+             len(keep), len(df), sorted(DROP_EVENT_CODES), len(pairs))
     return pairs
 
 
@@ -128,6 +176,8 @@ def geocode_line(line: str) -> list[dict]:
         sent_utc = pd.NaT
     mt_match = ipaws_amber.MSGTYPE_RE.search(orig)
     msg_type = mt_match.group(1).capitalize() if mt_match else rec.get("msgType", "")
+    age_match = AGE_RE.search(orig)
+    mentioned_age = int(age_match.group(1)) if age_match else None
 
     same_codes: set[str] = set(ipaws_amber.SAME_RE.findall(orig))
     for info in rec.get("info", []) or []:
@@ -153,6 +203,7 @@ def geocode_line(line: str) -> list[dict]:
             "event_code": event_code,
             "event_text": ev_match.group(1).strip() if ev_match else "",
             "matched_keyword": hit,
+            "mentioned_age": mentioned_age,
         })
     if not rows:
         log.warning("  hit with no resolvable county geocode: id=%s event_code=%s", alert_id, event_code)
@@ -223,6 +274,17 @@ def main():
     log.info("event_code breakdown (unique alert_ids):\n%s",
               combined.groupby("event_code")["alert_id"].nunique().to_string())
     log.info("statewide (COUNTY=000) rows: %d", int(combined["fips"].str.endswith("000").sum()))
+    by_alert = combined.drop_duplicates(subset=["alert_id"])
+    n_with_age = int(by_alert["mentioned_age"].notna().sum())
+    log.info("mentioned_age parsed for %d/%d unique alerts (%.0f%%)",
+              n_with_age, len(by_alert), 100 * n_with_age / max(len(by_alert), 1))
+    if n_with_age:
+        ages = by_alert["mentioned_age"].dropna()
+        log.info("age distribution: min=%d, p25=%.0f, median=%.0f, p75=%.0f, max=%d; "
+                  "%d (%.0f%%) are 60+, %d (%.0f%%) are under 18",
+                  ages.min(), ages.quantile(.25), ages.median(), ages.quantile(.75), ages.max(),
+                  int((ages >= 60).sum()), 100 * (ages >= 60).mean(),
+                  int((ages < 18).sum()), 100 * (ages < 18).mean())
 
 
 if __name__ == "__main__":
