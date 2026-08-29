@@ -27,3 +27,4 @@ data/processed/commuting/_lodes_car_year_cache/
 # not a deliverable. Only the final combined
 # missing_person_text_screen_2013_2024.csv is committed.
 data/raw/amber/foia/_missing_person_checkpoints/
+data/raw/amber/foia/_missing_person_geocode_checkpoints/
