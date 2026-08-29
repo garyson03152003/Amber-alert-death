@@ -44,11 +44,17 @@ of "missing endangered" / "endangered missing" / "endangered adult" /
 "at risk missing" hits found a genuinely mixed population -- real
 elderly/dementia cases (a 73yo Alzheimer's case, an 89yo dementia case)
 alongside missing children (an 11yo, a 14yo autistic juvenile) and a
-non-elderly adult (44yo). Rather than keep or drop these broader
-keyword categories wholesale, this pass extracts a mentioned age (see
-AGE_RE below) so the final analysis can filter to an actual elderly
-threshold directly, instead of trusting the keyword category as a proxy
-for age.
+non-elderly adult (44yo). Rather than filter these broader keyword
+categories by dropping rows, this pass extracts a mentioned age (see
+AGE_RE below) and uses it to CLASSIFY, not exclude: a record with a
+parsed age under 18 is labeled population='child_amber_adjacent'
+(conceptually the same missing/endangered-minor population AMBER/CAE
+covers, just issued under a different generic code instead of CAE) and
+everything else -- including the 69% of records with no parsed age at
+all, since there's no positive evidence they're a child -- keeps
+population='missing_person'. Nothing is dropped from the dataset on
+account of age; downstream analyses can filter on the `population`
+column as needed.
 
 Geocoding method
 -----------------
@@ -72,7 +78,10 @@ Output
 data/raw/amber/foia/missing_person_alerts_geocoded_2013_2024.csv
   Columns: alert_id, sent_utc, fips, state_fips, msg_type, event_code,
   event_text, matched_keyword, mentioned_age (nullable int; no age
-  reliably parsed out of the message text for that record)
+  reliably parsed out of the message text for that record), population
+  ('child_amber_adjacent' if mentioned_age < 18, else 'missing_person' --
+  a classification, not a filter; every row from the keyword screen is
+  still present)
   (one row per alert x county, same shape as 02c's AMBER output --
   statewide alerts appear as a single COUNTY=000 row here, same as
   02c's raw output; expansion to individual counties is a downstream
@@ -268,12 +277,28 @@ def main():
     combined = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
     combined = combined.drop_duplicates(subset=["alert_id", "fips"])
     combined = combined.sort_values(["sent_utc", "alert_id", "fips"]).reset_index(drop=True)
+
+    # Classification, not filtering: nothing is dropped here. A record with
+    # a parsed age under 18 is a missing CHILD -- conceptually the same
+    # population AMBER/CAE covers (missing/endangered minor), just issued
+    # under a different generic event code instead of CAE, so it's labeled
+    # accordingly rather than lumped into the elderly/Silver-Alert-style
+    # "missing_person" population. Records with no parsed age (69% of the
+    # total) default to "missing_person" -- there's no positive evidence
+    # they're a child, and the elderly-specific keywords (dementia,
+    # alzheimer, "silver/golden/senior alert", "missing elderly/senior")
+    # are reliably adult/elderly on their own even without a numeric age.
+    combined["population"] = "missing_person"
+    combined.loc[combined["mentioned_age"] < 18, "population"] = "child_amber_adjacent"
+
     combined.to_csv(OUT_PATH, index=False)
     log.info("Saved -> %s (%d alert x county rows, %d unique alerts, %d counties)",
              OUT_PATH, len(combined), combined["alert_id"].nunique(), combined["fips"].nunique())
     log.info("event_code breakdown (unique alert_ids):\n%s",
               combined.groupby("event_code")["alert_id"].nunique().to_string())
     log.info("statewide (COUNTY=000) rows: %d", int(combined["fips"].str.endswith("000").sum()))
+    log.info("population breakdown (unique alert_ids):\n%s",
+              combined.drop_duplicates(subset=["alert_id"]).groupby("population").size().to_string())
     by_alert = combined.drop_duplicates(subset=["alert_id"])
     n_with_age = int(by_alert["mentioned_age"].notna().sum())
     log.info("mentioned_age parsed for %d/%d unique alerts (%.0f%%)",
