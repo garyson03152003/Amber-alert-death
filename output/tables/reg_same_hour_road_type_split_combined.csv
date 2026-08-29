@@ -1,0 +1,5 @@
+label,outcome,fe,coef,se,pval,nobs
+"highway fatals, combined treatment",highway_fatals,fips_hour_dow + fips_year + year_month,-0.00016618437493708943,3.261537168932129e-05,5.34462996681917e-06,993766
+"non-highway fatals, combined treatment",nonhighway_fatals,fips_hour_dow + fips_year + year_month,0.0003228636008812279,0.00019487260300639432,0.1038241664012598,993766
+"highway fatals, placebo, combined treatment",highway_fatals,fips_hour_dow + fips_year + year_month,6.674420614635194e-05,0.000190810194872882,0.7279626502675065,993766
+"non-highway fatals, placebo, combined treatment",nonhighway_fatals,fips_hour_dow + fips_year + year_month,-0.00021322771285391085,0.0006704727607650055,0.7517897788042904,993766
