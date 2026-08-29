@@ -83,3 +83,25 @@ def load_missing_person_alert_hours(
              "(%d unique alert_ids, %d counties)",
              len(alerts), alerts["alert_id"].nunique(), alerts["fips"].nunique())
     return alerts[["fips", "sent_local", "hour_local", "msg_type"]].reset_index(drop=True)
+
+
+def load_missing_person_night_alert_dates(
+    night_start: int = base.NIGHT_START_HOUR, night_end: int = base.NIGHT_END_HOUR,
+    populations: tuple[str, ...] = ("missing_person", "child_amber_adjacent"),
+) -> pd.DataFrame:
+    """(fips, effective_crash_date) pairs for missing-person alerts sent in
+    the night window [night_start, 24) U [0, night_end) -- same semantics
+    as load_verified_alerts(window="night"): an evening alert (hour_local
+    >= night_start) belongs to the FOLLOWING day's driving, so its
+    effective_crash_date is shifted forward one day; an early-morning
+    alert (hour_local < night_end) already carries the correct date."""
+    ev = load_missing_person_alert_hours(populations=populations)
+    is_night = (ev["hour_local"] >= night_start) | (ev["hour_local"] < night_end)
+    ev = ev[is_night].copy()
+    ev["effective_crash_date"] = pd.to_datetime(ev["sent_local"]).dt.normalize()
+    evening = ev["hour_local"] >= night_start
+    ev.loc[evening, "effective_crash_date"] += pd.Timedelta(days=1)
+    out = ev[["fips", "effective_crash_date"]].drop_duplicates().reset_index(drop=True)
+    log.info("Missing-person NIGHT-window alert-dates: %d unique (fips, effective_crash_date) pairs",
+             len(out))
+    return out

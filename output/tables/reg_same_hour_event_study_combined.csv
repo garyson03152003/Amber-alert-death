@@ -1,0 +1,5 @@
+label,outcome,model,fe,coef,se,pval,nobs,pct_change
+"fatals: robust FE, combined treatment",person_fatals,ols,fips_hour_dow + fips_year + year_month,0.0001566792259673462,0.00018931366947015461,0.4118201429242452,993766,
+"serious: robust FE, combined treatment",serious_inj,ols,fips_hour_dow + fips_year + year_month,-0.00013661920823835444,7.500189093935479e-05,0.07450929235055592,993766,
+"fatals: placebo (tomorrow's alert), combined treatment",person_fatals,ols,fips_hour_dow + fips_year + year_month,-0.0001464835066045863,0.0007952397689179646,0.8546012704421337,993766,
+"serious: placebo (tomorrow's alert), combined treatment",serious_inj,ols,fips_hour_dow + fips_year + year_month,-0.00019014884883032418,0.00028214351120019003,0.5034509918906271,993766,
