@@ -115,6 +115,16 @@ KEYWORDS = [
     "at-risk missing", "at risk missing",
     "mattie's call", "matties call",
     "dementia", "alzheimer",
+    # Plain "missing person(s)" with no endangered/vulnerable/critical
+    # qualifier -- added on request to catch lower-urgency missing-person
+    # alerts issued under a generic event code, which the qualifier-based
+    # phrases above would miss. Broader and noisier than the rest of this
+    # list (a generic phrase, not a program name or medical term), so
+    # expect a higher false-positive rate here -- verify hits the same way
+    # the rest of this screen's output already was (spot-check against
+    # the full message text, not just the matched phrase) before trusting
+    # them as real, low-mobility-impact missing-person events.
+    "missing person",
 ]
 
 EVENT_RE = re.compile(r"<event>(.*?)</event>", re.IGNORECASE | re.DOTALL)
