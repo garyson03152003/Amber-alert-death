@@ -20,3 +20,11 @@ data/processed/commuting/_lodes_year_cache/
 data/raw/nhts/
 data/processed/commuting/_lodes_car_checkpoints/
 data/processed/commuting/_lodes_car_year_cache/
+
+# Silver Alert text-screening per-month checkpoints: reproducible via
+# code/02e_fetch_missing_person_text_screen.py (resumable, kept on disk
+# only so a long multi-hour run doesn't lose progress on a stream drop),
+# not a deliverable. Only the final combined
+# missing_person_text_screen_2013_2024.csv is committed.
+data/raw/amber/foia/_missing_person_checkpoints/
+data/raw/amber/foia/_missing_person_geocode_checkpoints/

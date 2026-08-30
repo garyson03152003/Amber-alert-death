@@ -1,5 +1,5 @@
 label,outcome,fe,coef,se,pval,nobs
-highway fatals,highway_fatals,fips_hour_dow + fips_year + year_month,-0.00017460966982325675,3.472302561601547e-05,6.732630046135668e-06,948423
-non-highway fatals,nonhighway_fatals,fips_hour_dow + fips_year + year_month,0.00034557781376571303,0.00019379756186734784,0.08062611789530982,948423
-"highway fatals, placebo",highway_fatals,fips_hour_dow + fips_year + year_month,0.00011812465516229922,0.00017627327403394333,0.5058631710307953,948423
-"non-highway fatals, placebo",nonhighway_fatals,fips_hour_dow + fips_year + year_month,1.7849330555891424e-05,0.0005703952691116718,0.9751605223506605,948423
+highway fatals,highway_fatals,fips_hour_dow + fips_year + year_month,-0.00017460966982413718,3.4723027393126714e-05,6.732636038675466e-06,948423
+non-highway fatals,nonhighway_fatals,fips_hour_dow + fips_year + year_month,0.00034557781376408017,0.00019379755799624128,0.08062611202647596,948423
+"highway fatals, placebo",highway_fatals,fips_hour_dow + fips_year + year_month,0.00011812465509055245,0.00017627329478585652,0.5058632211506824,948423
+"non-highway fatals, placebo",nonhighway_fatals,fips_hour_dow + fips_year + year_month,1.784933043732133e-05,0.0005703953139582491,0.9751605244679311,948423

@@ -1,0 +1,5 @@
+label,outcome,fe,coef,se,pval,nobs
+drunk fatals,drunk_fatals,fips_hour_dow + fips_year + year_month,0.00010651095527604769,6.620129667528083e-05,0.11393591727076524,948423
+sober fatals,sober_fatals,fips_hour_dow + fips_year + year_month,6.445718866743978e-05,0.00016911484419920964,0.7047108353310472,948423
+"drunk fatals, placebo",drunk_fatals,fips_hour_dow + fips_year + year_month,-3.7773241648171646e-05,0.00031832785259495615,0.9060190422149423,948423
+"sober fatals, placebo",sober_fatals,fips_hour_dow + fips_year + year_month,0.00017374722717128417,0.0007047785820930732,0.8062833436860382,948423

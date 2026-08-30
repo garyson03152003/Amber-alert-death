@@ -1,0 +1,239 @@
+"""
+02e_fetch_missing_person_text_screen.py — Screen the full OpenFEMA IPAWS
+Archived Alerts archive for Silver-Alert / missing-vulnerable-person
+language, 2013-2024.
+
+Why this exists
+----------------
+Checked FEMA's official NWEM Event Code Descriptions fact sheet (current
+for essentially this repo's entire study period): there is no
+Silver-Alert-equivalent IPAWS event code before the "Missing and
+Endangered Persons" (MEP) code, added September 2025 -- after this
+repo's 2013-2024 window ends. So historical Silver Alerts sent through
+IPAWS/WEA, if any, went out under a generic code (most plausibly CEM or
+LAE) with no structured tag to identify them the way AMBER's `>CAE<`
+eventCode does in 02c_fetch_openfema_ipaws.py. The only way to find them
+is free-text screening of the message content. This is NOT a dead end:
+a spot check found a real hit -- Camden County, GA issued an
+Alzheimer's-related "Local Area Emergency" (LAE) Alert on 2019-06-05,
+with a matching Cancel 43 minutes later (the classic resolved-case
+Alert/Cancel pattern) -- confirming some jurisdictions really did push
+these through IPAWS under a generic code, findable only via text.
+
+Why the bulk .jsonl stream, not the paginated query API
+-----------------------------------------------------------
+The standard $top/$skip paginated API (used by 02c for AMBER) degrades
+sharply under sustained use: a server-side contains() filter returned
+503s/60s+ timeouts on every attempt in this session (including the
+proven AMBER pattern, so it's a current backend issue with that
+operation generally); even a bare date-only filter with no contains()
+went from ~1-4s/request to 40-60s/request after roughly 6 consecutive
+requests, consistent with request-count throttling rather than a
+query-cost issue. FEMA's DataSets metadata
+(https://www.fema.gov/api/open/v1/DataSets?$filter=name eq
+'IpawsArchivedAlerts') advertises a separate bulk distribution:
+IpawsArchivedAlerts.jsonl (newline-delimited JSON, one record per line).
+Verified directly: requesting this endpoint with a $filter and no
+$top/$skip streams EVERY matching record continuously (no 1000-row page
+cap observed) at a sustained ~200 records/sec with no throttling
+slowdown over a 2-minute test pull -- a fundamentally different, much
+more reliable code path than the paginated query API.
+
+Streaming, not save-then-filter
+---------------------------------
+The full archive is >10GB (4.88M records since June 2012, mostly NWS
+weather products). Downloading a whole year to disk before filtering it
+would mean tens of GB of transient raw data for no benefit -- this
+streams the response line-by-line (requests' iter_lines(), one JSON
+object per line) and only ever writes MATCHING rows to disk, discarding
+each non-matching line immediately.
+
+Per-MONTH requests, not per-year: a first version of this script used
+one HTTP request per calendar year to minimize connection-setup
+overhead. In practice, sustained streams reliably died with
+"Response ended prematurely" around 68-80 minutes in, REGARDLESS of how
+many records had been scanned by then (observed directly: 2014 failed
+three times in a row, always in that same ~70-80min window, having
+scanned anywhere from 232k to 282k records depending on the attempt) --
+a server/proxy-side connection duration limit, not something retries
+can work around, since a naive whole-year retry just restarts from
+record 0 and burns another 70-80 minutes before dying again in the same
+place. Chunking to one month per request keeps each individual stream
+comfortably under that limit (a month completes in single-digit
+minutes at observed throughput) and checkpoints per month, so a
+transient failure costs at most one month's work, not up to a full year.
+
+Keywords
+--------
+Local (case-insensitive) substring match against known Silver-Alert-
+program names and the descriptive language these alerts typically use
+("last seen... has dementia", etc.), not just the literal phrase
+"Silver Alert" -- since states use different program names (Georgia's
+"Mattie's Call", some states' "Golden Alert" / "Senior Alert", Ohio's
+"Missing Adult Alert", etc.) and the message body itself often names the
+underlying condition even when the program-name phrase is absent.
+
+Checkpointed per month so an interruption doesn't lose progress; safe to
+re-run (skips months whose checkpoint file already exists).
+
+Output
+------
+data/raw/amber/foia/missing_person_text_screen_2013_2024.csv
+  Columns: year, id, sent, msgType, event_text, event_code, snippet, matched_keyword
+"""
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+import pandas as pd
+import requests
+
+sys.path.insert(0, str(Path(__file__).parent))
+from config import AMBER_RAW, STUDY_YEARS
+from utils import get_logger
+
+log = get_logger("02e_missing_person")
+
+BULK_URL = "https://www.fema.gov/api/open/v1/IpawsArchivedAlerts.jsonl"
+RETRY_DELAYS = [10, 30, 60]  # a dropped multi-hour stream is expensive to restart
+
+CHECKPOINT_DIR = AMBER_RAW / "foia" / "_missing_person_checkpoints"
+OUT_PATH = AMBER_RAW / "foia" / "missing_person_text_screen_2013_2024.csv"
+
+# Case-insensitive substrings (matched on a lowercased copy of
+# originalMessage). Covers: the generic phrase and its common variants;
+# known non-"Silver Alert"-named state program names; and the
+# descriptive/medical language these alerts characteristically use even
+# when the program-name phrase itself is absent from the message body.
+KEYWORDS = [
+    "silver alert", "silver amber", "senior alert", "golden alert",
+    "gold alert", "critical missing", "missing endangered",
+    "endangered missing", "missing senior", "missing elderly",
+    "missing adult alert", "missing vulnerable", "endangered adult",
+    "at-risk missing", "at risk missing",
+    "mattie's call", "matties call",
+    "dementia", "alzheimer",
+    # Plain "missing person(s)" with no endangered/vulnerable/critical
+    # qualifier -- added on request to catch lower-urgency missing-person
+    # alerts issued under a generic event code, which the qualifier-based
+    # phrases above would miss. Broader and noisier than the rest of this
+    # list (a generic phrase, not a program name or medical term), so
+    # expect a higher false-positive rate here -- verify hits the same way
+    # the rest of this screen's output already was (spot-check against
+    # the full message text, not just the matched phrase) before trusting
+    # them as real, low-mobility-impact missing-person events.
+    "missing person",
+]
+
+EVENT_RE = re.compile(r"<event>(.*?)</event>", re.IGNORECASE | re.DOTALL)
+EVENTCODE_RE = re.compile(
+    r"<eventCode>\s*<valueName>.*?</valueName>\s*<value>(.*?)</value>\s*</eventCode>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def screen_line(line: str, year: int) -> dict | None:
+    try:
+        rec = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    orig = rec.get("originalMessage", "") or ""
+    low = orig.lower()
+    hit = next((kw for kw in KEYWORDS if kw in low), None)
+    if hit is None:
+        return None
+    ev_match = EVENT_RE.search(orig)
+    code_match = EVENTCODE_RE.search(orig)
+    return {
+        "year": year,
+        "id": rec.get("id") or rec.get("identifier", ""),
+        "sent": rec.get("sent", ""),
+        "msgType": rec.get("msgType", ""),
+        "event_text": ev_match.group(1).strip() if ev_match else "",
+        "event_code": code_match.group(1).strip() if code_match else "",
+        "matched_keyword": hit,
+        "snippet": orig[:400].replace("\n", " "),
+    }
+
+
+def fetch_month(year: int, month: int, session: requests.Session) -> pd.DataFrame:
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+    date_filter = (
+        f"sent gt '{year}-{month:02d}-01T00:00:00Z' and "
+        f"sent lt '{next_year}-{next_month:02d}-01T00:00:00Z'"
+    )
+    params = {
+        "$filter": date_filter,
+        "$select": "id,sent,msgType,originalMessage",
+    }
+    for attempt, delay in enumerate([0] + RETRY_DELAYS, start=1):
+        if delay:
+            log.warning("    [%d] retrying %d-%02d in %ds...", attempt, year, month, delay)
+            time.sleep(delay)
+        rows = []
+        n_scanned = 0
+        t0 = time.time()
+        try:
+            with session.get(BULK_URL, params=params, stream=True, timeout=(30, 300)) as r:
+                r.raise_for_status()
+                for raw_line in r.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    n_scanned += 1
+                    hit = screen_line(raw_line, year)
+                    if hit is not None:
+                        rows.append(hit)
+            log.info("  %d-%02d: DONE -- %d scanned, %d hits, %.0fs",
+                     year, month, n_scanned, len(rows), time.time() - t0)
+            return pd.DataFrame(rows)
+        except Exception as exc:
+            log.warning("  %d-%02d: stream failed after %d records (%.0fs): %s",
+                        year, month, n_scanned, time.time() - t0, exc)
+    log.error("  %d-%02d: giving up after %d attempts", year, month, len(RETRY_DELAYS) + 1)
+    return pd.DataFrame()
+
+
+def main():
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "amber-alert-research/1.0 (academic; contact: researcher@university.edu)",
+        "Accept": "application/jsonl+json",
+    })
+
+    # Migrate any already-completed full-year checkpoints from the earlier
+    # per-year version of this script (safe to keep as-is -- a completed
+    # year need not be re-split into months).
+    done_years = {int(p.stem) for p in CHECKPOINT_DIR.glob("[0-9][0-9][0-9][0-9].parquet")}
+
+    months = [(y, m) for y in STUDY_YEARS if y not in done_years for m in range(1, 13)]
+    log.info("Screening %d months (%d years already fully done: %s)",
+             len(months), len(done_years), sorted(done_years))
+
+    for year, month in months:
+        ckpt = CHECKPOINT_DIR / f"{year}_{month:02d}.parquet"
+        if ckpt.exists():
+            continue
+        log.info("Streaming %d-%02d ...", year, month)
+        df_m = fetch_month(year, month, session)
+        df_m.to_parquet(ckpt, index=False)
+
+    parts = sorted(CHECKPOINT_DIR.glob("*.parquet"))
+    if not parts:
+        log.warning("No checkpoint files found.")
+        return
+    combined = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["id"])
+    combined.to_csv(OUT_PATH, index=False)
+    log.info("Saved -> %s (%d unique keyword-matched records)", OUT_PATH, len(combined))
+    if len(combined):
+        log.info("matched_keyword counts:\n%s", combined["matched_keyword"].value_counts().to_string())
+        log.info("event_text top values:\n%s", combined["event_text"].value_counts().head(20).to_string())
+        log.info("year counts:\n%s", combined.groupby("year")["id"].nunique().to_string())
+
+
+if __name__ == "__main__":
+    main()

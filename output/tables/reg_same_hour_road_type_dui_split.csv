@@ -1,0 +1,9 @@
+label,outcome,fe,coef,se,pval,nobs
+highway_drunk,highway_drunk,fips_hour_dow + fips_year + year_month,-2.3049098953131515e-05,2.6762521007705653e-05,0.3932143587267485,948423
+highway_sober,highway_sober,fips_hour_dow + fips_year + year_month,-0.00015156057085590944,3.322336588351776e-05,3.30951270826052e-05,948423
+nonhighway_drunk,nonhighway_drunk,fips_hour_dow + fips_year + year_month,0.00012956005423692878,7.488942840019656e-05,0.08979610157864726,948423
+nonhighway_sober,nonhighway_sober,fips_hour_dow + fips_year + year_month,0.00021601775953630333,0.00016281204191209817,0.19060521909642292,948423
+"highway_drunk, placebo",highway_drunk,fips_hour_dow + fips_year + year_month,-3.200283141320333e-05,1.6591013845019787e-05,0.059426160476065526,948423
+"highway_sober, placebo",highway_sober,fips_hour_dow + fips_year + year_month,0.000150127487145603,0.0001826707716021764,0.4150656795735397,948423
+"nonhighway_drunk, placebo",nonhighway_drunk,fips_hour_dow + fips_year + year_month,-5.770409814921156e-06,0.0003147429678725063,0.9854455921608447,948423
+"nonhighway_sober, placebo",nonhighway_sober,fips_hour_dow + fips_year + year_month,2.3619740674419924e-05,0.0005486557942087925,0.9658329819651557,948423

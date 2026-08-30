@@ -1,0 +1,6 @@
+label,outcome,treatment,fe,coef,se,pval,nobs
+"OWN night_alert (spillover-controlled) -> fatals, combined",fatals_0623,night_alert,fips + year_str + dow + month_str,-0.0030425636065123177,0.00312581892450581,0.3350574550732026,7348614
+"CROSS_SPILLOVER (own-controlled) -> fatals, combined",fatals_0623,cross_spillover,fips + year_str + dow + month_str,0.02992233456284042,0.0126691702803177,0.022120823928664768,7348614
+"CROSS_SPILLOVER (own-controlled) -> serious injuries, combined",serious_0623,cross_spillover,fips + year_str + dow + month_str,0.016449690301869036,0.006759724844869832,0.018571218540874845,7348614
+"OWN night_alert (spillover-controlled) -> fatals, combined",fatals_0623,night_alert,fips_year + fips_dow + month_str,-0.0033018880437698656,0.0028486929481822396,0.2519257376149395,7348614
+"CROSS_SPILLOVER (own-controlled) -> fatals, combined",fatals_0623,cross_spillover,fips_year + fips_dow + month_str,0.03003967122426532,0.011571473158567658,0.012349812251234882,7348614
