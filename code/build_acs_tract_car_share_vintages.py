@@ -13,6 +13,7 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -60,6 +61,14 @@ LEGACY_STATE_NAMES = {
     "49": "Utah", "50": "Vermont", "51": "Virginia", "53": "Washington",
     "54": "WestVirginia", "55": "Wisconsin", "56": "Wyoming",
 }
+# Census's fixed-width archives use a vintage-specific sequence number for
+# each table.  In particular, B08301 is sequence 0028 in 2015 but 0027 in
+# 2020.  Resolve the location from the publisher's lookup rather than
+# silently parsing a same-shaped, unrelated sequence.
+LEGACY_LOOKUP_URL = (
+    "https://www2.census.gov/programs-surveys/acs/summary_file/{year}/"
+    "documentation/user_tools/ACS_5yr_Seq_Table_Number_Lookup.txt"
+)
 # The fixed-width/sequence-file Summary File archives cover the 2009--2020
 # vintages.  The table-based B08301 files begin with the 2021 vintage.
 LEGACY_VINTAGE_RANGE = range(2009, 2021)
@@ -101,6 +110,31 @@ def build_car_share_frame(
         "omitted_rows": int((~keep).sum()),
     }
     return (result, diagnostics) if return_diagnostics else result
+
+
+@lru_cache(maxsize=None)
+def resolve_legacy_table_location(
+    vintage: int, table_id: str = "B08301"
+) -> tuple[str, int]:
+    """Return ``(sequence_number, start_position)`` from Census metadata."""
+    year = int(vintage)
+    url = LEGACY_LOOKUP_URL.format(year=year)
+    response = requests.get(url, timeout=600)
+    response.raise_for_status()
+    raw = response.content.decode("latin-1")
+    lookup = pd.read_csv(io.StringIO(raw), dtype=str, low_memory=False)
+    lookup.columns = [str(column).strip() for column in lookup.columns]
+    required = {"Table ID", "Sequence Number", "Start Position"}
+    missing = required.difference(lookup.columns)
+    if missing:
+        raise ValueError(f"ACS {year} lookup missing columns: {sorted(missing)}")
+    matches = lookup[lookup["Table ID"].astype(str).str.strip().eq(str(table_id))]
+    matches = matches[matches["Sequence Number"].notna() & matches["Start Position"].notna()]
+    if matches.empty:
+        raise ValueError(f"{table_id} not present in ACS {year} sequence lookup")
+    sequence = str(matches.iloc[0]["Sequence Number"]).strip().zfill(4)
+    start_position = int(str(matches.iloc[0]["Start Position"]).strip())
+    return sequence, start_position
 
 
 def _atomic_write_parquet(
@@ -231,14 +265,22 @@ def fetch_table_based_state(vintage: int, state_fips: str) -> tuple[pd.DataFrame
 
 
 def fetch_legacy_state(
-    vintage: int, state_name: str, *, sequence_number: str = "0027"
+    vintage: int, state_name: str, *, sequence_number: str | None = None,
+    start_position: int | None = None,
 ) -> tuple[pd.DataFrame, bytes, str]:
-    """Download a legacy state archive through the pilot's published parser."""
+    """Download a legacy archive using its vintage-specific table location."""
+    if sequence_number is None or start_position is None:
+        resolved_sequence, resolved_start = resolve_legacy_table_location(vintage)
+        sequence_number = resolved_sequence if sequence_number is None else sequence_number
+        start_position = resolved_start if start_position is None else start_position
     url = LEGACY_STATE_URL.format(year=int(vintage), state=str(state_name))
     response = requests.get(url, timeout=600)
     response.raise_for_status()
     payload = response.content
-    parsed = parse_legacy_tract_archive(payload, sequence_number=sequence_number)
+    parser_kwargs = {"sequence_number": str(sequence_number)}
+    if int(start_position) != 157:
+        parser_kwargs["start_position"] = int(start_position)
+    parsed = parse_legacy_tract_archive(payload, **parser_kwargs)
     if parsed is None:
         raise ValueError(f"could not parse B08301 legacy archive: {url}")
     raw = pd.DataFrame({

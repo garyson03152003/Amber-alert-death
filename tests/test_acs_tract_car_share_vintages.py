@@ -190,13 +190,58 @@ def test_legacy_fetch_reuses_pilot_archive_parser(monkeypatch):
         "tract": ["55001000100"], "total_workers": [10], "car_total": [8],
     }))
 
-    raw, payload, url = builder.fetch_legacy_state(2020, "Wisconsin")
+    raw, payload, url = builder.fetch_legacy_state(
+        2020, "Wisconsin", sequence_number="0027", start_position=157
+    )
 
     assert payload == b"archive"
     assert url.endswith("Wisconsin_Tracts_Block_Groups_Only.zip")
     assert raw.to_dict("records") == [{
         "GEO_ID": "1400000US55001000100", "B08301_E001": 10, "B08301_E002": 8,
     }]
+
+
+def test_legacy_sequence_location_comes_from_vintage_lookup(monkeypatch):
+    import build_acs_tract_car_share_vintages as builder
+
+    class Response:
+        content = (
+            b"File ID,Table ID,Sequence Number,Line Number,Start Position,Total Cells in Table,Total Cells in Sequence,Table Title,Subject Area\n"
+            b"ACSSF,B08301,0028,,157,21 CELLS,199 CELLS,MEANS OF TRANSPORTATION TO WORK,Employment\n"
+        )
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(builder.requests, "get", lambda *args, **kwargs: Response())
+
+    assert builder.resolve_legacy_table_location(2015) == ("0028", 157)
+
+
+def test_legacy_fetch_passes_vintage_sequence_to_parser(monkeypatch):
+    import build_acs_tract_car_share_vintages as builder
+
+    class Response:
+        content = b"archive"
+
+        def raise_for_status(self):
+            return None
+
+    seen = {}
+    monkeypatch.setattr(builder.requests, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(builder, "resolve_legacy_table_location", lambda vintage: ("0028", 157))
+
+    def fake_parse(payload, *, sequence_number, start_position=157):
+        seen.update(sequence_number=sequence_number, start_position=start_position)
+        return pd.DataFrame({
+            "tract": ["55001000100"], "total_workers": [10], "car_total": [8],
+        })
+
+    monkeypatch.setattr(builder, "parse_legacy_tract_archive", fake_parse)
+    raw, _, _ = builder.fetch_state_for_vintage(2015, "55")
+
+    assert seen == {"sequence_number": "0028", "start_position": 157}
+    assert raw["B08301_E001"].tolist() == [10]
 
 
 def test_cli_selects_legacy_source_and_canonical_dc_archive_name(monkeypatch, tmp_path):

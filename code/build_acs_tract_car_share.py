@@ -106,7 +106,9 @@ def _download_with_retry(url: str, attempts: int = 3) -> bytes:
     raise last_exc
 
 
-def parse_legacy_tract_archive(zdata: bytes, *, sequence_number: str = SEQ_NUM) -> pd.DataFrame | None:
+def parse_legacy_tract_archive(
+    zdata: bytes, *, sequence_number: str = SEQ_NUM, start_position: int = 157
+) -> pd.DataFrame | None:
     """Parse one legacy ACS tract archive into the B08301 worker columns.
 
     This intentionally preserves the 2020 pilot's file layout assumptions so
@@ -136,7 +138,12 @@ def parse_legacy_tract_archive(zdata: bytes, *, sequence_number: str = SEQ_NUM) 
         geo_idx = pd.DataFrame({"logrecno": logrecno.values, "tract": tract_fips.values})
 
         seq["logrecno"] = seq.iloc[:, 5].astype(str).str.zfill(7)
-        data_offset = 156  # SEQ_START=157, 1-indexed -> 0-indexed 156 (same as 01e, same vintage)
+        if int(start_position) < 1:
+            raise ValueError("ACS sequence start position must be positive")
+        # Census reports sequence positions as 1-indexed columns including
+        # the six record-header fields.  The lookup is vintage-specific even
+        # when the B08301 start position is unchanged across vintages.
+        data_offset = int(start_position) - 1
         ncols_needed = 2   # B08301_001 (total workers), B08301_002 (car/truck/van)
 
         if seq.shape[1] < data_offset + ncols_needed:
