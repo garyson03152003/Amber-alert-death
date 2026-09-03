@@ -1,0 +1,11 @@
+reason,count
+amber,3564
+cmas_blocked,10061
+keep,84871
+kept_county_hours,205810
+missing_timezone,1002
+no_numeric_same,6
+no_outcome_county,184
+person_treatment,42
+test_event,11013
+weather_excluded,71553

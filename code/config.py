@@ -14,6 +14,8 @@ DATA_RAW = ROOT / "data" / "raw"
 DATA_PROC = ROOT / "data" / "processed"
 OUTPUT_FIGS = ROOT / "output" / "figures"
 OUTPUT_TABS = ROOT / "output" / "tables"
+COMMUTING_PROC = DATA_PROC / "commuting"
+ROUTE_PILOT_CACHE = COMMUTING_PROC / "route_pilot"
 
 FARS_RAW = DATA_RAW / "fars"
 AMBER_RAW = DATA_RAW / "amber"

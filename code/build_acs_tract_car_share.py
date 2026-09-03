@@ -106,17 +106,19 @@ def _download_with_retry(url: str, attempts: int = 3) -> bytes:
     raise last_exc
 
 
-def fetch_state(url_name: str) -> pd.DataFrame | None:
-    url = f"{BASE_URL}/{url_name}_Tracts_Block_Groups_Only.zip"
-    try:
-        zdata = _download_with_retry(url)
+def parse_legacy_tract_archive(zdata: bytes, *, sequence_number: str = SEQ_NUM) -> pd.DataFrame | None:
+    """Parse one legacy ACS tract archive into the B08301 worker columns.
 
+    This intentionally preserves the 2020 pilot's file layout assumptions so
+    newer builders can reuse its parsing without changing its output.
+    """
+    try:
         with zipfile.ZipFile(io.BytesIO(zdata)) as z:
             files = z.namelist()
             geo_file = next((f for f in files if f.startswith("g") and f.endswith(".csv")), None)
-            seq_file = next((f for f in files if f.startswith("e") and SEQ_NUM in f), None)
+            seq_file = next((f for f in files if f.startswith("e") and sequence_number in f), None)
             if geo_file is None or seq_file is None:
-                log.warning("%s: missing geo=%s or seq%s=%s", url_name, geo_file, SEQ_NUM, seq_file)
+                log.warning("missing geo=%s or seq%s=%s", geo_file, sequence_number, seq_file)
                 return None
 
             with z.open(geo_file) as f:
@@ -138,7 +140,7 @@ def fetch_state(url_name: str) -> pd.DataFrame | None:
         ncols_needed = 2   # B08301_001 (total workers), B08301_002 (car/truck/van)
 
         if seq.shape[1] < data_offset + ncols_needed:
-            log.warning("%s: seq%s too narrow (%d cols)", url_name, SEQ_NUM, seq.shape[1])
+            log.warning("seq%s too narrow (%d cols)", sequence_number, seq.shape[1])
             return None
 
         data_cols = list(seq.columns[data_offset: data_offset + ncols_needed])
@@ -152,6 +154,15 @@ def fetch_state(url_name: str) -> pd.DataFrame | None:
         result["car_total"] = merged.iloc[:, 3].apply(parse_acs_int)
         return result
 
+    except Exception as exc:
+        log.warning("FAILED legacy tract archive: %s", exc)
+        return None
+
+
+def fetch_state(url_name: str) -> pd.DataFrame | None:
+    url = f"{BASE_URL}/{url_name}_Tracts_Block_Groups_Only.zip"
+    try:
+        return parse_legacy_tract_archive(_download_with_retry(url))
     except Exception as exc:
         log.warning("FAILED %s: %s", url_name, exc)
         return None

@@ -32,7 +32,7 @@ county border is both shorter-distance AND, if that border area happens
 to be less dense, more car-heavy than a home tract on the far side).
 
 Same three-vintage time-weighting as build_lodes_county_pair_distance.py
-(2013/2018/2022, weights 3/12, 4/12, 5/12). Raw per-state LODES files
+(2013/2018/2022, weights 3/12, 5/12, 4/12). Raw per-state LODES files
 were not retained from that run, so this re-downloads and re-processes
 from scratch -- there's no way to reuse those checkpoints since they
 only stored county-level sums, not the tract-level detail this needs.
@@ -69,7 +69,16 @@ YEAR_CACHE_DIR = DATA_PROC / "commuting" / "_lodes_car_year_cache"
 OUT_PATH = DATA_PROC / "commuting" / "county_pair_lodes_car_dosage.parquet"
 EARTH_RADIUS_MI = 3958.8
 
-YEAR_WEIGHTS = {2013: 3 / 12, 2018: 4 / 12, 2022: 5 / 12}
+YEAR_WEIGHTS = {2013: 3 / 12, 2018: 5 / 12, 2022: 4 / 12}
+
+# Official LODES8 directory listings do not contain the requested target year
+# for these state-vintage combinations. Use the closest available source year
+# rather than silently dropping the state from the national table.
+STATE_YEAR_FALLBACKS = {
+    ("ak", 2018): 2016,
+    ("ak", 2022): 2016,
+    ("mi", 2022): 2021,
+}
 
 STATES = [
     "al", "ak", "az", "ar", "ca", "co", "ct", "de", "dc", "fl", "ga", "hi",
@@ -78,6 +87,10 @@ STATES = [
     "ok", "or", "pa", "ri", "sc", "sd", "tn", "tx", "ut", "vt", "va", "wa",
     "wv", "wi", "wy",
 ]
+
+
+def source_year_for_state(state: str, target_year: int) -> int:
+    return STATE_YEAR_FALLBACKS.get((state.lower(), target_year), target_year)
 
 
 def haversine_miles(lat1, lon1, lat2, lon2):
@@ -105,17 +118,14 @@ def load_tract_car_share() -> pd.Series:
     return s, national_mean
 
 
-def _download(url: str, tmp_path: Path, attempts: int = 3):
-    last_exc = None
-    for i in range(attempts):
-        result = subprocess.run(
-            ["curl", "-sS", "--fail", "--max-time", "180",
-             "--retry", "2", "--retry-delay", "2", "-o", str(tmp_path), url],
-            capture_output=True, text=True)
-        if result.returncode == 0:
-            return
-        last_exc = RuntimeError(f"curl exit {result.returncode}: {result.stderr[:200]}")
-    raise last_exc
+def _download(url: str, tmp_path: Path):
+    result = subprocess.run(
+        ["curl", "-sS", "--fail", "--connect-timeout", "30", "--max-time", "1800",
+         "--retry", "4", "--retry-all-errors", "--retry-delay", "2",
+         "-o", str(tmp_path), url],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"curl exit {result.returncode}: {result.stderr[:200]}")
 
 
 def process_one_file(url: str, checkpoint_path: Path, tract_lat, tract_lon,
@@ -126,23 +136,10 @@ def process_one_file(url: str, checkpoint_path: Path, tract_lat, tract_lon,
 
     with tempfile.NamedTemporaryFile(suffix=".csv.gz") as tmp:
         t0 = time.time()
-        try:
-            _download(url, Path(tmp.name))
-        except Exception as exc:
-            log.warning("  download failed (%s), skipping: %s", url, exc)
-            pd.DataFrame(columns=["h_county", "w_county", "weight_sum", "weighted_dist_sum",
-                                  "weighted_car_sum", "weighted_car_dist_sum"]).to_parquet(checkpoint_path)
-            return
-
-        try:
-            df = pd.read_csv(tmp.name, compression="gzip",
-                             usecols=["w_geocode", "h_geocode", "S000"],
-                             dtype={"w_geocode": str, "h_geocode": str, "S000": "int32"})
-        except Exception as exc:
-            log.warning("  read failed (%s), skipping: %s", url, exc)
-            pd.DataFrame(columns=["h_county", "w_county", "weight_sum", "weighted_dist_sum",
-                                  "weighted_car_sum", "weighted_car_dist_sum"]).to_parquet(checkpoint_path)
-            return
+        _download(url, Path(tmp.name))
+        df = pd.read_csv(tmp.name, compression="gzip",
+                         usecols=["w_geocode", "h_geocode", "S000"],
+                         dtype={"w_geocode": str, "h_geocode": str, "S000": "int32"})
 
     df["h_tract"] = df["h_geocode"].str[:11]
     df["w_tract"] = df["w_geocode"].str[:11]
@@ -182,8 +179,11 @@ def build_year(year: int, tract_lat, tract_lon, tract_car, car_fallback: float) 
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     for i, state in enumerate(STATES, 1):
         log.info("[year %d] [%d/%d] %s", year, i, len(STATES), state.upper())
+        source_year = source_year_for_state(state, year)
+        if source_year != year:
+            log.info("  using nearest available LODES year %d for target %d", source_year, year)
         for filetype in ("main", "aux"):
-            url = f"{LODES_BASE}/{state}/od/{state}_od_{filetype}_JT00_{year}.csv.gz"
+            url = f"{LODES_BASE}/{state}/od/{state}_od_{filetype}_JT00_{source_year}.csv.gz"
             ckpt = CHECKPOINT_DIR / f"{state}_{filetype}_{year}.parquet"
             process_one_file(url, ckpt, tract_lat, tract_lon, tract_car, car_fallback)
 

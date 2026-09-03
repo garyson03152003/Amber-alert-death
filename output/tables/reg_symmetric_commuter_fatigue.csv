@@ -1,0 +1,7 @@
+outcome,estimand,treatment,coef,se_state_date,pval_state_date,pval_wild_state,nobs,bootstrap_reps,analytic_cluster,wild_cluster,wild_weights,wild_impose_null
+fatals_0623,own,own_driver_distance,-0.0002016857892458964,0.0006186438296818151,0.7458029642057671,0.7859,7309176,9999,state_code + date_str,state_code,rademacher,True
+fatals_0623,cross,cross_driver_distance,0.0005472376614689367,0.0001840171425108728,0.004553069698271406,0.0265,7309176,9999,state_code + date_str,state_code,rademacher,True
+fatals_0623,own_minus_cross,own_driver_distance,-0.0007489234507148332,0.0007458694312957926,0.32026593503081857,0.3851,7309176,9999,state_code + date_str,state_code,rademacher,True
+fatals_hours_awake_slope,own,own_driver_distance,4.1888558338879845e-06,6.2327470079853005e-06,0.5046944810617144,0.5247,7309176,9999,state_code + date_str,state_code,rademacher,True
+fatals_hours_awake_slope,cross,cross_driver_distance,3.092028889133269e-06,1.9291944373511796e-06,0.11541599683010872,0.3229,7309176,9999,state_code + date_str,state_code,rademacher,True
+fatals_hours_awake_slope,own_minus_cross,own_driver_distance,1.0968269447547154e-06,6.845089208627533e-06,0.8733542403999547,0.8701,7309176,9999,state_code + date_str,state_code,rademacher,True

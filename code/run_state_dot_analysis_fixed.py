@@ -7,6 +7,8 @@ Key corrections relative to ``run_state_dot_analysis.py``:
    log-population control (never a population-weight substitute for an offset);
 4. commuter-flow spillovers are modeled explicitly, so non-targeted counties
    with inbound commuters from alerted counties are not treated as clean controls.
+5. the AMBER treatment uses the full-CAP WEA routing audit and excludes
+   records explicitly blocked from the CMAS/mobile-phone channel.
 
 Outputs
 -------
@@ -25,7 +27,8 @@ import pandas as pd
 import pytz
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import CROSSWALK_RAW, DATA_PROC, DATA_RAW, OUTPUT_TABS
+from config import DATA_PROC, DATA_RAW, OUTPUT_TABS
+from county_timezones import county_timezone_map
 from utils import get_logger
 from state_dot_analysis_core import (
     normalize_state_outcomes,
@@ -58,15 +61,6 @@ STATE_FILES = {
     "WI": dict(file="wisconsin_dot_county_day.parquet", crashes="wi_crashes", fatals="wi_fatals", serious="wi_serious_inj"),
 }
 
-STATE_TIMEZONE = {
-    "06": "America/Los_Angeles", "12": "America/New_York",
-    "17": "America/Chicago", "19": "America/Chicago",
-    "25": "America/New_York", "32": "America/Los_Angeles",
-    "36": "America/New_York", "41": "America/Los_Angeles",
-    "47": "America/Chicago", "48": "America/Chicago",
-    "51": "America/New_York", "55": "America/Chicago",
-}
-
 # Alert-origin counties are nationwide.  Outcome panels are narrowed only
 # after spillovers have been calculated from every valid US origin represented
 # in the commuting-flow matrix.
@@ -90,33 +84,6 @@ NATIONWIDE_STATE_TIMEZONE = {
     "54": "America/New_York", "55": "America/Chicago", "56": "America/Denver",
 }
 ACCEPTED_STATE_YEARS = Path(__file__).resolve().parent.parent / "config" / "accepted_state_years.csv"
-
-COUNTY_TIMEZONE_OVERRIDE = {
-    "12033": "America/Chicago", "12059": "America/Chicago",
-    "12077": "America/Chicago", "12113": "America/Chicago",
-    "12131": "America/Chicago",
-    "41001": "America/Denver", "41017": "America/Denver",
-    "41021": "America/Denver", "41023": "America/Denver",
-    "41025": "America/Denver", "41035": "America/Denver",
-    "41037": "America/Denver", "41045": "America/Denver",
-    "41049": "America/Denver", "41055": "America/Denver",
-    "41059": "America/Denver", "41065": "America/Denver",
-    "47001": "America/New_York", "47009": "America/New_York",
-    "47013": "America/New_York", "47025": "America/New_York",
-    "47029": "America/New_York", "47051": "America/New_York",
-    "47063": "America/New_York", "47065": "America/New_York",
-    "47067": "America/New_York", "47073": "America/New_York",
-    "47089": "America/New_York", "47097": "America/New_York",
-    "47105": "America/New_York", "47107": "America/New_York",
-    "47121": "America/New_York", "47129": "America/New_York",
-    "47139": "America/New_York", "47143": "America/New_York",
-    "47145": "America/New_York", "47151": "America/New_York",
-    "47155": "America/New_York", "47163": "America/New_York",
-    "47171": "America/New_York", "47173": "America/New_York",
-    "47179": "America/New_York", "47189": "America/New_York",
-    "48141": "America/Denver", "48229": "America/Denver",
-}
-
 
 def load_state_crashes() -> pd.DataFrame:
     parts = []
@@ -251,31 +218,84 @@ NIGHT_END_HOUR = 6      # night runs [night_start, 24) U [0, NIGHT_END_HOUR)
 _STATE_COUNTY_MAP: dict[str, list[str]] | None = None  # lazy-loaded singleton
 
 
+def _exclude_cmas_blocked_alerts(alerts: pd.DataFrame, source_path: Path) -> pd.DataFrame:
+    """Apply the per-alert WEA routing audit when it is available.
+
+    ``BLOCKCHANNEL=CMAS`` explicitly prevents the archived CAP message from
+    using the WEA/mobile-phone dissemination channel.  The raw archive is
+    retained unchanged; the audit is a sidecar keyed by ``alert_id``.  A
+    missing sidecar is allowed for small synthetic/test inputs, but a present
+    sidecar must cover every source alert so an unvetted row cannot silently
+    enter the WEA treatment.
+    """
+    vetting_path = source_path.with_name(f"{source_path.stem}_wea_vetting.csv")
+    if not vetting_path.is_file():
+        log.warning("WEA routing audit not found at %s; retaining source alerts unfiltered", vetting_path)
+        return alerts
+
+    vetting = pd.read_csv(vetting_path, usecols=["alert_id", "cmas_blocked"])
+    vetting["alert_id"] = vetting["alert_id"].astype(str)
+    if vetting["alert_id"].duplicated().any():
+        raise ValueError(f"WEA routing audit has duplicate alert_id values: {vetting_path}")
+    flag = vetting["cmas_blocked"].astype(str).str.strip().str.lower()
+    valid = {"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False}
+    invalid = sorted(set(flag) - set(valid))
+    if invalid:
+        raise ValueError(f"invalid cmas_blocked values in {vetting_path}: {invalid}")
+    vetting["cmas_blocked"] = flag.map(valid)
+
+    source_ids = alerts["alert_id"].astype(str)
+    missing = sorted(set(source_ids) - set(vetting["alert_id"]))
+    if missing:
+        raise ValueError(
+            f"WEA routing audit is missing {len(missing)} source alert IDs; "
+            f"refusing to run an unvetted WEA treatment (first IDs: {missing[:5]})"
+        )
+    merged = alerts.copy()
+    merged["_audit_alert_id"] = source_ids
+    merged = merged.merge(
+        vetting.rename(columns={"alert_id": "_audit_alert_id"}),
+        on="_audit_alert_id", how="left", validate="many_to_one",
+    )
+    blocked = int(merged["cmas_blocked"].sum())
+    kept = merged.loc[~merged["cmas_blocked"]].drop(
+        columns=["_audit_alert_id", "cmas_blocked"]
+    )
+    log.info("WEA routing audit: excluded %d CMAS-blocked rows; retained %d rows", blocked, len(kept))
+    return kept
+
+
 def _state_county_map() -> dict[str, list[str]]:
-    """state_fips -> every real county 5-digit FIPS in that state, built from
-    the Census population-estimates file already in data/raw/crosswalks/."""
+    """State FIPS to the county universe used by the longitudinal outcomes.
+
+    Population-weighted 2020 Census centroids preserve the legacy eight
+    Connecticut counties used by FARS throughout most of 2013--2024. The
+    2023 population-estimates crosswalk instead contains nine planning
+    regions, which do not match the outcome geography and would silently
+    erase statewide Connecticut treatment matches.
+    """
     global _STATE_COUNTY_MAP
     if _STATE_COUNTY_MAP is not None:
         return _STATE_COUNTY_MAP
-    path = CROSSWALK_RAW / "co-est2023-alldata.csv"
+    path = DATA_PROC / "county_pop_centroids.parquet"
     if not path.exists():
-        log.warning("County crosswalk not found at %s — statewide alerts "
+        log.warning("Outcome-compatible county universe not found at %s — statewide alerts "
                     "will be dropped instead of expanded.", path)
         _STATE_COUNTY_MAP = {}
         return _STATE_COUNTY_MAP
-    cw = pd.read_csv(path, encoding="latin1", usecols=["STATE", "COUNTY"])
-    cw = cw[cw["COUNTY"] != 0]
+    cw = pd.read_parquet(path, columns=["fips"])
+    cw["fips"] = cw["fips"].astype(str).str.zfill(5)
+    cw = cw[cw["fips"].str.match(r"^\d{5}$")]
+    cw = cw[cw["fips"].str[:2].isin(NATIONWIDE_STATE_TIMEZONE)]
     out: dict[str, list[str]] = {}
-    for _, row in cw.iterrows():
-        state_fips = f"{int(row['STATE']):02d}"
-        out.setdefault(state_fips, []).append(f"{state_fips}{int(row['COUNTY']):03d}")
+    for fips in sorted(cw["fips"].unique()):
+        out.setdefault(fips[:2], []).append(fips)
     _STATE_COUNTY_MAP = out
     return out
 
 
 def _expand_statewide_rows(alerts: pd.DataFrame) -> pd.DataFrame:
-    """Expand rows whose fips is a state-level SAME code ("XX000") into one
-    row per real county in that state.
+    """Expand only rows explicitly classified as state-level SAME scope.
 
     ~65% of AMBER alerts are broadcast statewide rather than to a specific
     county. A prior version of this function excluded every such row
@@ -286,7 +306,9 @@ def _expand_statewide_rows(alerts: pd.DataFrame) -> pd.DataFrame:
     granularity. Expanding restores the missing statewide alert-nights to
     the treatment definition instead of silently dropping them.
     """
-    is_statewide = alerts["fips"].str[2:] == "000"
+    if "geo_scope" not in alerts.columns:
+        raise ValueError("alerts must carry geo_scope before statewide expansion")
+    is_statewide = alerts["geo_scope"].eq("statewide_same")
     if not is_statewide.any():
         return alerts
     state_map = _state_county_map()
@@ -339,8 +361,10 @@ def load_verified_alerts(*, window: str = "night", detail: bool = False,
     send timestamp/hour, for analyses (e.g. the traffic-volume station-hour
     panel) that need sub-day alert timing rather than a county-day flag.
 
-    The verification, FIPS-validation, and DST-aware timezone logic is shared
-    across both windows rather than duplicated.
+    The verification, FIPS-validation, WEA-routing, and DST-aware timezone
+    logic is shared across both windows rather than duplicated. When the
+    ``*_wea_vetting.csv`` sidecar is present next to the raw archive, rows with
+    ``cmas_blocked=True`` are excluded before the time-window construction.
     """
     if window not in {"night", "day"}:
         raise ValueError(f"window must be 'night' or 'day', got {window!r}")
@@ -354,6 +378,7 @@ def load_verified_alerts(*, window: str = "night", detail: bool = False,
         raise FileNotFoundError("OpenFEMA IPAWS AMBER file not found")
 
     alerts = pd.read_csv(path, parse_dates=["sent_utc"])
+    alerts = _exclude_cmas_blocked_alerts(alerts, path)
     if "msg_type" in alerts.columns:
         alerts = alerts[alerts["msg_type"].isin(["Alert", "Update"])].copy()
     else:
@@ -361,12 +386,23 @@ def load_verified_alerts(*, window: str = "night", detail: bool = False,
 
     alerts["fips"] = alerts["fips"].astype(str).str.zfill(5)
     alerts = alerts[alerts["fips"].str.match(r"^\d{5}$")].copy()
+    alerts["original_fips"] = alerts["fips"]
+    alerts["geo_scope"] = np.where(
+        alerts["fips"].str.fullmatch(r"\d{2}000"),
+        "statewide_same",
+        "county_same",
+    )
     alerts["state_fips"] = alerts["fips"].str[:2]
     alerts = _expand_statewide_rows(alerts)
     alerts = alerts[alerts["state_fips"].isin(NATIONWIDE_STATE_TIMEZONE)].copy()
-    alerts["tz_name"] = alerts["fips"].map(COUNTY_TIMEZONE_OVERRIDE).fillna(
-        alerts["state_fips"].map(NATIONWIDE_STATE_TIMEZONE)
-    )
+    timezone_map = county_timezone_map(DATA_PROC / "county_pop_centroids.parquet")
+    alerts["tz_name"] = alerts["fips"].map(timezone_map)
+    missing_timezone = alerts.loc[alerts["tz_name"].isna(), "fips"].drop_duplicates().tolist()
+    if missing_timezone:
+        raise ValueError(
+            "county-level IANA timezone missing; refusing state fallback for FIPS: "
+            + ", ".join(missing_timezone[:10])
+        )
 
     utc = pd.to_datetime(alerts["sent_utc"], utc=True, errors="coerce")
     alerts["sent_local"] = pd.NaT
@@ -391,13 +427,14 @@ def load_verified_alerts(*, window: str = "night", detail: bool = False,
     if detail:
         msg_type_col = ["msg_type"] if "msg_type" in alerts.columns else []
         return alerts[msg_type_col + [
-            "alert_id", "fips", "state_fips", "tz_name",
+            "alert_id", "fips", "original_fips", "geo_scope", "state_fips", "tz_name",
             "sent_local", "hour_local", "effective_crash_date",
         ]].reset_index(drop=True)
 
     flag = "night_alert" if window == "night" else "day_alert"
     out = alerts.groupby(["fips", "effective_crash_date"], as_index=False).agg(
-        n_alerts=("alert_id", "nunique")
+        n_alerts=("alert_id", "nunique"),
+        geo_scopes=("geo_scope", lambda values: "+".join(sorted(set(values)))),
     )
     out[flag] = 1
     log.info("Verified county-level %s-alert county-dates: %s", window, f"{len(out):,}")

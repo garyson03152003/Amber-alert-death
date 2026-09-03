@@ -89,7 +89,15 @@ AMBER alerts: run_state_dot_analysis_fixed.load_verified_alerts(window="night")
 Commuting weights: data/processed/commuting/county_commuting_weights.parquet
   (built by build_commuting_weights.py if missing).
 
+Tract-preserved commuter-car-mile sensitivity: the headline output also
+reports year-matched own and cross exposure using ACS 2015/2020 commuter
+shares multiplied by the LODES 2013/2018/2022 worker-weighted joint quantity
+E[home-tract car share x home-tract-to-work-tract distance].  This dosage is
+kept separate from the legacy binary/share variables so downstream alert-hour
+analyses retain their original interpretation.
+
 Output: output/tables/reg_night_to_morning_window.csv
+Rich exposure diagnostics: output/tables/night_to_morning_commuter_car_exposure_summary.csv
 """
 import importlib.util
 import sys
@@ -98,7 +106,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyfixest as pf
+try:
+    import pyfixest as pf
+except ModuleNotFoundError:  # keep data/alert helpers importable in light envs
+    pf = None
 
 sys.path.insert(0, str(Path(__file__).parent))
 import run_state_dot_analysis_fixed as base
@@ -111,6 +122,20 @@ OUTPUT_TABS.mkdir(parents=True, exist_ok=True)
 
 MIN_FATALS_PER_YEAR = 5  # matches the county restriction used elsewhere in the repo
 COMMUTING_WEIGHTS_PATH = DATA_PROC / "commuting" / "county_commuting_weights.parquet"
+PAIR_DOSAGE_YEAR_DIR = DATA_PROC / "commuting" / "_lodes_car_year_cache"
+FLOW_VINTAGE_PATHS = {
+    "2015": DATA_PROC / "commuting" / "county_commuting_weights_2015.parquet",
+    "2020": DATA_PROC / "commuting" / "county_commuting_weights_2020.parquet",
+}
+OTHER_WEA_CONTROL_PATH = DATA_PROC / "other_wea_night_controls.parquet"
+# Keep the binary indicator as the headline control and expose a count-dose
+# sensitivity so repeated overlapping alerts are not collapsed into one bit.
+OTHER_WEA_CONTROL_SPECS = (
+    ("binary", ("other_wea_night_alert",)),
+    ("dose", ("other_wea_night_count",)),
+)
+RICH_EXPOSURE_SPEC = "year_matched_tract_car_distance"
+RICH_EXPOSURE_SUMMARY_PATH = OUTPUT_TABS / "night_to_morning_commuter_car_exposure_summary.csv"
 
 
 def _ensure_commuting_weights():
@@ -167,6 +192,200 @@ def attach_night_alert(grid: pd.DataFrame) -> pd.DataFrame:
     grid["alert_last2nights_any"] = ((grid["night_alert"] + grid["night_alert_lag1"]) > 0).astype(int)
     grid["alert_last2nights_dose"] = grid["night_alert"] + grid["night_alert_lag1"]
     return grid
+
+
+def attach_other_wea_control(
+    grid: pd.DataFrame, *, required: bool = True, path: Path | None = None
+) -> pd.DataFrame:
+    """Merge non-AMBER overnight WEA exposure onto the county-day grid.
+
+    The control is a binary indicator for at least one other public,
+    non-CMAS-blocked Alert/Update in the same county overnight.  A separate
+    count column is retained for a later dose sensitivity, but the headline
+    specifications use the indicator so a burst of repeated updates does not
+    mechanically dominate the regression.
+    """
+    control_path = path or OTHER_WEA_CONTROL_PATH
+    if not control_path.is_file():
+        if required:
+            raise FileNotFoundError(
+                f"other-WEA control not found at {control_path}; "
+                "run code/fetch_other_wea_controls.py first"
+            )
+        out = grid.copy()
+        out["other_wea_night_alert"] = 0
+        out["other_wea_night_count"] = 0
+        return out
+    controls = pd.read_parquet(control_path).copy()
+    required_cols = {"fips", "date", "other_wea_night_alert", "other_wea_night_count"}
+    missing = required_cols - set(controls.columns)
+    if missing:
+        raise ValueError(f"other-WEA control missing columns: {sorted(missing)}")
+    controls["fips"] = controls["fips"].astype(str).str.zfill(5)
+    controls["date"] = pd.to_datetime(controls["date"]).dt.normalize()
+    controls = controls.drop_duplicates(["fips", "date"], keep="last")
+    out = grid.copy()
+    out["fips"] = out["fips"].astype(str).str.zfill(5)
+    out["date"] = pd.to_datetime(out["date"]).dt.normalize()
+    out = out.merge(controls, on=["fips", "date"], how="left", validate="one_to_one")
+    out["other_wea_night_alert"] = out["other_wea_night_alert"].fillna(0).astype(int)
+    out["other_wea_night_count"] = out["other_wea_night_count"].fillna(0).astype(int)
+    log.info("Other-WEA overnight control matched %d county-days (%.3f%% of grid)",
+             int(out["other_wea_night_alert"].sum()),
+             100 * float(out["other_wea_night_alert"].mean()))
+    return out
+
+
+def _normalize_fips(values: pd.Series) -> pd.Series:
+    """Normalize county identifiers without changing their five-digit meaning."""
+    return values.astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(5)
+
+
+def _load_year_matched_pair_dosages(sample_fips: set[str]) -> dict[tuple[str, int], pd.DataFrame]:
+    """Load validated ACS/LODES pair dosages for the crash-year regimes.
+
+    The heavy LODES construction remains in ``build_lodes_tract_car_dosage``.
+    This loader only reads its cached year-specific tables and attaches the
+    corresponding ACS commuter-share vintage.  The helper is kept local to
+    this runner so importing the alert/outcome functions does not trigger any
+    downloads or regression dependencies.
+    """
+    from run_symmetric_commuter_fatigue import (
+        FLOW_VINTAGE_FOR_YEAR,
+        LODES_VINTAGE_FOR_YEAR,
+        build_distance_driving_fallback,
+        build_pair_dosage,
+    )
+
+    flow_tables: dict[str, pd.DataFrame] = {}
+    for vintage, path in FLOW_VINTAGE_PATHS.items():
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"missing ACS commuting-flow vintage {vintage}: {path}"
+            )
+        flow = pd.read_parquet(path).copy()
+        flow["fips_home"] = _normalize_fips(flow["fips_home"])
+        flow["fips_work"] = _normalize_fips(flow["fips_work"])
+        flow_tables[vintage] = flow[
+            ["fips_home", "fips_work", "weight"]
+        ]
+
+    centroid_path = DATA_PROC / "county_pop_centroids.parquet"
+    if not centroid_path.is_file():
+        raise FileNotFoundError(
+            f"missing county centroids needed for commuting-distance fallback: {centroid_path}"
+        )
+    centroids = pd.read_parquet(centroid_path)
+
+    regimes = sorted(
+        {
+            (FLOW_VINTAGE_FOR_YEAR[year], LODES_VINTAGE_FOR_YEAR[year])
+            for year in range(2013, 2025)
+        }
+    )
+    pair_dosages: dict[tuple[str, int], pd.DataFrame] = {}
+    for flow_vintage, lodes_vintage in regimes:
+        year_path = PAIR_DOSAGE_YEAR_DIR / (
+            f"county_pair_lodes_car_dosage_{lodes_vintage}.parquet"
+        )
+        if not year_path.is_file():
+            raise FileNotFoundError(
+                f"missing year-specific LODES car-distance dosage: {year_path}; "
+                "run code/build_lodes_tract_car_dosage.py first"
+            )
+        weights = flow_tables[flow_vintage]
+        weights = weights[
+            weights["fips_home"].isin(sample_fips)
+            & weights["fips_work"].isin(sample_fips)
+        ].copy()
+        joint = pd.read_parquet(year_path)
+        joint["fips_home"] = _normalize_fips(joint["fips_home"])
+        joint["fips_work"] = _normalize_fips(joint["fips_work"])
+        fallback = build_distance_driving_fallback(
+            weights,
+            joint[["fips_home", "fips_work", "avg_dist_mi"]],
+            centroids,
+        )
+        pair_dosages[(flow_vintage, lodes_vintage)] = build_pair_dosage(
+            weights, joint, fallback
+        )
+    return pair_dosages
+
+
+def attach_year_matched_commuter_exposure(
+    grid: pd.DataFrame,
+    *,
+    alert_col: str = "night_alert",
+    pair_dosages: dict[tuple[str, int], pd.DataFrame] | None = None,
+    summary_path: Path | None = None,
+) -> pd.DataFrame:
+    """Attach tract-preserved own and cross commuter-car-mile exposure.
+
+    For each county-day, ``own_driver_distance`` is the alerted county's
+    self-loop dosage and ``cross_driver_distance`` sums non-self-loop dosage
+    from alerted home counties.  Pair dosage is the ACS commuter share times
+    the LODES worker-weighted ``E[home-tract car share x tract-centroid
+    distance]`` quantity.  Passing ``pair_dosages`` makes the pure attachment
+    testable without reading the production Parquet caches.
+    """
+    required = {"fips", "date", alert_col}
+    missing = required - set(grid.columns)
+    if missing:
+        raise ValueError(f"grid missing required exposure columns: {sorted(missing)}")
+
+    out = grid.copy()
+    out["fips"] = _normalize_fips(out["fips"])
+    out["date"] = pd.to_datetime(out["date"]).dt.normalize()
+    if out.duplicated(["fips", "date"]).any():
+        raise ValueError("grid must contain at most one row per county-day")
+
+    if pair_dosages is None:
+        pair_dosages = _load_year_matched_pair_dosages(set(out["fips"]))
+
+    from run_symmetric_commuter_fatigue import construct_year_matched_exposure_series
+
+    grid_index = pd.MultiIndex.from_frame(out[["fips", "date"]])
+    alerts = out.loc[
+        pd.to_numeric(out[alert_col], errors="raise").gt(0), ["fips", "date"]
+    ].drop_duplicates()
+    own, cross = construct_year_matched_exposure_series(
+        grid_index, alerts, pair_dosages
+    )
+    out["own_driver_distance"] = own
+    out["cross_driver_distance"] = cross
+    if summary_path is not None:
+        summary_rows = []
+        for (flow_vintage, lodes_vintage), pairs in sorted(pair_dosages.items()):
+            fallback = pairs.get("dosage_source", pd.Series(dtype=str)).eq(
+                "distance_driving_fallback"
+            )
+            summary_rows.append(
+                {
+                    "flow_vintage": flow_vintage,
+                    "lodes_vintage": lodes_vintage,
+                    "n_pair_edges": len(pairs),
+                    "fallback_pair_edges": int(fallback.sum()),
+                    "fallback_weight_share": float(
+                        pairs.loc[fallback, "weight"].sum() / pairs["weight"].sum()
+                    )
+                    if len(pairs) and pairs["weight"].sum()
+                    else 0.0,
+                    "grid_rows": len(out),
+                    "own_nonzero_rows": int(out["own_driver_distance"].gt(0).sum()),
+                    "cross_nonzero_rows": int(out["cross_driver_distance"].gt(0).sum()),
+                }
+            )
+        pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
+        log.info("Saved rich commuter-car exposure summary -> %s", summary_path)
+    log.info(
+        "Year-matched commuter-car exposure: own nonzero=%d, cross nonzero=%d, "
+        "own mean=%.4f, cross mean=%.4f",
+        int(out["own_driver_distance"].gt(0).sum()),
+        int(out["cross_driver_distance"].gt(0).sum()),
+        float(out["own_driver_distance"].mean()),
+        float(out["cross_driver_distance"].mean()),
+    )
+    return out
 
 
 def attach_cross_spillover(grid: pd.DataFrame, home_alert_col: str = "night_alert",
@@ -228,7 +447,19 @@ CLUSTER_VARS = "state_code + date_str"  # two-way: state (correlated statewide
 # state+date is the tightest and is used as the default here.
 
 
-def run(grid, label, outcome, treat, fe, results, extra_controls=None):
+def run(
+    grid,
+    label,
+    outcome,
+    treat,
+    fe,
+    results,
+    extra_controls=None,
+    *,
+    exposure_spec: str = "legacy_binary_or_county_share",
+):
+    if pf is None:
+        raise ImportError("pyfixest is required for regression estimation")
     controls = [treat] + (extra_controls or [])
     sub = grid.dropna(subset=controls + [outcome]).copy()
     formula = f"{outcome} ~ {' + '.join(controls)} | {fe}"
@@ -239,13 +470,18 @@ def run(grid, label, outcome, treat, fe, results, extra_controls=None):
     log.info("  %-70s beta=%+.5f se=%.5f p=%.3f n=%d %s [FE: %s]",
              label, coef, se, pval, int(fit._N), _sig(pval), fe)
     results.append({"label": label, "outcome": outcome, "treatment": treat, "fe": fe,
-                    "coef": coef, "se": se, "pval": pval, "nobs": int(fit._N)})
+                    "coef": coef, "se": se, "pval": pval, "nobs": int(fit._N),
+                    "exposure_spec": exposure_spec})
 
 
 def main():
     grid = build_outcome_grid()
     grid = attach_night_alert(grid)
     grid = attach_cross_spillover(grid)
+    grid = attach_other_wea_control(grid)
+    grid = attach_year_matched_commuter_exposure(
+        grid, summary_path=RICH_EXPOSURE_SUMMARY_PATH
+    )
     grid["year_str"] = grid["date"].dt.year.astype(str)
     grid["dow"] = grid["date"].dt.dayofweek.astype(str)
     grid["month_str"] = grid["date"].dt.month.astype(str)
@@ -269,6 +505,36 @@ def main():
     run(grid, "Combined-dose -> fatals 06:00-23:59", "fatals_0623", "alert_last2nights_dose",
         "fips_year + fips_dow + month_str", results)
 
+    log.info("\n=== Other-WEA controlled primary estimates ===")
+    other_wea = ["other_wea_night_alert"]
+    run(grid, "Combined-any + other WEA -> fatals 06:00-23:59", "fatals_0623",
+        "alert_last2nights_any", "fips + year_str + dow + month_str", results,
+        extra_controls=other_wea)
+    run(grid, "Combined-dose + other WEA -> fatals 06:00-23:59", "fatals_0623",
+        "alert_last2nights_dose", "fips + year_str + dow + month_str", results,
+        extra_controls=other_wea)
+    run(grid, "Combined-any + other WEA -> fatals (robust)", "fatals_0623",
+        "alert_last2nights_any", "fips_year + fips_dow + month_str", results,
+        extra_controls=other_wea)
+    run(grid, "Combined-dose + other WEA -> fatals (robust)", "fatals_0623",
+        "alert_last2nights_dose", "fips_year + fips_dow + month_str", results,
+        extra_controls=other_wea)
+
+    log.info("\n=== Other-WEA dose-controlled sensitivity ===")
+    other_wea_dose = ["other_wea_night_count"]
+    run(grid, "Combined-any + other WEA count -> fatals 06:00-23:59", "fatals_0623",
+        "alert_last2nights_any", "fips + year_str + dow + month_str", results,
+        extra_controls=other_wea_dose)
+    run(grid, "Combined-dose + other WEA count -> fatals 06:00-23:59", "fatals_0623",
+        "alert_last2nights_dose", "fips + year_str + dow + month_str", results,
+        extra_controls=other_wea_dose)
+    run(grid, "Combined-any + other WEA count -> fatals (robust)", "fatals_0623",
+        "alert_last2nights_any", "fips_year + fips_dow + month_str", results,
+        extra_controls=other_wea_dose)
+    run(grid, "Combined-dose + other WEA count -> fatals (robust)", "fatals_0623",
+        "alert_last2nights_dose", "fips_year + fips_dow + month_str", results,
+        extra_controls=other_wea_dose)
+
     log.info("\n=== Commuting spillover: own alert + share of commuters from an alerted "
              "county, jointly (naive spec) ===")
     run(grid, "OWN night_alert (spillover-controlled) -> fatals", "fatals_0623", "night_alert",
@@ -278,11 +544,78 @@ def main():
     run(grid, "CROSS_SPILLOVER (own-controlled) -> serious injuries", "serious_0623", "cross_spillover",
         "fips + year_str + dow + month_str", results, extra_controls=["night_alert"])
 
+    run(grid, "OWN night_alert + other WEA -> fatals", "fatals_0623", "night_alert",
+        "fips + year_str + dow + month_str", results,
+        extra_controls=["cross_spillover", "other_wea_night_alert"])
+    run(grid, "CROSS_SPILLOVER + other WEA -> fatals", "fatals_0623", "cross_spillover",
+        "fips + year_str + dow + month_str", results,
+        extra_controls=["night_alert", "other_wea_night_alert"])
+    run(grid, "CROSS_SPILLOVER + other WEA -> serious injuries", "serious_0623", "cross_spillover",
+        "fips + year_str + dow + month_str", results,
+        extra_controls=["night_alert", "other_wea_night_alert"])
+
+    run(grid, "OWN night_alert + other WEA count -> fatals", "fatals_0623", "night_alert",
+        "fips + year_str + dow + month_str", results,
+        extra_controls=["cross_spillover", "other_wea_night_count"])
+    run(grid, "CROSS_SPILLOVER + other WEA count -> fatals", "fatals_0623", "cross_spillover",
+        "fips + year_str + dow + month_str", results,
+        extra_controls=["night_alert", "other_wea_night_count"])
+    run(grid, "CROSS_SPILLOVER + other WEA count -> serious injuries", "serious_0623", "cross_spillover",
+        "fips + year_str + dow + month_str", results,
+        extra_controls=["night_alert", "other_wea_night_count"])
+
     log.info("\n=== Commuting spillover, robust spec (county x year + county x weekday FE) ===")
     run(grid, "OWN night_alert (spillover-controlled) -> fatals", "fatals_0623", "night_alert",
         "fips_year + fips_dow + month_str", results, extra_controls=["cross_spillover"])
     run(grid, "CROSS_SPILLOVER (own-controlled) -> fatals", "fatals_0623", "cross_spillover",
         "fips_year + fips_dow + month_str", results, extra_controls=["night_alert"])
+
+    run(grid, "OWN night_alert + other WEA -> fatals (robust)", "fatals_0623", "night_alert",
+        "fips_year + fips_dow + month_str", results,
+        extra_controls=["cross_spillover", "other_wea_night_alert"])
+    run(grid, "CROSS_SPILLOVER + other WEA -> fatals (robust)", "fatals_0623", "cross_spillover",
+        "fips_year + fips_dow + month_str", results,
+        extra_controls=["night_alert", "other_wea_night_alert"])
+
+    run(grid, "OWN night_alert + other WEA count -> fatals (robust)", "fatals_0623", "night_alert",
+        "fips_year + fips_dow + month_str", results,
+        extra_controls=["cross_spillover", "other_wea_night_count"])
+    run(grid, "CROSS_SPILLOVER + other WEA count -> fatals (robust)", "fatals_0623", "cross_spillover",
+        "fips_year + fips_dow + month_str", results,
+        extra_controls=["night_alert", "other_wea_night_count"])
+
+    log.info("\n=== Tract-preserved commuter-car-mile exposure (year matched) ===")
+    rich_control_specs = (
+        ("no other-WEA control", []),
+        ("other WEA binary", ["other_wea_night_alert"]),
+        ("other WEA count", ["other_wea_night_count"]),
+    )
+    rich_fe_specs = (
+        ("naive", "fips + year_str + dow + month_str"),
+        ("robust", "fips_year + fips_dow + month_str"),
+    )
+    for fe_label, fe in rich_fe_specs:
+        for control_label, control_terms in rich_control_specs:
+            run(
+                grid,
+                f"OWN commuter-car miles ({fe_label}; {control_label}) -> fatals",
+                "fatals_0623",
+                "own_driver_distance",
+                fe,
+                results,
+                extra_controls=["cross_driver_distance", *control_terms],
+                exposure_spec=RICH_EXPOSURE_SPEC,
+            )
+            run(
+                grid,
+                f"CROSS commuter-car miles ({fe_label}; {control_label}) -> fatals",
+                "fatals_0623",
+                "cross_driver_distance",
+                fe,
+                results,
+                extra_controls=["own_driver_distance", *control_terms],
+                exposure_spec=RICH_EXPOSURE_SPEC,
+            )
 
     log.info("\n=== Backward-causal placebo: spillover from a HOME county's alert the "
              "FOLLOWING night cannot cause today's crashes ===")

@@ -89,7 +89,7 @@ EARTH_RADIUS_MI = 3958.8
 
 # year -> share of the 2013-2024 study period this vintage represents
 # (each study year assigned to its nearest available LODES vintage)
-YEAR_WEIGHTS = {2013: 3 / 12, 2018: 4 / 12, 2022: 5 / 12}
+YEAR_WEIGHTS = {2013: 3 / 12, 2018: 5 / 12, 2022: 4 / 12}
 
 STATES = [
     "al", "ak", "az", "ar", "ca", "co", "ct", "de", "dc", "fl", "ga", "hi",

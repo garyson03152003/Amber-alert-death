@@ -15,6 +15,8 @@ data/processed/traffic/tmas_station_day_outcomes.parquet
 data/processed/commuting/_lodes_checkpoints/
 data/processed/commuting/_lodes_raw_cache/
 data/processed/commuting/_lodes_year_cache/
+data/processed/commuting/route_pilot/
+data/processed/commuting/route_national/
 # NHTS raw download (~80MB): fully reproducible via
 # build_nhts_car_share_by_distance.py's download_if_missing()
 data/raw/nhts/

@@ -1,0 +1,8 @@
+source,alert_family,msg_type,county_rows,unique_alerts
+amber_cae,amber,Alert,35953,2844
+amber_cae,amber,Cancel,24036,1327
+amber_cae,amber,Update,1903,139
+ipaws_wea_screen,missing_person,Alert,52,25
+ipaws_wea_screen,missing_person,Cancel,3,3
+ipaws_wea_screen,silver_alert,Alert,10,10
+ipaws_wea_screen,silver_alert,Cancel,4,4

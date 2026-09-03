@@ -1,0 +1,7 @@
+outcome,estimand,treatment,coef,se_state_date,pval_state_date,pval_wild_state,nobs,bootstrap_reps,analytic_cluster,wild_cluster,wild_weights,wild_impose_null,exposure_spec
+fatals_0623,own,own_driver_distance,-0.00019639689967913221,0.0006415698778078812,0.7608107472354613,0.8022,7309176,9999,state_code + date_str,state_code,rademacher,True,year_matched_acs_and_lodes
+fatals_0623,cross,cross_driver_distance,0.0005595810248508487,0.0002117644675418327,0.011018573148178668,0.0173,7309176,9999,state_code + date_str,state_code,rademacher,True,year_matched_acs_and_lodes
+fatals_0623,own_minus_cross,own_driver_distance,-0.0007559779245299809,0.0007932575706588144,0.3452655740247017,0.4191,7309176,9999,state_code + date_str,state_code,rademacher,True,year_matched_acs_and_lodes
+fatals_hours_awake_slope,own,own_driver_distance,2.690587234221946e-06,6.429222696541574e-06,0.677415036303888,0.6731,7309176,9999,state_code + date_str,state_code,rademacher,True,year_matched_acs_and_lodes
+fatals_hours_awake_slope,cross,cross_driver_distance,4.297377486939683e-06,2.1130536395859793e-06,0.04741230816850073,0.2375,7309176,9999,state_code + date_str,state_code,rademacher,True,year_matched_acs_and_lodes
+fatals_hours_awake_slope,own_minus_cross,own_driver_distance,-1.6067902527177366e-06,7.284210113486989e-06,0.8263318275658451,0.8153,7309176,9999,state_code + date_str,state_code,rademacher,True,year_matched_acs_and_lodes

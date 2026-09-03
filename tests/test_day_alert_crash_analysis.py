@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 
 import run_state_dot_analysis_fixed as fixed_runner
 import run_day_alert_crash_analysis as day_runner
+from county_timezones import county_timezone_map
 
 
 # --- alert-window construction -------------------------------------------
@@ -81,6 +82,46 @@ def test_night_wrapper_matches_night_window(monkeypatch, tmp_path):
         fixed_runner.load_verified_night_alerts(),
         fixed_runner.load_verified_alerts(window="night"),
     )
+
+
+def test_only_explicit_statewide_scope_is_expanded(monkeypatch):
+    monkeypatch.setattr(fixed_runner, "_state_county_map", lambda: {"01": ["01001", "01003"]})
+    alerts = pd.DataFrame(
+        [
+            {"alert_id": "state", "fips": "01000", "geo_scope": "statewide_same"},
+            {"alert_id": "not-state", "fips": "01000", "geo_scope": "county_same"},
+        ]
+    )
+    out = fixed_runner._expand_statewide_rows(alerts)
+    expanded = out[out["alert_id"] == "state"]
+    assert set(expanded["fips"]) == {"01001", "01003"}
+    assert out.loc[out["alert_id"] == "not-state", "fips"].tolist() == ["01000"]
+
+
+def test_alert_detail_preserves_original_scope_and_same_code(monkeypatch, tmp_path):
+    _patch_alert_path(monkeypatch, tmp_path, [{
+        "alert_id": "a1", "sent_utc": "2024-06-04T04:00:00Z",
+        "fips": "01001", "state_fips": "01", "msg_type": "Alert",
+    }])
+    out = fixed_runner.load_verified_alerts(window="night", detail=True)
+    assert out.iloc[0]["geo_scope"] == "county_same"
+    assert out.iloc[0]["original_fips"] == "01001"
+
+
+def test_county_timezone_map_handles_split_timezone_states():
+    mapping = county_timezone_map(fixed_runner.DATA_PROC / "county_pop_centroids.parquet")
+    assert mapping["12033"] == "America/Chicago"
+    assert mapping["12086"] == "America/New_York"
+    assert mapping["16013"] != mapping["16069"]
+
+
+def test_statewide_expansion_uses_fars_compatible_connecticut_counties(monkeypatch):
+    monkeypatch.setattr(fixed_runner, "_STATE_COUNTY_MAP", None)
+    counties = fixed_runner._state_county_map()["09"]
+    assert len(counties) == 8
+    assert "09001" in counties
+    assert "09015" in counties
+    assert not any(fips.startswith("091") for fips in counties)
 
 
 # --- estimation -----------------------------------------------------------
