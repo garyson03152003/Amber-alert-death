@@ -8,8 +8,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 
 from route_exposure_core import weighted_tract_pairs
+from route_exposure_core import prepare_crosswalk_for_pairs
 from route_exposure_core import (
     allocate_route_miles,
+    build_county_spatial_index,
     build_county_exposure,
     classify_route_origin,
     parse_osrm_route,
@@ -73,6 +75,34 @@ def test_weighted_tract_pair_preserves_missing_endpoint_workers():
     assert out.loc[0, "valid_endpoint_workers"] == 3
     assert out.loc[0, "missing_endpoint_workers"] == 1
     assert out.loc[0, "home_lat"] == pytest.approx(43.0)
+
+
+def test_prepared_crosswalk_matches_regular_endpoint_aggregation():
+    """National chunking must reuse normalized crosswalk lookups."""
+    flows = pd.DataFrame({
+        "h_geocode": ["550010001001001", "550010001001002"],
+        "w_geocode": ["550010001002001", "550010001002002"],
+        "S000": [3, 1],
+    })
+    crosswalk = pd.DataFrame({
+        "tabblk2020": [
+            "550010001001001",
+            "550010001001002",
+            "550010001002001",
+            "550010001002002",
+        ],
+        "cty": ["55001", "55001", "55001", "55001"],
+        "trct": ["55001000100", "55001000100", "55001000200", "55001000200"],
+        "blklatdd": [43.00, 43.04, 43.10, 43.14],
+        "blklondd": [-89.40, -89.36, -89.30, -89.26],
+    })
+    car = pd.Series({"55001000100": 0.8, "55001000200": 0.9})
+
+    expected = weighted_tract_pairs(flows, crosswalk, car)
+    prepared = prepare_crosswalk_for_pairs(crosswalk)
+    actual = weighted_tract_pairs(flows, crosswalk, car, prepared_crosswalk=prepared)
+
+    pd.testing.assert_frame_equal(actual, expected)
 
 
 def test_weighted_tract_pairs_vectorizes_many_pair_aggregation():
@@ -231,6 +261,24 @@ def test_allocate_route_miles_splits_exactly_at_county_boundary():
     assert list(out["county_fips"]) == ["55001", "55003"]
     assert out.loc[0, "route_miles_in_county"] == pytest.approx(out.loc[1, "route_miles_in_county"], rel=1e-6)
     assert out["unallocated_miles"].sum() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_allocate_route_miles_accepts_reusable_county_spatial_index():
+    route = {
+        "type": "LineString",
+        "coordinates": [[-90.0, 43.0], [-89.0, 43.0]],
+        "properties": {"distance_m": 80000.0},
+    }
+    counties = _synthetic_county_boundaries_split_at_longitude(-89.5)
+    index = build_county_spatial_index(counties)
+
+    indexed = allocate_route_miles(route, counties, "r1", spatial_index=index)
+    plain = allocate_route_miles(route, counties, "r1")
+
+    pd.testing.assert_frame_equal(
+        indexed.sort_values("county_fips").reset_index(drop=True),
+        plain.sort_values("county_fips").reset_index(drop=True),
+    )
 
 
 def test_build_county_exposure_uses_one_denominator_for_own_and_cross():

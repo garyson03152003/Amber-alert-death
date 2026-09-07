@@ -73,6 +73,19 @@ def test_manifest_id_depends_on_source_checksum():
     assert first["manifest_id"] != second["manifest_id"]
 
 
+def test_manifest_can_record_runtime_image_overrides():
+    from build_route_national_network import build_network_manifest
+
+    manifest = build_network_manifest(
+        [{"state": "wi", "sha256": "a"}],
+        network_year=2022,
+        osrm_image="osrm/osrm-backend:latest",
+        merge_image="host-osmium",
+    )
+    assert manifest["osrm_image"] == "osrm/osrm-backend:latest"
+    assert manifest["merge_image"] == "host-osmium"
+
+
 def test_docker_runtime_errors_are_actionable(tmp_path, monkeypatch):
     import build_route_national_network as national
 
@@ -112,6 +125,74 @@ def test_prepare_resumes_completed_stages(tmp_path, monkeypatch):
         (Path(cwd) / f"stage-{len(calls)}.out").write_bytes(str(len(calls)).encode())
     national.prepare_national_osrm_network(("wi",), 2022, tmp_path, resume, allow_partial=True)
     assert len(calls) == 6
+
+
+def test_prepare_can_use_host_osmium_for_merge(tmp_path, monkeypatch):
+    import build_route_national_network as national
+
+    monkeypatch.setattr(national, "NATIONAL_STATES", ("wi",))
+    monkeypatch.setattr(national.shutil, "which", lambda name: "/usr/local/bin/osmium" if name == "osmium" else None)
+    def fake_download(state, year, cache_dir, session):
+        path = Path(cache_dir) / f"{state}-{year}.osm.pbf"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture")
+        national._atomic_write_json(
+            {
+                "url": national._geofabrik_url(state, year),
+                "bytes": 7,
+                "sha256": hashlib.sha256(b"fixture").hexdigest(),
+                "retrieved_at_utc": "2022-01-01T00:00:00+00:00",
+            },
+            path.with_name(path.name + ".manifest.json"),
+        )
+        return path
+
+    monkeypatch.setattr(national, "download_geofabrik_extract", fake_download)
+    calls = []
+    def runner(command, cwd):
+        calls.append(command)
+        (Path(cwd) / f"stage-{len(calls)}.out").write_bytes(str(len(calls)).encode())
+
+    national.prepare_national_osrm_network(
+        ("wi",),
+        2022,
+        tmp_path,
+        runner,
+        allow_partial=True,
+        use_host_osmium=True,
+    )
+    assert calls[0][0].endswith("/osmium")
+    assert all("docker" not in command for command in [calls[0]])
+
+
+def test_geojson_loader_uses_crs_from_sidecar_manifest(tmp_path):
+    from build_route_pilot_county_miles import load_county_boundaries
+
+    path = tmp_path / "county.geojson"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {"GEOID": "00001"},
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.with_name(path.name + ".manifest.json").write_text(
+        json.dumps({"crs": "EPSG:4326"}), encoding="utf-8"
+    )
+    frame = load_county_boundaries(path)
+    assert frame.loc[0, "county_fips"] == "00001"
+    assert frame.attrs["source_crs"] == "EPSG:4326"
 
 
 def test_resume_rebuilds_when_recorded_stage_output_is_missing(tmp_path, monkeypatch):

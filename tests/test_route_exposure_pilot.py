@@ -56,6 +56,20 @@ def test_alert_date_exposure_splits_own_cross_and_passthrough():
     assert row["affected_route_share"] == pytest.approx(
         row["affected_commuter_car_miles"] / row["total_commuter_car_miles"]
     )
+    assert row["affected_driver_miles"] == pytest.approx(
+        row["own_affected_car_miles"]
+        + row["cross_affected_car_miles"]
+        + row["pass_through_affected_car_miles"]
+    )
+    assert row["affected_driver_mile_share"] == pytest.approx(
+        row["affected_driver_miles"] / row["total_commuter_car_miles"]
+    )
+    assert row["affected_driver_mile_share"] == pytest.approx(
+        row["affected_route_share"]
+    )
+    assert row["affected_driver_mile_share_10pp"] == pytest.approx(
+        row["affected_driver_mile_share"] / 0.10
+    )
     assert row["same_tract_mode"] == "primary_calibrated"
     assert row["network_manifest_id"] == "net-2022"
     assert row["route_exposure_2022"] == 1

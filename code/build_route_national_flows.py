@@ -12,10 +12,11 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 
@@ -29,7 +30,7 @@ from build_route_pilot_flows import (
     manifest_record,
 )
 from config import DATA_PROC
-from route_exposure_core import weighted_tract_pairs
+from route_exposure_core import prepare_crosswalk_for_pairs, weighted_tract_pairs
 from route_vintages import resolve_nearest_year, write_vintage_manifest
 
 
@@ -50,6 +51,7 @@ FIPS_TO_STATE = {
 }
 NATIONAL_STATES = tuple(sorted(FIPS_TO_STATE.values()))
 PARTITION_SCHEMA_VERSION = "route_national.lodes_flow.v2"
+STREAMING_INPUT_BYTES = 20_000_000
 
 
 def _empty_pairs() -> pd.DataFrame:
@@ -236,11 +238,12 @@ def _reduce_spilled_pairs(paths: list[Path], spill_dir: Path, max_open: int) -> 
 def build_flow_partition_from_chunks(
     chunks: Iterable[pd.DataFrame], crosswalks: pd.DataFrame, tract_car_share: pd.Series, *,
     analysis_year: int, lodes_source_year: int, work_state: str,
-    max_open_chunk_partitions: int = 32, spill_dir: Path | None = None,
+    max_open_chunk_partitions: int = 4, spill_dir: Path | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Aggregate bounded flow chunks without changing weighted tract-pair results."""
     if int(max_open_chunk_partitions) < 2:
         raise ValueError("max_open_chunk_partitions must be at least two")
+    prepared_crosswalk = prepare_crosswalk_for_pairs(crosswalks)
     row_count = 0
     worker_weight = 0.0
     file_types: set[str] = set()
@@ -258,7 +261,10 @@ def build_flow_partition_from_chunks(
             row_count += rows
             worker_weight += workers
             file_types.update(filter(None, _flow_file_types(chunk).split(",")))
-            partial = weighted_tract_pairs(chunk, crosswalks, tract_car_share)
+            partial = weighted_tract_pairs(
+                chunk, crosswalks, tract_car_share,
+                prepared_crosswalk=prepared_crosswalk,
+            )
             if not partial.empty:
                 path = work_dir / f"chunk-{index:08d}.parquet"
                 _write_partial_pair(partial, path)
@@ -272,6 +278,127 @@ def build_flow_partition_from_chunks(
         work_state=work_state, input_row_count=row_count, input_worker_weight=worker_weight,
         lodes_file_types=",".join(sorted(file_types)) or "unknown",
     )
+
+
+def build_flow_partition_to_parquet(
+    chunks: Iterable[pd.DataFrame], crosswalks: pd.DataFrame, tract_car_share: pd.Series, *,
+    analysis_year: int, lodes_source_year: int, work_state: str, output_path: Path,
+    extra_metadata: Mapping[str, object] | None = None, bucket_count: int = 64,
+    max_open_chunk_partitions: int = 4,
+) -> pd.DataFrame:
+    """Hash-partition, reduce, and write a large flow partition incrementally."""
+    if int(bucket_count) < 2:
+        raise ValueError("bucket_count must be at least two")
+    if int(max_open_chunk_partitions) < 2:
+        raise ValueError("max_open_chunk_partitions must be at least two")
+    prepared_crosswalk = prepare_crosswalk_for_pairs(crosswalks)
+    temporary_directory = tempfile.TemporaryDirectory(prefix="route-national-stream-")
+    work_dir = Path(temporary_directory.name)
+    bucket_paths: list[list[Path]] = [[] for _ in range(int(bucket_count))]
+    row_count = 0
+    worker_weight = 0.0
+    file_types: set[str] = set()
+    try:
+        for index, chunk in enumerate(chunks):
+            rows, workers = _positive_flow_metrics(chunk)
+            row_count += rows
+            worker_weight += workers
+            file_types.update(filter(None, _flow_file_types(chunk).split(",")))
+            partial = weighted_tract_pairs(
+                chunk, crosswalks, tract_car_share,
+                prepared_crosswalk=prepared_crosswalk,
+            )
+            if partial.empty:
+                continue
+            group_cols = ["home_tract", "work_tract", "home_county", "work_county"]
+            buckets = (
+                pd.util.hash_pandas_object(partial[group_cols], index=False)
+                .astype("uint64")
+                .mod(int(bucket_count))
+                .to_numpy()
+            )
+            for bucket in np.unique(buckets):
+                selected = partial.loc[buckets == bucket]
+                target = work_dir / f"bucket-{int(bucket):04d}-{index:08d}.parquet"
+                selected.to_parquet(target, index=False)
+                bucket_paths[int(bucket)].append(target)
+
+        totals = {
+            "retained_pair_count": 0,
+            "retained_worker_weight": 0.0,
+            "missing_coordinate_worker_weight": 0.0,
+            "missing_home_car_share_worker_weight": 0.0,
+            "same_tract_worker_weight": 0.0,
+            "same_tract_pair_count": 0,
+        }
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{output.stem}.", suffix=".tmp.parquet", dir=output.parent,
+            delete=False,
+        ) as handle:
+            temporary_output = Path(handle.name)
+        writer: pq.ParquetWriter | None = None
+        writer_schema: pa.Schema | None = None
+        metadata_values = dict(extra_metadata or {})
+        try:
+            for paths in bucket_paths:
+                if not paths:
+                    continue
+                reduced = _reduce_spilled_pairs(
+                    paths, work_dir, int(max_open_chunk_partitions)
+                )
+                if reduced.empty:
+                    continue
+                decorated, bucket_diagnostics = _decorate_partition(
+                    reduced, analysis_year=analysis_year,
+                    lodes_source_year=lodes_source_year, work_state=work_state,
+                    input_row_count=0, input_worker_weight=0.0,
+                    lodes_file_types=",".join(sorted(file_types)) or "unknown",
+                )
+                for key, value in metadata_values.items():
+                    decorated[key] = value
+                table = pa.Table.from_pandas(
+                    decorated, schema=writer_schema, preserve_index=False, safe=False
+                ) if writer_schema is not None else pa.Table.from_pandas(
+                    decorated, preserve_index=False
+                )
+                if writer is None:
+                    writer_schema = table.schema
+                    writer = pq.ParquetWriter(temporary_output, writer_schema)
+                writer.write_table(table)
+                row = bucket_diagnostics.iloc[0]
+                totals["retained_pair_count"] += int(row["retained_pair_count"])
+                for key in (
+                    "retained_worker_weight", "missing_coordinate_worker_weight",
+                    "missing_home_car_share_worker_weight", "same_tract_worker_weight",
+                ):
+                    totals[key] += float(row[key])
+                totals["same_tract_pair_count"] += int(row["same_tract_pair_count"])
+            if writer is None:
+                empty = _empty_pairs()
+                for key, value in metadata_values.items():
+                    empty[key] = value
+                empty.to_parquet(temporary_output, index=False)
+            else:
+                writer.close()
+                writer = None
+            os.replace(temporary_output, output)
+        finally:
+            if writer is not None:
+                writer.close()
+            temporary_output.unlink(missing_ok=True)
+    finally:
+        temporary_directory.cleanup()
+
+    diagnostics = pd.DataFrame([{
+        "partition_status": "success", "analysis_year": int(analysis_year),
+        "lodes_source_year": int(lodes_source_year), "work_state": str(work_state).lower(),
+        "lodes_file_types": ",".join(sorted(file_types)) or "unknown",
+        "input_row_count": row_count, "input_worker_weight": worker_weight,
+        **totals,
+    }])
+    return diagnostics
 
 
 def _atomic_write_frame(frame: pd.DataFrame, path: Path, *, csv: bool = False) -> None:
@@ -365,6 +492,108 @@ def _download_crosswalks_for_states(
     return paths, records
 
 
+def _normalize_block_ids(values: pd.Series) -> pd.Series:
+    """Normalize LODES block identifiers for set membership and joins."""
+    return values.astype("string").str.strip().str.replace(r"\.0$", "", regex=True).str.zfill(15)
+
+
+def _collect_aux_home_block_ids(paths: Sequence[Path], *, chunk_rows: int) -> set[str]:
+    """Collect only auxiliary home blocks needed by a batch."""
+    block_ids: set[str] = set()
+    for path in paths:
+        for chunk in pd.read_csv(
+            path,
+            compression="gzip",
+            usecols=["h_geocode", "w_geocode"],
+            dtype={"h_geocode": "string", "w_geocode": "string"},
+            chunksize=int(chunk_rows),
+        ):
+            values = _normalize_block_ids(chunk["h_geocode"]).dropna()
+            block_ids.update(values.tolist())
+    return block_ids
+
+
+def _load_crosswalk_rows_for_blocks(
+    paths: Sequence[Path], block_ids: set[str] | None = None, *, chunk_rows: int = 1_000_000
+) -> pd.DataFrame:
+    """Read only crosswalk rows referenced by a flow batch.
+
+    National auxiliary files contain interstate home blocks, so loading only
+    the workplace state's crosswalk is incorrect.  Filtering each source while
+    streaming retains those auxiliary endpoints without materializing all
+    8-million-plus national crosswalk rows at once.
+    """
+    wanted = (
+        {str(value).strip().replace(".0", "").zfill(15) for value in block_ids}
+        if block_ids is not None
+        else None
+    )
+    columns = ["tabblk2020", "cty", "trct", "blklatdd", "blklondd"]
+    if wanted is not None and not wanted:
+        return pd.DataFrame(columns=columns)
+    frames: list[pd.DataFrame] = []
+    for path in paths:
+        for chunk in pd.read_csv(
+            path,
+            compression="gzip",
+            usecols=columns,
+            dtype={"tabblk2020": "string", "cty": "string", "trct": "string"},
+            chunksize=int(chunk_rows),
+        ):
+            normalized = _normalize_block_ids(chunk["tabblk2020"])
+            selected = (
+                chunk.loc[normalized.isin(wanted)].copy()
+                if wanted is not None
+                else chunk
+            )
+            if not selected.empty:
+                selected["tabblk2020"] = normalized.loc[selected.index]
+                frames.append(selected)
+    if not frames:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(frames, ignore_index=True)
+
+
+def _crosswalk_state(path: Path) -> str:
+    return Path(path).name.split("_", 1)[0].lower()
+
+
+def _load_batch_crosswalks(
+    batch: Sequence[tuple[str, int, list[Path], str, dict[str, object]]],
+    crosswalk_paths: Sequence[Path],
+    *,
+    chunk_rows: int,
+) -> pd.DataFrame:
+    """Load complete workplace crosswalks plus filtered auxiliary origins."""
+    by_state = {_crosswalk_state(path): path for path in crosswalk_paths}
+    frames: list[pd.DataFrame] = []
+    aux_paths: list[Path] = []
+    for state, _, paths, _, _ in batch:
+        work_path = by_state.get(state)
+        if work_path is None:
+            raise ValueError(f"missing crosswalk path for workplace state {state}")
+        # Main files have both endpoints in the workplace state.  They need
+        # the complete workplace crosswalk; auxiliary files add interstate
+        # home endpoints and are filtered below.
+        frames.append(_load_crosswalk_rows_for_blocks([work_path], chunk_rows=chunk_rows))
+        aux_paths.extend(path for path in paths if "_od_aux_" in Path(path).name)
+
+    aux_home_ids = _collect_aux_home_block_ids(aux_paths, chunk_rows=chunk_rows)
+    if aux_home_ids:
+        aux_states = {FIPS_TO_STATE.get(block[:2]) for block in aux_home_ids}
+        aux_states.discard(None)
+        frames.append(
+            _load_crosswalk_rows_for_blocks(
+                [by_state[state] for state in sorted(aux_states) if state in by_state],
+                aux_home_ids,
+                chunk_rows=chunk_rows,
+            )
+        )
+    if not frames:
+        return pd.DataFrame(columns=["tabblk2020", "cty", "trct", "blklatdd", "blklondd"])
+    return pd.concat(frames, ignore_index=True).drop_duplicates("tabblk2020", keep="first")
+
+
 def _load_car_share(analysis_year: int) -> tuple[pd.Series, str, dict[str, float]]:
     return load_car_share_for_analysis_year(int(analysis_year), CAR_SHARE_ROOT)
 
@@ -447,10 +676,16 @@ def build_national_flow_year(
     *,
     chunk_rows: int = 250_000,
     origin_states: Sequence[str] | None = None,
+    crosswalk_batch_states: int = 4,
+    stream_bucket_count: int = 16,
 ) -> pd.DataFrame:
     """Download, validate, process, and manifest all workplace states for one year."""
     if int(chunk_rows) <= 0:
         raise ValueError("chunk_rows must be positive")
+    if int(crosswalk_batch_states) <= 0:
+        raise ValueError("crosswalk_batch_states must be positive")
+    if int(stream_bucket_count) < 2:
+        raise ValueError("stream_bucket_count must be at least two")
     analysis = int(analysis_year)
     requested = tuple(sorted({str(state).lower() for state in (NATIONAL_STATES if states is None else states)}))
     if not requested or any(len(state) != 2 or not state.isalpha() for state in requested):
@@ -496,8 +731,7 @@ def build_national_flow_year(
 
         # Geography is intentionally delayed until a partition needs rebuilding.
         # A valid resumed partition still validates all flow and ACS source ids,
-        # but avoids the national crosswalk load and block-to-tract aggregation.
-        crosswalks: pd.DataFrame | None = None
+        # but avoids the crosswalk load and block-to-tract aggregation.
         crosswalk_paths, crosswalk_records = _download_crosswalks_for_states(origins, input_dir, session)
         pending: list[tuple[str, int, list[Path], str, dict[str, object]]] = []
         for state, (source_year, paths, reason) in selected.items():
@@ -517,30 +751,50 @@ def build_national_flow_year(
             else:
                 pending.append((state, source_year, paths, reason, metadata))
 
-        if pending:
-            crosswalks = _load_lodes_crosswalks(crosswalk_paths)
-        for state, source_year, paths, reason, metadata in pending:
-            assert crosswalks is not None
-            pairs, diagnostics = build_flow_partition_from_chunks(
-                iter_lodes_flow_chunks(paths, chunk_rows=chunk_rows), crosswalks, tract_car_share,
-                analysis_year=analysis, lodes_source_year=source_year, work_state=state,
+        # A batch keeps the crosswalk bounded: a national crosswalk is several
+        # gigabytes in pandas, while each batch needs only its flow endpoints.
+        batch_size = int(crosswalk_batch_states)
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start:start + batch_size]
+            crosswalks = _load_batch_crosswalks(
+                batch,
+                crosswalk_paths,
+                chunk_rows=min(int(chunk_rows), 1_000_000),
             )
-            pairs["lodes_source_paths"] = "|".join(str(path) for path in paths)
-            for key, value in metadata.items():
-                pairs[key] = value
-            partition = _partition_path(root, analysis, source_year, state)
-            _atomic_write_frame(pairs, partition)
-            metadata["parquet_sha256"] = _file_sha256(partition)
-            _atomic_write_json(metadata, _partition_sidecar(partition))
-            for key, value in metadata.items():
-                diagnostics[key] = value
-            diagnostics["car_share_tracts"] = car_share_diagnostics.get("tracts_with_share", np.nan)
-            _atomic_write_frame(diagnostics, root / "diagnostics" / f"analysis_year={analysis}" / f"work_state={state}.csv", csv=True)
-            manifest_rows.append({
-                **metadata, "state": state, "lodes_status": "exact" if source_year == analysis else "nearest",
-                "lodes_reason": reason, "partition_status": "success",
-                "selection_rule": "nearest source year; earlier year wins ties",
-            })
+            for state, source_year, paths, reason, metadata in batch:
+                partition = _partition_path(root, analysis, source_year, state)
+                if sum(path.stat().st_size for path in paths) >= STREAMING_INPUT_BYTES:
+                    diagnostics = build_flow_partition_to_parquet(
+                        iter_lodes_flow_chunks(paths, chunk_rows=chunk_rows),
+                        crosswalks, tract_car_share, analysis_year=analysis,
+                        lodes_source_year=source_year, work_state=state,
+                        output_path=partition,
+                        extra_metadata={
+                            "lodes_source_paths": "|".join(str(path) for path in paths),
+                            **metadata,
+                        },
+                        bucket_count=int(stream_bucket_count),
+                    )
+                else:
+                    pairs, diagnostics = build_flow_partition_from_chunks(
+                        iter_lodes_flow_chunks(paths, chunk_rows=chunk_rows), crosswalks, tract_car_share,
+                        analysis_year=analysis, lodes_source_year=source_year, work_state=state,
+                    )
+                    pairs["lodes_source_paths"] = "|".join(str(path) for path in paths)
+                    for key, value in metadata.items():
+                        pairs[key] = value
+                    _atomic_write_frame(pairs, partition)
+                metadata["parquet_sha256"] = _file_sha256(partition)
+                _atomic_write_json(metadata, _partition_sidecar(partition))
+                for key, value in metadata.items():
+                    diagnostics[key] = value
+                diagnostics["car_share_tracts"] = car_share_diagnostics.get("tracts_with_share", np.nan)
+                _atomic_write_frame(diagnostics, root / "diagnostics" / f"analysis_year={analysis}" / f"work_state={state}.csv", csv=True)
+                manifest_rows.append({
+                    **metadata, "state": state, "lodes_status": "exact" if source_year == analysis else "nearest",
+                    "lodes_reason": reason, "partition_status": "success",
+                    "selection_rule": "nearest source year; earlier year wins ties",
+                })
 
     write_vintage_manifest(manifest_rows, root / "national_vintage_manifest.csv")
     return pd.DataFrame(manifest_rows).sort_values(["analysis_year", "state"], kind="stable").reset_index(drop=True) if manifest_rows else pd.DataFrame()

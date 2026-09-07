@@ -415,10 +415,6 @@ def route_pair(
         try:
             response = session.get(url, params=params, timeout=ROUTE_TIMEOUT)
             status_code = getattr(response, "status_code", 200)
-            if status_code >= 500:
-                raise requests.HTTPError(f"status {status_code}", response=response)
-            if hasattr(response, "raise_for_status"):
-                response.raise_for_status()
             payload = response.json()
             if isinstance(payload, dict) and payload.get("code") in PERMANENT_OSRM_STATUSES:
                 return _status_result(
@@ -426,6 +422,10 @@ def route_pair(
                     status=str(payload.get("code")),
                     error_message=str(payload.get("message") or payload.get("error") or payload.get("code")),
                 )
+            if status_code >= 500:
+                raise requests.HTTPError(f"status {status_code}", response=response)
+            if hasattr(response, "raise_for_status"):
+                response.raise_for_status()
             try:
                 parsed = parse_osrm_route(payload, route_id)
             except ValueError as exc:

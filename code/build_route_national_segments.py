@@ -195,6 +195,34 @@ def _ineligible_result(row: pd.Series) -> dict:
     }
 
 
+def _noncontiguous_no_route(row: pd.Series) -> bool:
+    """Identify mainland/non-contiguous pairs that cannot be road-routed.
+
+    The national network intentionally keeps Alaska and Hawaii separate from
+    the continental road graph.  A pair whose workplace tract is in AK or HI
+    and whose home tract is elsewhere therefore has no road route; recording
+    it directly avoids spending OSRM time proving a disconnected topology.
+    """
+    home_tract = row.get("home_tract")
+    work_tract = row.get("work_tract")
+    if home_tract is None or work_tract is None or pd.isna(home_tract) or pd.isna(work_tract):
+        return False
+    home_state = str(home_tract).strip()[:2]
+    work_state = str(work_tract).strip()[:2]
+    return work_state in {"02", "15"} and home_state != work_state
+
+
+def _noncontiguous_no_route_result(row: pd.Series) -> dict:
+    return {
+        "route_id": str(row["route_id"]),
+        "status": "NoRoute",
+        "distance_m": None,
+        "duration_s": None,
+        "geometry": None,
+        "error_message": "home and workplace tracts are on disconnected non-contiguous road networks",
+    }
+
+
 def _is_routing_eligible(row: pd.Series) -> bool:
     declared = row.get("routing_eligible", True)
     if pd.isna(declared) or not bool(declared):
@@ -360,6 +388,73 @@ def _qa_document(row: pd.Series, result: Mapping[str, object]) -> dict:
     }
 
 
+def _process_route_result(
+    row: pd.Series,
+    result: Mapping[str, object],
+    county_boundaries: object,
+    *,
+    spatial_index: dict[str, object] | None,
+    geometry_sample_rate: float,
+) -> tuple[dict, list[dict], dict | None]:
+    """Allocate one routed result and build its audit/segment records.
+
+    This helper is intentionally side-effect free so multiple route results can
+    be allocated concurrently.  The caller remains responsible for appending
+    records and writing sampled QA files in a deterministic order.
+    """
+    result = dict(result)
+    total = _route_miles(result.get("distance_m"))
+    unallocated = total
+    allocated = None
+    if result.get("status") == "Ok":
+        if _route_miles(result.get("distance_m")) <= 0:
+            result = {
+                **result,
+                "status": "ZeroDistance",
+                "error_message": "OSRM snapped both endpoints to the same routable point",
+            }
+        elif not isinstance(result.get("geometry"), Mapping):
+            result = {
+                **result,
+                "status": "MalformedResponse",
+                "error_message": "successful route response is missing a GeoJSON geometry mapping",
+            }
+        else:
+            try:
+                geometry = dict(result["geometry"])
+                geometry["properties"] = {"distance_m": result.get("distance_m")}
+                allocated = allocate_route_miles(
+                    geometry,
+                    county_boundaries,
+                    str(row["route_id"]),
+                    spatial_index=spatial_index,
+                )
+                if allocated.empty:
+                    result = {
+                        **result,
+                        "status": "AllocationError",
+                        "error_message": "county allocator returned no segments",
+                    }
+                    allocated = None
+                else:
+                    total = float(allocated["route_miles_total"].max())
+                    unallocated = float(allocated["unallocated_miles"].sum())
+            except (TypeError, ValueError) as exc:
+                result = {**result, "status": "AllocationError", "error_message": str(exc)}
+                allocated = None
+
+    audit = _audit_row(row, result, total=total, unallocated=unallocated)
+    segments = _segment_rows(row, allocated) if allocated is not None else []
+    qa = None
+    if (
+        result.get("status") == "Ok"
+        and isinstance(result.get("geometry"), Mapping)
+        and _sample_signature(str(row["route_signature"]), float(geometry_sample_rate))
+    ):
+        qa = _qa_document(row, result)
+    return audit, segments, qa
+
+
 def route_partition_to_segments(
     pairs: pd.DataFrame,
     county_boundaries: object,
@@ -368,9 +463,11 @@ def route_partition_to_segments(
     cache_dir: Path,
     route_client: Callable,
     network_manifest_id: str | None = None,
+    spatial_index: dict[str, object] | None = None,
     max_workers: int = 8,
     checkpoint_every: int = 10_000,
     geometry_sample_rate: float = 0.001,
+    allocation_workers: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Route one flow partition and immediately emit county-mile segments.
 
@@ -381,6 +478,8 @@ def route_partition_to_segments(
     """
     if int(max_workers) < 1 or int(checkpoint_every) < 1:
         raise ValueError("max_workers and checkpoint_every must be positive")
+    if int(allocation_workers) < 1:
+        raise ValueError("allocation_workers must be positive")
     if not isinstance(geometry_sample_rate, (int, float)) or not math.isfinite(float(geometry_sample_rate)) or not 0 <= float(geometry_sample_rate) <= 1:
         raise ValueError("geometry_sample_rate must be between zero and one")
     required = {"home_lon", "home_lat", "work_lon", "work_lat"}
@@ -405,6 +504,18 @@ def route_partition_to_segments(
     current_signatures = set(frame["route_signature"].astype(str))
     existing_audits = existing_audits.loc[existing_audits["route_signature"].astype(str).isin(current_signatures)].copy()
     existing_segments = existing_segments.loc[existing_segments["route_signature"].astype(str).isin(current_signatures)].copy()
+    rerunnable_statuses = {"Ok", "Ineligible", "NoRoute", "NoSegment", "TooBig", "ZeroDistance"}
+    rerunnable_mask = existing_audits["status"].astype(str).isin(rerunnable_statuses)
+    stale_signatures = set(
+        existing_audits.loc[~rerunnable_mask, "route_signature"].astype(str)
+    )
+    if stale_signatures:
+        existing_audits = existing_audits.loc[
+            ~existing_audits["route_signature"].astype(str).isin(stale_signatures)
+        ].copy()
+        existing_segments = existing_segments.loc[
+            ~existing_segments["route_signature"].astype(str).isin(stale_signatures)
+        ].copy()
     successful_signatures = set(
         existing_audits.loc[existing_audits["status"].astype(str).eq("Ok"), "route_signature"].astype(str)
     )
@@ -461,11 +572,16 @@ def route_partition_to_segments(
 
     for start in range(0, len(pending), int(checkpoint_every)):
         batch = pending[start:start + int(checkpoint_every)]
-        eligible = [row for row in batch if _is_routing_eligible(row)]
-        results_by_signature = {
-            str(row["route_signature"]): _ineligible_result(row)
-            for row in batch if not _is_routing_eligible(row)
-        }
+        eligible = []
+        results_by_signature = {}
+        for row in batch:
+            signature = str(row["route_signature"])
+            if not _is_routing_eligible(row):
+                results_by_signature[signature] = _ineligible_result(row)
+            elif _noncontiguous_no_route(row):
+                results_by_signature[signature] = _noncontiguous_no_route_result(row)
+            else:
+                eligible.append(row)
         if int(max_workers) == 1:
             results_by_signature.update({
                 str(row["route_signature"]): _route_client_result(row, base_url, route_client)
@@ -481,33 +597,42 @@ def route_partition_to_segments(
                     )
                 )
 
-        for row in batch:
-            result = results_by_signature[str(row["route_signature"])]
-            total = _route_miles(result.get("distance_m"))
-            unallocated = total
-            if result["status"] == "Ok":
-                if not isinstance(result.get("geometry"), Mapping):
-                    result = {
-                        **result,
-                        "status": "MalformedResponse",
-                        "error_message": "successful route response is missing a GeoJSON geometry mapping",
-                    }
-                else:
-                    try:
-                        geometry = dict(result["geometry"])
-                        geometry["properties"] = {"distance_m": result.get("distance_m")}
-                        allocated = allocate_route_miles(geometry, county_boundaries, str(row["route_id"]))
-                        if not allocated.empty:
-                            total = float(allocated["route_miles_total"].max())
-                            unallocated = float(allocated["unallocated_miles"].sum())
-                            segment_records.extend(_segment_rows(row, allocated))
-                        else:
-                            result = {**result, "status": "AllocationError", "error_message": "county allocator returned no segments"}
-                    except (TypeError, ValueError) as exc:
-                        result = {**result, "status": "AllocationError", "error_message": str(exc)}
-            audit_records.append(_audit_row(row, result, total=total, unallocated=unallocated))
-            if result["status"] == "Ok" and isinstance(result.get("geometry"), Mapping) and _sample_signature(str(row["route_signature"]), float(geometry_sample_rate)):
-                _atomic_write_json(_qa_document(row, result), cache_dir / QA_GEOMETRY_DIR_NAME / f"{row['route_signature']}.geojson")
+        process_args = [
+            (row, results_by_signature[str(row["route_signature"])]) for row in batch
+        ]
+        if int(allocation_workers) == 1:
+            processed = [
+                _process_route_result(
+                    row,
+                    result,
+                    county_boundaries,
+                    spatial_index=spatial_index,
+                    geometry_sample_rate=float(geometry_sample_rate),
+                )
+                for row, result in process_args
+            ]
+        else:
+            with ThreadPoolExecutor(max_workers=int(allocation_workers)) as executor:
+                processed = list(
+                    executor.map(
+                        lambda args: _process_route_result(
+                            args[0],
+                            args[1],
+                            county_boundaries,
+                            spatial_index=spatial_index,
+                            geometry_sample_rate=float(geometry_sample_rate),
+                        ),
+                        process_args,
+                    )
+                )
+        for row, (audit, segments, qa) in zip(batch, processed, strict=True):
+            audit_records.append(audit)
+            segment_records.extend(segments)
+            if qa is not None:
+                _atomic_write_json(
+                    qa,
+                    cache_dir / QA_GEOMETRY_DIR_NAME / f"{row['route_signature']}.geojson",
+                )
         write_checkpoint()
 
     if not pending:

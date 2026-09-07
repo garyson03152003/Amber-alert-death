@@ -91,12 +91,12 @@ from state_dot_analysis_core import extract_finite_coefficients, fit_status_row
 
 log = base.log
 
-CA_HOURLY = DATA_PROC / "california_ccrs_county_hour.parquet"
+CA_HOURLY = DATA_PROC / "california_ccrs_severity_county_hour.parquet"
 CA_YEARS = (2016, 2022)          # every year validated in accepted_state_years.csv
 EVENT_MIN, EVENT_MAX = -6, 6     # hours around issuance
 REFERENCE_EVENT_HOUR = -1        # omitted category
 
-OUTCOMES = ["ca_crashes", "ca_serious_inj", "ca_fatals"]
+OUTCOMES = ["ca_fatal_crashes", "ca_serious_crashes", "ca_nonserious_crashes"]
 
 
 def build_balanced_hourly_panel(
@@ -304,7 +304,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--window", default="day", choices=["day", "night"],
                         help="alert time-of-day window to study")
-    parser.add_argument("--outcomes", nargs="*", default=["ca_crashes"],
+    parser.add_argument("--outcomes", nargs="*", default=["ca_fatal_crashes"],
                         help=f"subset of {OUTCOMES}")
     parser.add_argument("--fe", nargs="*", default=["rich"],
                         choices=list(FE_SPECS), help="fixed-effect specification(s)")

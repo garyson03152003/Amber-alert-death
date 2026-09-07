@@ -1,10 +1,10 @@
 label,outcome,treatment,fe,coef,se,pval,nobs
-ca_crashes: any alert message,ca_crashes,is_alert_hour,fips_hour_dow + fips_year + year_month,0.05046796340404309,0.08425424741819539,0.5515488244006295,285199
-ca_fatals: any alert message,ca_fatals,is_alert_hour,fips_hour_dow + fips_year + year_month,-0.008996102328712795,0.0063613241760427305,0.16274610215917962,285199
-ca_serious_inj: any alert message,ca_serious_inj,is_alert_hour,fips_hour_dow + fips_year + year_month,0.11419091882849097,0.0873147803034794,0.19618878397053452,285199
-ca_crashes: first-alert-hour only,ca_crashes,is_first_alert_hour,fips_hour_dow + fips_year + year_month,0.051436593832843436,0.08607880318507603,0.5525052908563302,285199
-ca_fatals: first-alert-hour only,ca_fatals,is_first_alert_hour,fips_hour_dow + fips_year + year_month,-0.00884091872692184,0.006497273439616424,0.1789609809706869,285199
-ca_serious_inj: first-alert-hour only,ca_serious_inj,is_first_alert_hour,fips_hour_dow + fips_year + year_month,0.12197844541315105,0.0859882205895624,0.16147550404174282,285199
-ca_crashes: placebo (tomorrow's alert),ca_crashes,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,-0.05954158097225819,0.11677352722134776,0.6120976857990068,285199
-ca_fatals: placebo (tomorrow's alert),ca_fatals,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.0202723921764239,0.014918958048106758,0.17955203419501142,285199
-ca_serious_inj: placebo (tomorrow's alert),ca_serious_inj,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.09862534999328754,0.11433700112115756,0.39198061182262256,285199
+ca_fatal_crashes: any alert message,ca_fatal_crashes,is_alert_hour,fips_hour_dow + fips_year + year_month,0.00027610163934505683,0.00870337981038524,0.9748033797241533,211042
+ca_serious_crashes: any alert message,ca_serious_crashes,is_alert_hour,fips_hour_dow + fips_year + year_month,0.007183392157506609,0.01789124230162108,0.6895510194606649,211042
+ca_nonserious_crashes: any alert message,ca_nonserious_crashes,is_alert_hour,fips_hour_dow + fips_year + year_month,0.0625916881952915,0.06932019066604632,0.3703599913844773,211042
+ca_fatal_crashes: first-alert-hour only,ca_fatal_crashes,is_first_alert_hour,fips_hour_dow + fips_year + year_month,0.0004986145660462215,0.008924613128429211,0.9556410687030998,211042
+ca_serious_crashes: first-alert-hour only,ca_serious_crashes,is_first_alert_hour,fips_hour_dow + fips_year + year_month,0.009326850858521035,0.01823478234547616,0.6109860396090423,211042
+ca_nonserious_crashes: first-alert-hour only,ca_nonserious_crashes,is_first_alert_hour,fips_hour_dow + fips_year + year_month,0.05786787695349846,0.0743895841826521,0.43984327648944266,211042
+ca_fatal_crashes: placebo (tomorrow's alert),ca_fatal_crashes,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,0.005895713429929249,0.006162434210986098,0.3427497770574752,211042
+ca_serious_crashes: placebo (tomorrow's alert),ca_serious_crashes,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,-0.01637109802402104,0.0288670591303036,0.5728591510414989,211042
+ca_nonserious_crashes: placebo (tomorrow's alert),ca_nonserious_crashes,is_alert_hour_tomorrow,fips_hour_dow + fips_year + year_month,-0.42342266395889416,0.2985905432965111,0.16161411635083112,211042

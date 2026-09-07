@@ -17,6 +17,7 @@ import pandas as pd
 from pyproj import CRS, Transformer
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon, shape
 from shapely.ops import transform as geom_transform
+from shapely.strtree import STRtree
 
 EARTH_RADIUS_M = 6_371_008.8
 MILES_PER_METER = 1.0 / 1609.344
@@ -34,6 +35,17 @@ def _normalize_code(value: object, width: int | None = None) -> str:
     return text
 
 
+def _normalize_code_series(values: object, width: int | None = None) -> pd.Series:
+    """Normalize a column of Census codes without Python-level row mapping."""
+    series = pd.Series(values, copy=False).astype("string").str.strip()
+    series = series.str.replace(r"\.0$", "", regex=True)
+    if series.isna().any():
+        raise ValueError("missing geocode or fips value")
+    if width is not None:
+        series = series.str.zfill(width)
+    return series
+
+
 def _require_columns(df: pd.DataFrame, required: Iterable[str], *, label: str) -> None:
     missing = [col for col in required if col not in df.columns]
     if missing:
@@ -46,10 +58,31 @@ def _finite_series(df: pd.DataFrame, cols: tuple[str, str]) -> pd.Series:
     )
 
 
+def prepare_crosswalk_for_pairs(block_crosswalk: pd.DataFrame) -> pd.DataFrame:
+    """Normalize a block crosswalk once for repeated weighted-pair joins."""
+    _require_columns(
+        block_crosswalk,
+        ["tabblk2020", "cty", "trct", "blklatdd", "blklondd"],
+        label="block_crosswalk",
+    )
+    crosswalk = block_crosswalk.loc[
+        :, ["tabblk2020", "cty", "trct", "blklatdd", "blklondd"]
+    ].copy()
+    crosswalk["tabblk2020"] = _normalize_code_series(crosswalk["tabblk2020"])
+    crosswalk["cty"] = _normalize_code_series(crosswalk["cty"], 5)
+    crosswalk["trct"] = _normalize_code_series(crosswalk["trct"], 11)
+    crosswalk["blklatdd"] = pd.to_numeric(crosswalk["blklatdd"], errors="coerce")
+    crosswalk["blklondd"] = pd.to_numeric(crosswalk["blklondd"], errors="coerce")
+    crosswalk = crosswalk.drop_duplicates("tabblk2020", keep="first")
+    return crosswalk.set_index("tabblk2020", verify_integrity=True)
+
+
 def weighted_tract_pairs(
     block_flows: pd.DataFrame,
     block_crosswalk: pd.DataFrame,
     tract_car_share: pd.Series,
+    *,
+    prepared_crosswalk: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Collapse block-level LODES flows to tract pairs with weighted endpoints."""
     if block_flows.empty:
@@ -73,30 +106,23 @@ def weighted_tract_pairs(
         )
 
     flows = block_flows.copy(deep=True)
-    crosswalk = block_crosswalk.copy(deep=True)
     shares = tract_car_share.copy(deep=True)
 
     _require_columns(flows, ["h_geocode", "w_geocode", "S000"], label="block_flows")
-    _require_columns(
-        crosswalk,
-        ["tabblk2020", "cty", "trct", "blklatdd", "blklondd"],
-        label="block_crosswalk",
-    )
 
-    flows["h_geocode"] = flows["h_geocode"].map(lambda v: _normalize_code(v))
-    flows["w_geocode"] = flows["w_geocode"].map(lambda v: _normalize_code(v))
+    flows["h_geocode"] = _normalize_code_series(flows["h_geocode"])
+    flows["w_geocode"] = _normalize_code_series(flows["w_geocode"])
     flows["workers"] = pd.to_numeric(flows["S000"], errors="coerce")
     flows = flows.dropna(subset=["workers"]).copy()
     flows = flows[flows["workers"] > 0].copy()
 
-    crosswalk = crosswalk.loc[
-        :, ["tabblk2020", "cty", "trct", "blklatdd", "blklondd"]
-    ].drop_duplicates("tabblk2020")
-    crosswalk["tabblk2020"] = crosswalk["tabblk2020"].map(lambda v: _normalize_code(v))
-    crosswalk["cty"] = crosswalk["cty"].map(lambda v: _normalize_code(v, 5))
-    crosswalk["trct"] = crosswalk["trct"].map(lambda v: _normalize_code(v, 11))
-    crosswalk["blklatdd"] = pd.to_numeric(crosswalk["blklatdd"], errors="coerce")
-    crosswalk["blklondd"] = pd.to_numeric(crosswalk["blklondd"], errors="coerce")
+    crosswalk = (
+        prepare_crosswalk_for_pairs(block_crosswalk)
+        if prepared_crosswalk is None
+        else prepared_crosswalk
+    )
+    if not isinstance(crosswalk.index, pd.Index) or crosswalk.index.name != "tabblk2020":
+        raise ValueError("prepared_crosswalk must be indexed by tabblk2020")
 
     home = crosswalk.rename(
         columns={
@@ -117,7 +143,7 @@ def weighted_tract_pairs(
         }
     )
 
-    merged = flows.merge(home, on="h_geocode", how="left").merge(work, on="w_geocode", how="left")
+    merged = flows.join(home, on="h_geocode", how="left").join(work, on="w_geocode", how="left")
     required_join_cols = [
         "home_county",
         "home_tract",
@@ -191,7 +217,7 @@ def weighted_tract_pairs(
             *value_cols,
         ]
     ]
-    shares.index = shares.index.map(lambda v: _normalize_code(v, 11))
+    shares.index = _normalize_code_series(shares.index, 11).array
     shares = pd.to_numeric(shares, errors="coerce")
     out["home_car_share"] = out["home_tract"].map(shares)
     out["missing_home_car_share_workers"] = np.where(
@@ -278,6 +304,53 @@ def _county_geometry_from_value(geometry: object):
     return shape(geometry)
 
 
+def build_county_spatial_index(
+    counties: pd.DataFrame,
+    *,
+    projection_crs: str | CRS | None = None,
+) -> dict[str, object]:
+    """Prepare a reusable longitude/latitude county index for route allocation.
+
+    National routing allocates millions of routes.  Querying every county
+    polygon for every route is needlessly quadratic, so callers can build this
+    index once and pass it to :func:`allocate_route_miles`.
+    """
+    if not isinstance(counties, pd.DataFrame):
+        raise TypeError("counties must be a pandas DataFrame")
+    county_id_col = next(
+        (col for col in ("county_fips", "fips", "GEOID", "county") if col in counties.columns),
+        None,
+    )
+    if county_id_col is None or "geometry" not in counties.columns:
+        raise ValueError("counties must contain a county identifier column and geometry")
+    county_fips = []
+    geometries = []
+    for _, row in counties.iterrows():
+        county_fips.append(_normalize_code(row[county_id_col], 5))
+        geometries.append(_county_geometry_from_value(row["geometry"]))
+    if not geometries:
+        raise ValueError("counties must not be empty")
+    index: dict[str, object] = {
+        "tree": STRtree(geometries),
+        "geometries": tuple(geometries),
+        "county_fips": tuple(county_fips),
+    }
+    if projection_crs is not None:
+        target_crs = CRS.from_user_input(projection_crs)
+        transformer = Transformer.from_crs("EPSG:4326", target_crs, always_xy=True)
+        projected_geometries = tuple(
+            geom_transform(transformer.transform, geometry) for geometry in geometries
+        )
+        index.update(
+            {
+                "projection_crs": target_crs,
+                "projected_tree": STRtree(projected_geometries),
+                "projected_geometries": projected_geometries,
+            }
+        )
+    return index
+
+
 def _route_transformer(route_coords: list[tuple[float, float]]) -> Transformer:
     lon0 = float(sum(lon for lon, _ in route_coords) / len(route_coords))
     lat0 = float(sum(lat for _, lat in route_coords) / len(route_coords))
@@ -315,8 +388,16 @@ def allocate_route_miles(
     route_geojson: dict,
     counties: pd.DataFrame,
     route_id: str,
+    *,
+    spatial_index: dict[str, object] | None = None,
 ) -> pd.DataFrame:
-    """Allocate one routed LineString across county polygons."""
+    """Allocate one routed LineString across county polygons.
+
+    ``spatial_index`` is optional for backward compatibility.  When supplied,
+    the STRtree is queried in longitude/latitude before projecting only the
+    candidate counties, preserving the exact intersection calculation while
+    avoiding an all-county scan for each route.
+    """
     if not isinstance(route_geojson, dict):
         raise ValueError("route geometry must be a GeoJSON-like dict")
     if route_geojson.get("type") != "LineString":
@@ -330,11 +411,6 @@ def allocate_route_miles(
     if not route_line.is_valid or route_line.is_empty:
         raise ValueError(f"route {route_id} geometry is invalid")
 
-    transformer = _route_transformer(coord_pairs)
-    route_projected = geom_transform(transformer.transform, route_line)
-    total_projected_m = float(route_projected.length)
-    if total_projected_m <= 0:
-        raise ValueError(f"route {route_id} has zero length")
     total_miles = _route_total_miles(route_geojson)
 
     county_id_col = next(
@@ -346,12 +422,60 @@ def allocate_route_miles(
     if "geometry" not in counties.columns:
         raise ValueError("counties must contain a geometry column")
 
-    county_defs = []
-    for _, row in counties.copy(deep=True).iterrows():
-        county_fips = _normalize_code(row[county_id_col], 5)
-        county_geom = _county_geometry_from_value(row["geometry"])
-        county_projected = geom_transform(transformer.transform, county_geom)
-        county_defs.append((county_fips, county_projected))
+    if spatial_index is None:
+        transformer = _route_transformer(coord_pairs)
+        route_projected = geom_transform(transformer.transform, route_line)
+        total_projected_m = float(route_projected.length)
+        if total_projected_m <= 0:
+            raise ValueError(f"route {route_id} has zero length")
+        county_defs = []
+        for _, row in counties.copy(deep=True).iterrows():
+            county_fips = _normalize_code(row[county_id_col], 5)
+            county_geom = _county_geometry_from_value(row["geometry"])
+            county_projected = geom_transform(transformer.transform, county_geom)
+            county_defs.append((county_fips, county_projected))
+    else:
+        if not isinstance(spatial_index, dict):
+            raise TypeError("spatial_index must be the result of build_county_spatial_index")
+        try:
+            tree = spatial_index["tree"]
+            geometries = spatial_index["geometries"]
+            county_fips = spatial_index["county_fips"]
+            projection_crs = spatial_index.get("projection_crs")
+            if projection_crs is not None:
+                projected_tree = spatial_index["projected_tree"]
+                projected_geometries = spatial_index["projected_geometries"]
+                route_transformer = Transformer.from_crs(
+                    "EPSG:4326", projection_crs, always_xy=True
+                )
+                route_projected = geom_transform(route_transformer.transform, route_line)
+                total_projected_m = float(route_projected.length)
+                if total_projected_m <= 0:
+                    raise ValueError(f"route {route_id} has zero length")
+                candidate_indices = projected_tree.query(route_projected)
+                county_defs = [
+                    (
+                        str(county_fips[int(index)]),
+                        projected_geometries[int(index)],
+                    )
+                    for index in candidate_indices
+                ]
+            else:
+                transformer = _route_transformer(coord_pairs)
+                route_projected = geom_transform(transformer.transform, route_line)
+                total_projected_m = float(route_projected.length)
+                if total_projected_m <= 0:
+                    raise ValueError(f"route {route_id} has zero length")
+                candidate_indices = tree.query(route_line)
+                county_defs = [
+                    (
+                        str(county_fips[int(index)]),
+                        geom_transform(transformer.transform, geometries[int(index)]),
+                    )
+                    for index in candidate_indices
+                ]
+        except (KeyError, AttributeError, TypeError) as exc:
+            raise ValueError("invalid county spatial index") from exc
 
     county_miles: dict[str, float] = defaultdict(float)
     for county_fips, county_geom in county_defs:
@@ -418,11 +542,14 @@ def build_county_exposure(
                 "cross_commuter_car_miles",
                 "pass_through_commuter_car_miles",
                 "affected_commuter_car_miles",
+                "affected_driver_miles",
                 "own_affected_car_miles",
                 "cross_affected_car_miles",
                 "pass_through_affected_car_miles",
                 "affected_route_share",
+                "affected_driver_mile_share",
                 "affected_commuter_car_miles_per_10000",
+                "affected_driver_mile_share_10pp",
             ]
         )
 
@@ -562,10 +689,16 @@ def build_county_exposure(
     ]:
         panel[col] = pd.to_numeric(panel[col], errors="coerce").fillna(0.0)
 
+    # Explicit aggregate name for analyses that combine all affected traffic;
+    # retain the historical affected_commuter_car_miles name for compatibility.
+    panel["affected_driver_miles"] = panel["affected_commuter_car_miles"]
+
     panel["affected_route_share"] = panel["affected_commuter_car_miles"] / panel["total_commuter_car_miles"]
+    panel["affected_driver_mile_share"] = panel["affected_route_share"]
     panel["affected_commuter_car_miles_per_10000"] = (
         panel["affected_route_share"] * 10000.0
     )
+    panel["affected_driver_mile_share_10pp"] = panel["affected_driver_mile_share"] / 0.10
     panel["own_affected_route_share"] = panel["own_affected_car_miles"] / panel["total_commuter_car_miles"]
     panel["cross_affected_route_share"] = panel["cross_affected_car_miles"] / panel["total_commuter_car_miles"]
     panel["pass_through_affected_route_share"] = (

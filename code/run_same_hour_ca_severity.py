@@ -2,20 +2,13 @@
 run_same_hour_ca_severity.py
 =============================================================
 Severity-separated version of the same-hour (H1, immediate-distraction)
-case-crossover test: does the FARS-only fatal-crash result hold up when
-tested against ALL crash severities, not just fatalities?
+    case-crossover test: does the California collision-level result differ
+    across fatal, serious-injury, and nonserious crashes?
 
-FARS is a fatal-crash-only census -- it structurally cannot show whether
-a same-hour effect exists in the vastly larger population of non-fatal
-crashes. California's CHP CCRS data (already built and validated
-elsewhere in this repo, data/processed/california_ccrs_county_hour.parquet)
-is the one hourly-resolution state crash source in this project that
-already carries a severity breakdown (ca_crashes = all severities,
-ca_fatals, ca_serious_inj), covering 2016-2022 -- a shorter window than
-FARS's 2013-2024, but ~110x more total crash events (3.16M vs 28,868
-fatals) and ~60x more serious-injury events than fatal ones in the same
-county-hours, i.e. a real power increase for this specific test, at the
-cost of external validity beyond California.
+FARS is a fatal-crash-only census. California's CHP CCRS data is rebuilt
+from the collision file joined to InjuredWitnessPassengers. The new hourly
+panel classifies each collision exactly once as fatal, serious, or
+nonserious for 2016-2022.
 
 Design and robustness set identical to run_same_hour_event_study.py: same
 +/-28-day case-crossover, two-way (state+date) clustering, fips_hour_dow
@@ -54,8 +47,8 @@ SEED = 42
 CLUSTER_VARS = "fips + date_str"  # state_code is constant (CA-only) -- cluster by
 # county instead of state for the "spatial" dimension, keeping date as the
 # second dimension for same-day cross-county correlation.
-CA_HOURLY_PATH = DATA_PROC / "california_ccrs_county_hour.parquet"
-OUTCOMES = ["ca_crashes", "ca_fatals", "ca_serious_inj"]
+CA_HOURLY_PATH = DATA_PROC / "california_ccrs_severity_county_hour.parquet"
+OUTCOMES = ["ca_fatal_crashes", "ca_serious_crashes", "ca_nonserious_crashes"]
 
 
 def ca_counties() -> set[str]:

@@ -112,6 +112,25 @@ def test_chunked_reader_and_aggregation_match_single_partition(tmp_path):
     pd.testing.assert_frame_equal(actual[compare_columns], expected[compare_columns])
 
 
+def test_filtered_crosswalk_loader_keeps_only_requested_blocks(tmp_path):
+    """National batches must not materialize unrelated crosswalk rows."""
+    national = _national_module()
+    path = tmp_path / "mi_xwalk.csv.gz"
+    pd.DataFrame({
+        "tabblk2020": ["260010001001001", "260010001001002"],
+        "cty": ["26001", "26001"],
+        "trct": ["26001000100", "26001000100"],
+        "blklatdd": [43.0, 43.1],
+        "blklondd": [-84.0, -84.1],
+    }).to_csv(path, index=False, compression="gzip")
+
+    loaded = national._load_crosswalk_rows_for_blocks(
+        [path], {"260010001001002"}, chunk_rows=1
+    )
+
+    assert loaded["tabblk2020"].tolist() == ["260010001001002"]
+
+
 def test_unavailable_state_is_manifested_without_an_empty_partition(tmp_path, monkeypatch):
     """Treating a failed LODES download as an empty success must fail this test."""
     national = _national_module()
@@ -315,3 +334,68 @@ def test_chunk_reducer_limits_open_partial_pair_frames(monkeypatch, tmp_path):
 
     assert pairs.loc[0, "workers"] == 9
     assert observed_batch_sizes
+
+
+def test_chunk_reducer_default_fan_in_is_bounded(monkeypatch):
+    """The production default must not open dozens of large spill frames."""
+    national = _national_module()
+    observed_batch_sizes = []
+    original = national._combine_chunk_pairs
+
+    def bounded_combine(frames):
+        frames = list(frames)
+        observed_batch_sizes.append(len(frames))
+        assert len(frames) <= 4
+        return original(frames)
+
+    monkeypatch.setattr(national, "_combine_chunk_pairs", bounded_combine)
+    chunks = [
+        pd.DataFrame({"h_geocode": ["260010001001001"], "w_geocode": ["260010002001001"], "S000": [1]})
+        for _ in range(9)
+    ]
+
+    national.build_flow_partition_from_chunks(
+        chunks, _fixture_crosswalk(), _fixture_car_share(), analysis_year=2022,
+        lodes_source_year=2022, work_state="mi",
+    )
+
+    assert observed_batch_sizes
+
+
+def test_streaming_partition_writer_matches_in_memory_result(tmp_path):
+    """Large partitions can be written without retaining all tract pairs."""
+    national = _national_module()
+    chunks = [
+        pd.DataFrame({
+            "h_geocode": ["260010001001001", "260010001001001"],
+            "w_geocode": ["260010002001001", "260010002001001"],
+            "S000": [3, 1],
+        }),
+        pd.DataFrame({
+            "h_geocode": ["260010001001001"],
+            "w_geocode": ["260010002001001"],
+            "S000": [2],
+        }),
+    ]
+    expected, _ = national.build_flow_partition_from_chunks(
+        chunks, _fixture_crosswalk(), _fixture_car_share(), analysis_year=2022,
+        lodes_source_year=2022, work_state="mi",
+    )
+    output = tmp_path / "streamed.parquet"
+    diagnostics = national.build_flow_partition_to_parquet(
+        chunks, _fixture_crosswalk(), _fixture_car_share(), analysis_year=2022,
+        lodes_source_year=2022, work_state="mi", output_path=output,
+        extra_metadata={"lodes_source_paths": "fixture"}, bucket_count=2,
+    )
+
+    actual = pd.read_parquet(output)
+    compare_columns = [
+        "home_tract", "work_tract", "workers", "home_lat", "home_lon",
+        "work_lat", "work_lon", "route_id", "lodes_source_paths",
+    ]
+    pd.testing.assert_frame_equal(
+        actual[compare_columns].sort_values("route_id").reset_index(drop=True),
+        expected.assign(lodes_source_paths="fixture")[compare_columns]
+        .sort_values("route_id").reset_index(drop=True),
+    )
+    assert diagnostics.loc[0, "input_worker_weight"] == 6

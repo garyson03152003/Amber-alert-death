@@ -31,6 +31,9 @@ from build_route_pilot_network import (
 )
 from config import ROUTE_PILOT_CACHE
 
+DEFAULT_OSRM_IMAGE = OSRM_IMAGE
+DEFAULT_OSM_MERGE_IMAGE = OSM_MERGE_IMAGE
+
 DEFAULT_YEAR = 2022
 MANIFEST_SCHEMA_VERSION = "route_national.network.v1"
 NATIONAL_STATES: tuple[str, ...] = (
@@ -74,7 +77,8 @@ def _geofabrik_url(state: str, year: int) -> str:
 
 
 def build_network_manifest(
-    source_records: Sequence[Mapping[str, object]], *, network_year: int, network_id: str | None = None
+    source_records: Sequence[Mapping[str, object]], *, network_year: int, network_id: str | None = None,
+    osrm_image: str | None = None, merge_image: str | None = None,
 ) -> dict[str, object]:
     """Return a deterministic, provenance-rich national network manifest."""
     year = int(network_year)
@@ -87,10 +91,12 @@ def build_network_manifest(
         record.setdefault("url", _geofabrik_url(state, year))
         records.append(record)
     records.sort(key=lambda row: (str(row["state"]), str(row.get("path", ""))))
+    selected_osrm_image = str(osrm_image or OSRM_IMAGE)
+    selected_merge_image = str(merge_image or OSM_MERGE_IMAGE)
     if network_id is None:
         identity = "|".join(
             f"{row['state']}:{row.get('sha256', '')}" for row in records
-        ) + f"|{OSRM_PROFILE}|{OSRM_ALGORITHM}|{OSRM_IMAGE}|{OSM_MERGE_IMAGE}|{year}"
+        ) + f"|{OSRM_PROFILE}|{OSRM_ALGORITHM}|{selected_osrm_image}|{selected_merge_image}|{year}"
         network_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     if not str(network_id).strip():
         raise ValueError("network_id must not be empty")
@@ -104,8 +110,8 @@ def build_network_manifest(
         "sources": records,
         "osrm_profile": OSRM_PROFILE,
         "osrm_algorithm": OSRM_ALGORITHM,
-        "osrm_image": OSRM_IMAGE,
-        "merge_image": OSM_MERGE_IMAGE,
+        "osrm_image": selected_osrm_image,
+        "merge_image": selected_merge_image,
         "attribution": "© OpenStreetMap contributors",
         "license": "ODbL-1.0",
     }
@@ -182,13 +188,25 @@ def _outputs_valid(network_dir: Path, outputs: object) -> bool:
 
 
 def prepare_national_osrm_network(
-    states: Sequence[str], network_year: int, cache_dir: Path, docker_runner: Callable, *, allow_partial: bool = False
+    states: Sequence[str], network_year: int, cache_dir: Path, docker_runner: Callable, *, allow_partial: bool = False,
+    osrm_image: str | None = None, merge_image: str | None = None, use_host_osmium: bool = False,
+    osrm_threads: int = 4,
 ) -> dict[str, object]:
     """Download all requested extracts, merge them, and prepare the OSRM graph."""
     ordered_states = _validate_states(states)
     if not allow_partial and set(ordered_states) != set(NATIONAL_STATES):
         raise ValueError("national graph requires all 51 states; pass allow_partial=True for a scoped graph")
     year = int(network_year)
+    if int(osrm_threads) <= 0:
+        raise ValueError("osrm_threads must be positive")
+    selected_osrm_image = str(osrm_image or os.environ.get("AMBER_ALERT_OSRM_IMAGE") or OSRM_IMAGE)
+    selected_merge_image = str(merge_image or os.environ.get("AMBER_ALERT_OSM_MERGE_IMAGE") or OSM_MERGE_IMAGE)
+    osmium_binary = None
+    if use_host_osmium:
+        osmium_binary = shutil.which("osmium")
+        if not osmium_binary:
+            raise RuntimeError("host osmium requested but no `osmium` executable is available on PATH")
+        selected_merge_image = f"host-osmium:{osmium_binary}"
     root = Path(cache_dir)
     input_dir = root / "osm" / str(year)
     network_dir = root / "network" / str(year)
@@ -222,12 +240,17 @@ def prepare_national_osrm_network(
     merged_name = f"national-network-{year}.osm.pbf"
     base = f"/data/national-network-{year}.osrm"
     mount = f"{network_dir.resolve()}:/data"
+    merge_command = (
+        [osmium_binary, "merge", "--overwrite", *[str(p.resolve()) for p in staged], "-o", str((network_dir / merged_name).resolve())]
+        if use_host_osmium
+        else ["docker", "run", "--rm", "-v", mount, selected_merge_image, "osmium", "merge", "--overwrite", *[f"/data/inputs/{p.name}" for p in staged], "-o", f"/data/{merged_name}"]
+    )
     commands = [
-        ["docker", "run", "--rm", "-v", mount, OSM_MERGE_IMAGE, "osmium", "merge", "--overwrite", *[f"/data/inputs/{p.name}" for p in staged], "-o", f"/data/{merged_name}"],
-        ["docker", "run", "--rm", "-v", mount, OSRM_IMAGE, "osrm-extract", "-p", "/opt/car.lua", f"/data/{merged_name}"],
-        ["docker", "run", "--rm", "-v", mount, OSRM_IMAGE, "osrm-partition", base],
-        ["docker", "run", "--rm", "-v", mount, OSRM_IMAGE, "osrm-customize", base],
-        ["docker", "run", "--rm", "-d", "-p", "5000:5000", "-v", mount, OSRM_IMAGE, "osrm-routed", "--algorithm", OSRM_ALGORITHM, base],
+        merge_command,
+        ["docker", "run", "--rm", "-v", mount, selected_osrm_image, "osrm-extract", "-t", str(int(osrm_threads)), "-p", "/opt/car.lua", f"/data/{merged_name}"],
+        ["docker", "run", "--rm", "-v", mount, selected_osrm_image, "osrm-partition", base],
+        ["docker", "run", "--rm", "-v", mount, selected_osrm_image, "osrm-customize", base],
+        ["docker", "run", "--rm", "-d", "-p", "5000:5000", "-v", mount, selected_osrm_image, "osrm-routed", "--algorithm", OSRM_ALGORITHM, base],
     ]
     executed = []
     stage_path = network_dir / ".stage_manifest.json"
@@ -239,7 +262,7 @@ def prepare_national_osrm_network(
             if not isinstance(prior, Mapping):
                 raise ValueError("stage manifest root must be an object")
             candidate = prior.get("completed", {})
-            if prior.get("network_id") == build_network_manifest(records, network_year=year)["manifest_id"] and prior.get("commands") == command_ids and isinstance(candidate, dict):
+            if prior.get("network_id") == build_network_manifest(records, network_year=year, osrm_image=selected_osrm_image, merge_image=selected_merge_image)["manifest_id"] and prior.get("commands") == command_ids and isinstance(candidate, dict):
                 completed = candidate
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             completed = {}
@@ -258,8 +281,8 @@ def prepare_national_osrm_network(
         if index < 4 and not outputs:
             raise RuntimeError(f"Docker stage {index} completed without producing a verifiable output")
         completed[str(index)] = {"id": command_ids[index], "outputs": outputs}
-        _atomic_write_json({"network_id": build_network_manifest(records, network_year=year)["manifest_id"], "commands": command_ids, "completed": completed}, stage_path)
-    manifest = build_network_manifest(records, network_year=year)
+        _atomic_write_json({"network_id": build_network_manifest(records, network_year=year, osrm_image=selected_osrm_image, merge_image=selected_merge_image)["manifest_id"], "commands": command_ids, "completed": completed}, stage_path)
+    manifest = build_network_manifest(records, network_year=year, osrm_image=selected_osrm_image, merge_image=selected_merge_image)
     manifest.update({"created_at_utc": datetime.now(timezone.utc).isoformat(), "merged_pbf_path": str(network_dir / merged_name), "commands": commands})
     manifest_path = network_dir / "network_manifest.json"
     _atomic_write_json(manifest, manifest_path)
@@ -271,5 +294,18 @@ if __name__ == "__main__":
     parser.add_argument("--year", type=int, default=DEFAULT_YEAR)
     parser.add_argument("--states", nargs="+", default=list(NATIONAL_STATES))
     parser.add_argument("--cache-dir", type=Path, default=ROUTE_PILOT_CACHE)
+    parser.add_argument("--osrm-image", default=None, help="override the OSRM container image")
+    parser.add_argument("--merge-image", default=None, help="override the osmium merge container image")
+    parser.add_argument("--use-host-osmium", action="store_true", help="run the local osmium binary for the merge stage")
+    parser.add_argument("--osrm-threads", type=int, default=4, help="threads for OSRM extraction; lower values reduce RAM use")
     args = parser.parse_args()
-    prepare_national_osrm_network(args.states, args.year, args.cache_dir, _docker_runner)
+    prepare_national_osrm_network(
+        args.states,
+        args.year,
+        args.cache_dir,
+        _docker_runner,
+        osrm_image=args.osrm_image,
+        merge_image=args.merge_image,
+        use_host_osmium=args.use_host_osmium,
+        osrm_threads=args.osrm_threads,
+    )

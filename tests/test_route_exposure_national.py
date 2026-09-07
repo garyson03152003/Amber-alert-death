@@ -61,6 +61,10 @@ def test_national_exposure_preserves_origin_components_and_vintages():
     assert row["own_affected_car_miles"] == pytest.approx(16.0)
     assert row["cross_affected_car_miles"] == pytest.approx(15.0)
     assert row["pass_through_affected_car_miles"] == pytest.approx(16.0)
+    assert row["affected_driver_miles"] == pytest.approx(47.0)
+    assert row["affected_driver_mile_share"] == pytest.approx(
+        row["affected_driver_miles"] / row["total_commuter_car_miles"]
+    )
     assert row["lodes_source_year"] == 2021
     assert row["acs_car_share_vintage"] == "2019-2023"
     assert row["analysis_year"] == 2022
@@ -758,3 +762,24 @@ def test_established_model_runner_passes_controls_and_specification_ladder(monke
     assert all("is_holiday" in terms and "fatals_tm1" in terms for _, terms, _ in calls)
     assert set(result["term"]) == set(national.ROUTE_TREATMENTS)
     assert set(result["other_wea_control"]) == {"binary", "dose"}
+
+
+def test_run_models_accepts_total_driver_mile_treatment():
+    national = _national_module()
+    calls = []
+
+    def runner(panel, *, scope, treatment_columns, **_):
+        calls.append((scope, tuple(treatment_columns)))
+        return pd.DataFrame({"term": list(treatment_columns), "status": ["ok"]})
+
+    output = national._run_models(
+        runner,
+        pd.DataFrame({"fips": ["55001"], "date": [pd.Timestamp("2022-01-02")]}),
+        scope="pooled",
+        bootstrap_reps=1,
+        labels={"treatment_spec": "total_driver_mile_share"},
+        treatment_columns=national.ROUTE_TOTAL_TREATMENTS,
+    )
+
+    assert calls == [("pooled", ("affected_driver_mile_share_10pp",))]
+    assert output["treatment_spec"].eq("total_driver_mile_share").all()

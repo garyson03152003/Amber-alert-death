@@ -155,6 +155,10 @@ def build_alert_date_exposures(
             "outcome_fips": county, "alert_date": date,
             "total_commuter_car_miles": total,
             "affected_commuter_car_miles": affected_total,
+            # Combined exposure across own-county, cross-county, and
+            # pass-through traffic.  Keep the existing component columns so
+            # analyses can audit the additivity of the aggregate.
+            "affected_driver_miles": affected_total,
             "own_affected_car_miles": float(by_class.get("own", 0.0)),
             "cross_affected_car_miles": float(by_class.get("cross", 0.0)),
             "pass_through_affected_car_miles": float(by_class.get("pass_through", 0.0)),
@@ -162,6 +166,10 @@ def build_alert_date_exposures(
             "cross_commuter_car_miles": float(county_rows.loc[county_rows["origin_class"].eq("cross"), "commuter_car_miles"].sum()),
             "pass_through_commuter_car_miles": float(county_rows.loc[county_rows["origin_class"].eq("pass_through"), "commuter_car_miles"].sum()),
             "affected_route_share": affected_total / total,
+            # This is the same ratio as affected_route_share, named
+            # explicitly for the driver-mile interpretation used by the
+            # aggregate route specification.
+            "affected_driver_mile_share": affected_total / total,
             "own_affected_share": float(by_class.get("own", 0.0)) / total,
             "cross_affected_share": float(by_class.get("cross", 0.0)) / total,
             "pass_through_affected_share": float(by_class.get("pass_through", 0.0)) / total,
@@ -173,6 +181,7 @@ def build_alert_date_exposures(
             **metadata,
         }
         row["affected_commuter_car_miles_per_10000"] = affected_total / total * 10_000
+        row["affected_driver_mile_share_10pp"] = row["affected_driver_mile_share"] / 0.10
         rows.append(row)
     return pd.DataFrame(rows).sort_values(["outcome_fips", "alert_date"]).reset_index(drop=True)
 

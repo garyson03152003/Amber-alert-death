@@ -14,8 +14,10 @@ Outcomes:
   - sober_fatals_per_100k  : (total - drunk) / 100k pop
 
 Treatment:
-  night_alert — county received ≥1 AMBER WEA nighttime alert
-                (Alert+Update msgType only; 22:00–05:59 local)
+  night_alert — county received ≥1 verified AMBER WEA nighttime alert
+                (Alert+Update messages; CMAS-blocked rows excluded;
+                 explicitly statewide alerts expanded to counties;
+                 22:00–05:59 local, evening exposure assigned to next day)
 
 Output:
   output/tables/fars_national_main.csv
@@ -34,6 +36,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytz
+
+sys.path.insert(0, str(Path(__file__).parent))
+import run_state_dot_analysis_fixed as base
 
 try:
     import pyfixest as pf
@@ -201,64 +206,22 @@ def run_twfe(sub: pd.DataFrame, outcome_col: str, label: str,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1. Load AMBER alerts → night_alert treatment
+# 1. Load verified AMBER WEA alerts → night_alert treatment
 # ═══════════════════════════════════════════════════════════════════════════════
-log.info("=== Loading AMBER alerts ===")
-ALERT_PATH = DATA_RAW / "amber" / "foia" / "openfema_ipaws_alerts_2013_2024.csv"
-alerts = pd.read_csv(ALERT_PATH)
-log.info("  Total rows: %d  Alert+Update: %d  Cancel: %d",
-         len(alerts),
-         (alerts["msg_type"].isin(["Alert","Update"])).sum(),
-         (alerts["msg_type"] == "Cancel").sum())
+log.info("=== Loading verified AMBER WEA alerts ===")
+alerts_county = base.load_verified_alerts(window="night", detail=True, night_start=22)
+log.info("  Verified county-level alert rows: %d  counties: %d",
+         len(alerts_county), alerts_county["fips"].nunique())
 
-alerts = alerts[alerts["msg_type"].isin(["Alert", "Update"])].copy()
-
-alerts["fips"]       = alerts["fips"].astype(str).str.zfill(5)
-alerts["state_fips"] = alerts["fips"].str[:2]
-alerts["is_state_fips"] = alerts["fips"].str[2:] == "000"
-
-def _alert_type(g):
-    s = g["is_state_fips"].any(); c = (~g["is_state_fips"]).any()
-    return "A" if (s and not c) else ("B" if (s and c) else "C")
-
-_atype = alerts.groupby("alert_id").apply(_alert_type).rename("alert_type")
-alerts  = alerts.join(_atype, on="alert_id")
-n_A = alerts.loc[alerts["alert_type"] == "A", "alert_id"].nunique()
-n_C = alerts.loc[alerts["alert_type"] == "C", "alert_id"].nunique()
-log.info("  Alert types: A(state-only)=%d  C(county)=%d  (keeping C+B county rows)", n_A, n_C)
-
-alerts_county = alerts[~alerts["is_state_fips"]].copy()
-
-# Timezone conversion
-alerts_county["tz_name"] = (
-    alerts_county["fips"].map(COUNTY_TIMEZONE_OVERRIDE)
-    .fillna(alerts_county["state_fips"].map(STATE_TIMEZONE))
-    .fillna("America/Chicago")
-)
-alerts_county["sent_utc"] = pd.to_datetime(alerts_county["sent_utc"], utc=True)
-alerts_county["hour_local"] = 0
-alerts_county["sent_local"]  = pd.NaT
-utc_series = alerts_county["sent_utc"]
-for tz_name, idx in alerts_county.groupby("tz_name").groups.items():
-    tz    = pytz.timezone(tz_name)
-    local = utc_series.loc[idx].dt.tz_convert(tz)
-    alerts_county.loc[idx, "hour_local"] = local.dt.hour.values
-    alerts_county.loc[idx, "sent_local"] = local.dt.tz_localize(None).values
-
-alerts_county["is_night"] = (
-    (alerts_county["hour_local"] >= 22) | (alerts_county["hour_local"] < 6)
-)
-alerts_county["alert_date"] = pd.to_datetime(alerts_county["sent_local"]).dt.normalize()
-alerts_county["effective_crash_date"] = np.where(
-    alerts_county["hour_local"] >= 22,
-    alerts_county["alert_date"] + pd.Timedelta(days=1),
-    alerts_county["alert_date"],
-)
-alerts_county["effective_crash_date"] = pd.to_datetime(alerts_county["effective_crash_date"])
+# The shared loader already applies the CMAS/blockchannel audit, expands
+# explicitly statewide alerts to the outcome-compatible county universe, uses
+# county-level DST-aware time zones, and assigns evening alerts to next-day
+# crash exposure.  Keep the 22:00--05:59 definition for continuity with the
+# original national benchmark.
 
 # Night alerts: county × crash_date (any window)
 night_alerts = (
-    alerts_county[alerts_county["is_night"]]
+    alerts_county
     .groupby(["fips", "effective_crash_date"])
     .size().reset_index(name="n_alerts")
 )
@@ -268,14 +231,14 @@ log.info("  Night-alert county-crash_dates: %d  (%d unique counties)",
 
 # Late-night only (0–5am) alerts
 latenight_alerts = (
-    alerts_county[alerts_county["is_night"] & (alerts_county["hour_local"] < 6)]
+    alerts_county[alerts_county["hour_local"] < 6]
     .groupby(["fips", "effective_crash_date"])
     .size().reset_index(name="n_late")
 )
 latenight_alerts["latenight_alert"] = np.int8(1)
 log.info("  Late-night (0–5am) county-crash_dates: %d", len(latenight_alerts))
 
-del alerts, alerts_county, _atype
+del alerts_county
 gc.collect()
 
 

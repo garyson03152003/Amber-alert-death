@@ -44,12 +44,18 @@ ROUTE_TREATMENTS = (
     "cross_affected_share",
     "pass_through_affected_share",
 )
+# The total affected driver-mile share is the sum of the three mutually
+# exclusive origin components.  It must therefore be estimated in a separate
+# specification rather than entered jointly with them.
+ROUTE_TOTAL_TREATMENTS = ("affected_driver_mile_share_10pp",)
 ROUTE_ZERO_COLUMNS = (
     "affected_commuter_car_miles",
     "own_affected_car_miles",
     "cross_affected_car_miles",
     "pass_through_affected_car_miles",
     "affected_route_share",
+    "affected_driver_mile_share",
+    "affected_driver_mile_share_10pp",
     *ROUTE_TREATMENTS,
     "affected_commuter_car_miles_per_10000",
 )
@@ -1156,11 +1162,12 @@ def _run_models(
     scope: str,
     bootstrap_reps: int,
     labels: Mapping[str, object],
+    treatment_columns: Sequence[str] = ROUTE_TREATMENTS,
 ) -> pd.DataFrame:
     result = runner(
         panel,
         scope=scope,
-        treatment_columns=ROUTE_TREATMENTS,
+        treatment_columns=treatment_columns,
         bootstrap_reps=bootstrap_reps,
     )
     if not isinstance(result, pd.DataFrame):
@@ -2571,51 +2578,75 @@ def run_national_route_analysis(args: argparse.Namespace) -> pd.DataFrame:
     bootstrap_reps = int(getattr(args, "bootstrap_reps", 9_999))
     results: list[pd.DataFrame] = []
 
+    def append_model_ladder(
+        subset: pd.DataFrame,
+        *,
+        scope: str,
+        labels: Mapping[str, object],
+    ) -> None:
+        """Run the component and total driver-mile specifications separately."""
+        for treatment_columns, treatment_spec in (
+            (ROUTE_TREATMENTS, "origin_components"),
+            (ROUTE_TOTAL_TREATMENTS, "total_driver_mile_share"),
+        ):
+            append_labels = {**labels, "treatment_spec": treatment_spec}
+            results.append(
+                _run_models(
+                    runner,
+                    subset,
+                    scope=scope,
+                    bootstrap_reps=bootstrap_reps,
+                    labels=append_labels,
+                    treatment_columns=treatment_columns,
+                )
+            )
+
     for year, subset in estimation_panel.groupby("analysis_year", sort=True):
-        results.append(_run_models(
-            runner, subset, scope="year", bootstrap_reps=bootstrap_reps,
+        append_model_ladder(
+            subset,
+            scope="year",
             labels={
                 **_provenance_labels(subset),
                 "analysis_year": int(year),
             },
-        ))
+        )
     vintage_columns = ["lodes_source_years", "acs_car_share_vintages"]
     for keys, subset in estimation_panel.groupby(vintage_columns, sort=True, dropna=False):
-        results.append(_run_models(
-            runner, subset, scope="vintage", bootstrap_reps=bootstrap_reps,
+        append_model_ladder(
+            subset,
+            scope="vintage",
             labels={
                 **_provenance_labels(subset),
                 "analysis_year": ",".join(map(str, sorted(subset["analysis_year"].unique()))),
                 "lodes_source_years": keys[0],
                 "acs_car_share_vintages": keys[1],
             },
-        ))
+        )
     for partition_id, partition_panel in partition_panel_frames:
         partition_sample = partition_panel.loc[
             partition_panel["route_coverage_status"].eq(ROUTE_COVERAGE_INCLUDED)
         ].copy()
         if partition_sample.empty:
             continue
-        results.append(_run_models(
-            runner,
+        append_model_ladder(
             partition_sample,
             scope="partition",
-            bootstrap_reps=bootstrap_reps,
             labels={
                 **_provenance_labels(partition_sample),
                 "analysis_year": int(partition_sample["analysis_year"].iloc[0]),
                 "source_partition_id": partition_id,
             },
-        ))
-    results.append(_run_models(
-        runner, estimation_panel, scope="pooled", bootstrap_reps=bootstrap_reps,
+        )
+    append_model_ladder(
+        estimation_panel,
+        scope="pooled",
         labels={
             **_provenance_labels(estimation_panel),
             "analysis_year": "all",
             "lodes_source_years": ",".join(map(str, sorted(manifest["lodes_source_year"].unique()))),
             "acs_car_share_vintages": ",".join(sorted(manifest["acs_car_share_vintage"].unique())),
         },
-    ))
+    )
     output = pd.concat(results, ignore_index=True)
 
     output_dir = getattr(args, "output_dir", None)

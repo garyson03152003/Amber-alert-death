@@ -202,6 +202,8 @@ def load_county_boundaries(path: Path) -> pd.DataFrame:
         frame = pd.read_parquet(path)
         crs_name = frame.attrs.get("crs")
         if not crs_name:
+            crs_name = _sidecar_crs(path)
+        if not crs_name:
             raise ValueError(
                 f"parquet county boundaries at {path} require CRS metadata; "
                 "use EPSG:4326/OGC:CRS84 longitude-latitude coordinates"
@@ -210,7 +212,10 @@ def load_county_boundaries(path: Path) -> pd.DataFrame:
         with path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
         if payload.get("type") == "FeatureCollection":
-            crs_name = str(((payload.get("crs") or {}).get("properties") or {}).get("name") or "CRS84")
+            crs_name = ((payload.get("crs") or {}).get("properties") or {}).get("name")
+            if not crs_name:
+                crs_name = _sidecar_crs(path)
+            crs_name = str(crs_name or "OGC:CRS84")
             rows = []
             for feature in payload.get("features", []):
                 props = dict(feature.get("properties") or {})
@@ -264,6 +269,17 @@ def load_county_boundaries(path: Path) -> pd.DataFrame:
     out = out.sort_values("county_fips").reset_index(drop=True)
     out.attrs["source_crs"] = str(crs_name)
     return out
+
+
+def _sidecar_crs(path: Path) -> str | None:
+    """Read CRS from the adjacent provenance sidecar when formats omit inline CRS."""
+    sidecar = Path(path).with_name(Path(path).name + ".manifest.json")
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    value = payload.get("crs") if isinstance(payload, dict) else None
+    return str(value).strip() if value else None
 
 
 def _derive_route_id(row: pd.Series) -> str:
